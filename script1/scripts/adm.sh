@@ -75,36 +75,175 @@ run_cmd() {
 ###############################################################################
 # Perfis de compilação
 ###############################################################################
+setup_profiles() {
+  # Perfil atual (glibc | musl | aggressive)
+  ADM_PROFILE="${ADM_PROFILE:-glibc}"
 
-setup_profile() {
+  #############################################################################
+  # Configurações comuns
+  #############################################################################
+
+  # Arquitetura alvo (pode ser sobrescrita via ADM_TARGET_ARCH)
+  ADM_TARGET_ARCH="${ADM_TARGET_ARCH:-x86_64}"
+
+  # Tipo de libc (derivado do perfil, mas pode ser sobrescrito)
   case "${ADM_PROFILE}" in
-    glibc)
-      TARGET_TRIPLET="${TARGET_TRIPLET:-x86_64-linux-gnu}"
-      CFLAGS_COMMON="-O2 -pipe"
+    glibc|aggressive)
+      ADM_TARGET_LIBC="${ADM_TARGET_LIBC:-glibc}"
       ;;
     musl)
-      TARGET_TRIPLET="${TARGET_TRIPLET:-x86_64-linux-musl}"
-      CFLAGS_COMMON="-O2 -pipe"
-      ;;
-    aggressive)
-      TARGET_TRIPLET="${TARGET_TRIPLET:-x86_64-linux-gnu}"
-      CFLAGS_COMMON="-O3 -march=native -mtune=native -pipe -fomit-frame-pointer -flto"
+      ADM_TARGET_LIBC="${ADM_TARGET_LIBC:-musl}"
       ;;
     *)
-      log_error "Perfil desconhecido: ${ADM_PROFILE}"
+      echo "[setup_profiles] Perfil desconhecido: ${ADM_PROFILE}" >&2
       exit 1
       ;;
   esac
 
-  export TARGET_TRIPLET
-  export CC="${CC:-${TARGET_TRIPLET}-gcc}"
-  export CXX="${CXX:-${TARGET_TRIPLET}-g++}"
-  export AR="${AR:-${TARGET_TRIPLET}-ar}"
-  export RANLIB="${RANLIB:-${TARGET_TRIPLET}-ranlib}"
+  # Triplet padrão (pode ser sobrescrito externamente)
+  if [[ -z "${TARGET_TRIPLET:-}" ]]; then
+    case "${ADM_TARGET_ARCH}-${ADM_TARGET_LIBC}" in
+      x86_64-glibc) TARGET_TRIPLET="x86_64-linux-gnu"  ;;
+      x86_64-musl)  TARGET_TRIPLET="x86_64-linux-musl" ;;
+      aarch64-glibc) TARGET_TRIPLET="aarch64-linux-gnu" ;;
+      aarch64-musl)  TARGET_TRIPLET="aarch64-linux-musl" ;;
+      *)
+        # fallback genérico
+        TARGET_TRIPLET="${ADM_TARGET_ARCH}-linux-${ADM_TARGET_LIBC}"
+        ;;
+    esac
+  fi
 
-  export CFLAGS="${CFLAGS:-${CFLAGS_COMMON}}"
-  export CXXFLAGS="${CXXFLAGS:-${CFLAGS_COMMON}}"
-  export LDFLAGS="${LDFLAGS:-}"
+  # Diretório raiz de instalação (rootfs) e sysroot
+  ADM_ROOT="${ADM_ROOT:-/opt/adm}"
+  ADM_ROOTFS="${ADM_ROOTFS:-${ADM_ROOT}/rootfs}"
+  ADM_SYSROOT="${ADM_SYSROOT:-${ADM_ROOTFS}}"
+
+  # Prefixo padrão para o toolchain cross (se houver)
+  # Ex.: /opt/cross/x86_64-linux-gnu/bin/x86_64-linux-gnu-gcc
+  ADM_TOOLCHAIN_PREFIX="${ADM_TOOLCHAIN_PREFIX:-/opt/cross/${TARGET_TRIPLET}}"
+
+  # Diretórios padrão de include e libs dentro do sysroot
+  SYS_INC_DIR="${ADM_SYSROOT}/usr/include"
+  SYS_LIB_DIR="${ADM_SYSROOT}/usr/lib"
+  SYS_LIB64_DIR="${ADM_SYSROOT}/usr/lib64"
+
+  # flags comuns a todos os perfis
+  CFLAGS_COMMON="-pipe"
+  CXXFLAGS_COMMON="-pipe"
+  CPPFLAGS_COMMON="-I${SYS_INC_DIR}"
+  LDFLAGS_COMMON="-L${SYS_LIB_DIR} -L${SYS_LIB64_DIR}"
+
+  #############################################################################
+  # Ajuste de flags por perfil
+  #############################################################################
+  case "${ADM_PROFILE}" in
+    glibc)
+      CFLAGS_OPT="-O2"
+      CXXFLAGS_OPT="-O2"
+      LDFLAGS_OPT="-Wl,-O1,-z,relro,-z,now -Wl,--as-needed"
+      ;;
+
+    musl)
+      CFLAGS_OPT="-O2 -fstack-protector-strong"
+      CXXFLAGS_OPT="-O2 -fstack-protector-strong"
+      # opcionalmente, mais estático:
+      # LDFLAGS_OPT="-static -Wl,-O1,-z,relro,-z,now -Wl,--as-needed"
+      LDFLAGS_OPT="-Wl,-O1,-z,relro,-z,now -Wl,--as-needed"
+      ;;
+
+    aggressive)
+      CFLAGS_OPT="-O3 -march=native -mtune=native -fomit-frame-pointer -flto=auto"
+      CXXFLAGS_OPT="-O3 -march=native -mtune=native -fomit-frame-pointer -flto=auto"
+      LDFLAGS_OPT="-flto=auto -Wl,-O2,-z,relro,-z,now -Wl,--as-needed"
+      ;;
+  esac
+
+  #############################################################################
+  # Composição final das flags
+  #############################################################################
+  export TARGET_TRIPLET
+
+  export CFLAGS="${CFLAGS:-${CFLAGS_COMMON} ${CFLAGS_OPT}}"
+  export CXXFLAGS="${CXXFLAGS:-${CXXFLAGS_COMMON} ${CXXFLAGS_OPT}}"
+  export CPPFLAGS="${CPPFLAGS:-${CPPFLAGS_COMMON}}"
+  export LDFLAGS="${LDFLAGS:-${LDFLAGS_COMMON} ${LDFLAGS_OPT}}"
+
+  #############################################################################
+  # Toolchain (cross ou native) – pode ser sobrescrito fora
+  #############################################################################
+  # Se ADM_USE_NATIVE=1, usa toolchain nativo ao invés do prefixado
+  ADM_USE_NATIVE="${ADM_USE_NATIVE:-0}"
+
+  if [[ "${ADM_USE_NATIVE}" = "1" ]]; then
+    export CC="${CC:-gcc}"
+    export CXX="${CXX:-g++}"
+    export AR="${AR:-ar}"
+    export RANLIB="${RANLIB:-ranlib}"
+    export LD="${LD:-ld}"
+    export AS="${AS:-as}"
+    export STRIP="${STRIP:-strip}"
+  else
+    export CC="${CC:-${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-gcc}"
+    export CXX="${CXX:-${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-g++}"
+    export AR="${AR:-${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-ar}"
+    export RANLIB="${RANLIB:-${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-ranlib}"
+    export LD="${LD:-${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-ld}"
+    export AS="${AS:-${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-as}"
+    export STRIP="${STRIP:-${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-strip}"
+  fi
+
+  #############################################################################
+  # PKG-CONFIG
+  #############################################################################
+  # Para builds em sysroot, PKG_CONFIG_LIBDIR é mais seguro que PKG_CONFIG_PATH
+  export PKG_CONFIG="${PKG_CONFIG:-${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-pkg-config}"
+  if [[ ! -x "${PKG_CONFIG}" ]]; then
+    # fallback para pkg-config nativo
+    PKG_CONFIG="pkg-config"
+  fi
+  export PKG_CONFIG
+
+  export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR:-${SYS_LIB_DIR}/pkgconfig:${SYS_LIB64_DIR}/pkgconfig}"
+  export PKG_CONFIG_SYSROOT_DIR="${PKG_CONFIG_SYSROOT_DIR:-${ADM_SYSROOT}}"
+
+  #############################################################################
+  # PATH – garante que o toolchain esteja à frente
+  #############################################################################
+  if [[ "${ADM_USE_NATIVE}" = "1" ]]; then
+    :
+  else
+    case ":$PATH:" in
+      *:"${ADM_TOOLCHAIN_PREFIX}/bin":*)
+        ;;
+      *)
+        export PATH="${ADM_TOOLCHAIN_PREFIX}/bin:${PATH}"
+        ;;
+    esac
+  fi
+
+  #############################################################################
+  # Variáveis convenientes para scripts de configure/make
+  #############################################################################
+  # BUILD/HOST/TARGET: por padrão usamos o mesmo triplet (cross simples)
+  export BUILD_TRIPLET="${BUILD_TRIPLET:-${TARGET_TRIPLET}}"
+  export HOST_TRIPLET="${HOST_TRIPLET:-${TARGET_TRIPLET}}"
+
+  # Parâmetros comuns para ./configure
+  export ADM_CONFIGURE_ARGS_COMMON="
+    --host=${HOST_TRIPLET}
+    --build=${BUILD_TRIPLET}
+    --prefix=/usr
+    --sysconfdir=/etc
+    --localstatedir=/var
+  "
+
+  # Alguns projetos respeitam DESTDIR, outros usam SYSROOT; garantimos ambos
+  export DESTDIR="${DESTDIR:-}"
+  export SYSROOT="${ADM_SYSROOT}"
+
+  # Variáveis auxiliares que o seu framework pode usar
+  export ADM_PROFILE ADM_TARGET_ARCH ADM_TARGET_LIBC ADM_ROOT ADM_ROOTFS ADM_SYSROOT
 }
 
 ###############################################################################
