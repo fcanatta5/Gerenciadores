@@ -1,0 +1,38 @@
+Como usar (resumo)
+
+1. Instalar script:
+
+sudo mkdir -p /opt/adm
+sudo nano /opt/adm/adm   # cole o script
+sudo chmod +x /opt/adm/adm
+
+2. Configurar repositório git das receitas (opcional, mas recomendado):
+
+export ADM_GIT_REPO="https://github.com/SEU_USUARIO/SEU_REPO_ADM.git"
+sudo /opt/adm/adm update
+
+3. Criar uma receita de pacote (ex.: gzip):
+
+sudo mkdir -p /opt/adm/packages/core/gzip
+sudo nano /opt/adm/packages/core/gzip/gzip.sh
+# (cole o exemplo de receita adaptado)
+
+4. Build + install com deps:
+
+# Compilar com perfil glibc
+sudo /opt/adm/adm build core/gzip
+
+# Compilar com perfil aggressive
+sudo ADM_PROFILE=aggressive /opt/adm/adm build core/gzip
+
+5. Dry run (simulação completa, sem executar):
+
+sudo /opt/adm/adm --dry-run build core/gzip
+
+6. Uninstall com resolução reversa de dependências:
+
+sudo /opt/adm/adm uninstall core/gzip
+
+7. Rebuild world:
+
+sudo /opt/adm/adm rebuild world
