@@ -246,6 +246,108 @@ setup_profiles() {
   export ADM_PROFILE ADM_TARGET_ARCH ADM_TARGET_LIBC ADM_ROOT ADM_ROOTFS ADM_SYSROOT
 }
 
+is_git_url() {
+  # Detecta heurísticamente se a URL é de repositório git (github/gitlab/etc)
+  local url="$1"
+  case "$url" in
+    git://* | git+* | ssh://git@* | git@* )
+      return 0 ;;
+    https://*.git | http://*.git | *.git )
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+verify_checksum() {
+  # Verifica SHA256 ou MD5 (prioriza SHA256 se ambos fornecidos)
+  # Uso: verify_checksum <arquivo> <sha256> <md5>
+  local file="$1"
+  local sha256="${2:-}"
+  local md5="${3:-}"
+
+  if [[ ! -f "$file" ]]; then
+    log_error "Arquivo para verificação de checksum não existe: $file"
+    exit 1
+  fi
+
+  if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+    if [[ -n "$sha256" ]]; then
+      log_warn "[DRY-RUN] Verificar SHA256 de $file"
+    elif [[ -n "$md5" ]]; then
+      log_warn "[DRY-RUN] Verificar MD5 de $file"
+    else
+      log_warn "Nenhum checksum fornecido para $file (sem verificação)."
+    fi
+    return 0
+  fi
+
+  if [[ -n "$sha256" ]]; then
+    if ! echo "${sha256}  ${file}" | sha256sum -c -; then
+      log_error "Falha na verificação SHA256 para $file"
+      exit 1
+    fi
+    log_ok "SHA256 OK para $file"
+  elif [[ -n "$md5" ]]; then
+    if ! echo "${md5}  ${file}" | md5sum -c -; then
+      log_error "Falha na verificação MD5 para $file"
+      exit 1
+    fi
+    log_ok "MD5 OK para $file"
+  else
+    log_warn "Nenhum checksum fornecido para $file (sem verificação)."
+  fi
+}
+
+download_one_source() {
+  # Faz o download (se necessário) de uma única fonte.
+  # Uso: download_one_source <full-pkg-name> <url> <index> <sha256> <md5>
+  local full="$1"
+  local url="$2"
+  local idx="$3"
+  local sha256="$4"
+  local md5="$5"
+
+  mkdir -p "${ADM_CACHE_DIR}"
+
+  if is_git_url "$url"; then
+    # Para fontes git, apenas registramos (o clone será feito em extract_source)
+    log_info "Fonte git detectada (idx=${idx}) para ${full}: ${url}"
+    return 0
+  fi
+
+  # Fonte "arquivo" (http/https/ftp)
+  local tarball_basename
+  tarball_basename="$(basename "${url}")"
+  if [[ -z "$tarball_basename" || "$tarball_basename" = "." || "$tarball_basename" = "/" ]]; then
+    log_error "Não foi possível determinar nome de arquivo para URL: ${url}"
+    exit 1
+  fi
+
+  local tarball_path="${ADM_CACHE_DIR}/${tarball_basename}"
+
+  if [[ -f "$tarball_path" ]]; then
+    log_info "Tarball já em cache (idx=${idx}): ${tarball_path}"
+  else
+    log_info "Baixando (idx=${idx}) ${url} -> ${tarball_path}"
+    if command -v curl >/dev/null 2>&1; then
+      run_cmd "curl -fL '${url}' -o '${tarball_path}'"
+    elif command -v wget >/dev/null 2>&1; then
+      run_cmd "wget -c '${url}' -O '${tarball_path}'"
+    else
+      log_error "Nem curl nem wget encontrados para download."
+      exit 1
+    fi
+  fi
+
+  # Verificação inteligente de checksum (SHA256 ou MD5)
+  if [[ -n "$sha256" || -n "$md5" ]]; then
+    verify_checksum "${tarball_path}" "${sha256}" "${md5}"
+  else
+    log_warn "Nenhum checksum (SHA256/MD5) definido para ${tarball_basename}"
+  fi
+}
+
 ###############################################################################
 # Utilitários
 ###############################################################################
@@ -415,58 +517,137 @@ load_pkg_metadata() {
 
 fetch_source() {
   local full="$1"
-  local tarball_basename
-  tarball_basename="$(basename "${PKG_URL}")"
-  local tarball_path="${ADM_CACHE_DIR}/${tarball_basename}"
 
-  if [[ -f "$tarball_path" ]]; then
-    log_info "Tarball já em cache: $tarball_path"
+  # Lista de URLs:
+  # - se PKG_URLS (array) estiver definida, usa ela
+  # - senão, usa PKG_URL (string única)
+  local urls=()
+
+  if declare -p PKG_URLS >/dev/null 2>&1; then
+    # shellcheck disable=SC2154
+    urls=("${PKG_URLS[@]}")
+  elif [[ -n "${PKG_URL:-}" ]]; then
+    urls=("${PKG_URL}")
   else
-    log_info "Baixando ${PKG_URL} -> ${tarball_path}"
-    if command -v curl >/dev/null 2>&1; then
-      run_cmd "curl -L '${PKG_URL}' -o '${tarball_path}'"
-    elif command -v wget >/dev/null 2>&1; then
-      run_cmd "wget '${PKG_URL}' -O '${tarball_path}'"
-    else
-      log_error "Nem curl nem wget encontrados"
-      exit 1
-    fi
+    log_error "Nenhuma PKG_URL ou PKG_URLS definida para ${full}"
+    exit 1
   fi
 
-  if [[ -n "${PKG_SHA256:-}" ]]; then
-    log_info "Verificando SHA256..."
-    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      log_warn "DRY-RUN: pular verificação de checksum"
-    else
-      echo "${PKG_SHA256}  ${tarball_path}" | sha256sum -c -
-    fi
+  if [[ "${#urls[@]}" -eq 0 ]]; then
+    log_error "Lista de URLs está vazia para ${full}"
+    exit 1
   fi
+
+  # Arrays de checksums opcionais
+  local sha256s=()
+  local md5s=()
+
+  if declare -p PKG_SHA256S >/dev/null 2>&1; then
+    # shellcheck disable=SC2154
+    sha256s=("${PKG_SHA256S[@]}")
+  fi
+  if declare -p PKG_MD5S >/dev/null 2>&1; then
+    # shellcheck disable=SC2154
+    md5s=("${PKG_MD5S[@]}")
+  fi
+
+  for idx in "${!urls[@]}"; do
+    local url="${urls[$idx]}"
+    local sha256_for_this=""
+    local md5_for_this=""
+
+    # Se arrays de checksums existirem e tiverem tamanho compatível, usa por índice.
+    if [[ "${#sha256s[@]}" -gt "$idx" ]]; then
+      sha256_for_this="${sha256s[$idx]}"
+    elif [[ -n "${PKG_SHA256:-}" && "$idx" -eq 0 ]]; then
+      # Fallback: PKG_SHA256 simples para a primeira URL
+      sha256_for_this="${PKG_SHA256}"
+    fi
+
+    if [[ "${#md5s[@]}" -gt "$idx" ]]; then
+      md5_for_this="${md5s[$idx]}"
+    elif [[ -n "${PKG_MD5:-}" && "$idx" -eq 0 ]]; then
+      # Fallback: PKG_MD5 simples para a primeira URL
+      md5_for_this="${PKG_MD5}"
+    fi
+
+    download_one_source "$full" "$url" "$idx" "$sha256_for_this" "$md5_for_this"
+  done
 }
 
 extract_source() {
   local full="$1"
+
   local build_dir
   build_dir=$(pkg_build_dir "$full")
-  local tarball_basename
-  tarball_basename="$(basename "${PKG_URL}")"
-  local tarball_path="${ADM_CACHE_DIR}/${tarball_basename}"
+
+  # Determina URL principal (para extração)
+  local main_url=""
+  if [[ -n "${PKG_URL:-}" ]]; then
+    main_url="${PKG_URL}"
+  elif declare -p PKG_URLS >/dev/null 2>&1; then
+    # shellcheck disable=SC2154
+    if [[ "${#PKG_URLS[@]}" -gt 0 ]]; then
+      main_url="${PKG_URLS[0]}"
+    fi
+  fi
+
+  if [[ -z "$main_url" ]]; then
+    log_error "Nenhuma URL principal (PKG_URL ou PKG_URLS[0]) definida para extração de ${full}"
+    exit 1
+  fi
 
   if [[ -d "$build_dir" ]]; then
     log_info "Diretório de build já existe: $build_dir (retomando)"
+    return 0
+  fi
+
+  run_cmd "mkdir -p '${build_dir}'"
+
+  if is_git_url "$main_url"; then
+    # Clone direto para o diretório de build
+    log_info "Clonando fonte git principal para diretório de build: ${main_url}"
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+      log_warn "[DRY-RUN] git clone '${main_url}' '${build_dir}'"
+    else
+      git clone "${main_url}" "${build_dir}"
+      # Se o pacote definir PKG_GIT_REF, faz checkout específico (tag/commit/branch)
+      if [[ -n "${PKG_GIT_REF:-}" ]]; then
+        (
+          cd "${build_dir}"
+          git checkout "${PKG_GIT_REF}"
+        )
+      fi
+    fi
   else
-    run_cmd "mkdir -p '${build_dir}'"
+    # Fonte principal é tarball/arquivo
+    local tarball_basename
+    tarball_basename="$(basename "${main_url}")"
+    local tarball_path="${ADM_CACHE_DIR}/${tarball_basename}"
+
+    if [[ ! -f "$tarball_path" ]]; then
+      log_error "Tarball principal não encontrado no cache: ${tarball_path}"
+      log_error "Certifique-se de chamar fetch_source antes de extract_source."
+      exit 1
+    fi
+
     log_info "Extraindo ${tarball_path} para ${build_dir}"
+    # Usamos --strip-components=1 para a fonte principal (layout clássico)
     run_cmd "tar -xf '${tarball_path}' -C '${build_dir}' --strip-components=1"
   fi
 
+  # Aplicar patch opcional
   local patch_file
   patch_file=$(pkg_patch_path "$full")
   if [[ -f "$patch_file" ]]; then
     log_info "Aplicando patch: ${patch_file}"
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      log_warn "DRY-RUN: patch -p1 < '${patch_file}'"
+      log_warn "[DRY-RUN] (cd '${build_dir}' && patch -p1 < '${patch_file}')"
     else
-      (cd "$build_dir" && patch -p1 < "$patch_file")
+      (
+        cd "$build_dir"
+        patch -p1 < "$patch_file"
+      )
     fi
   fi
 }
@@ -530,42 +711,93 @@ build_and_install_pkg() {
 
   if [[ ! -f "${state_dir}/built" ]]; then
     log_info "Configurando e compilando ${PKG_NAME}-${PKG_VERSION}..."
+
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      log_warn "DRY-RUN: ./configure && make"
+      # Mostrar comandos que seriam executados
+      local cfg_preview=" ./configure"
+      if [[ -n "${ADM_CONFIGURE_ARGS_COMMON:-}" ]]; then
+        cfg_preview+=" ${ADM_CONFIGURE_ARGS_COMMON}"
+      else
+        cfg_preview+=" --host='${TARGET_TRIPLET}' --build='${TARGET_TRIPLET}' --prefix=/usr --sysconfdir=/etc --localstatedir=/var"
+      fi
+      if declare -p PKG_CONFIGURE_OPTS >/dev/null 2>&1; then
+        cfg_preview+=" ${PKG_CONFIGURE_OPTS[*]}"
+      fi
+      log_warn "[DRY-RUN] (cd '${build_dir}' &&${cfg_preview})"
+
+      local make_preview=" make -j'$(nproc)'"
+      if declare -p PKG_MAKE_OPTS >/dev/null 2>&1; then
+        make_preview+=" ${PKG_MAKE_OPTS[*]}"
+      fi
+      log_warn "[DRY-RUN] (cd '${build_dir}' &&${make_preview})"
     else
       (
         cd "$build_dir"
-        ./configure \
-          --host="${TARGET_TRIPLET}" \
-          --build="${TARGET_TRIPLET}" \
-          --prefix=/usr \
-          --sysconfdir=/etc \
-          --localstatedir=/var
-        make -j"$(nproc)"
+
+        # Monta ./configure com argumentos comuns + específicos
+        local cfg_args=()
+        if [[ -n "${ADM_CONFIGURE_ARGS_COMMON:-}" ]]; then
+          # shellcheck disable=SC2206
+          cfg_args=(${ADM_CONFIGURE_ARGS_COMMON})
+        else
+          cfg_args=(
+            "--host=${TARGET_TRIPLET}"
+            "--build=${TARGET_TRIPLET}"
+            "--prefix=/usr"
+            "--sysconfdir=/etc"
+            "--localstatedir=/var"
+          )
+        fi
+
+        if declare -p PKG_CONFIGURE_OPTS >/dev/null 2>&1; then
+          # shellcheck disable=SC2154
+          cfg_args+=("${PKG_CONFIGURE_OPTS[@]}")
+        fi
+
+        run_cmd ./configure "${cfg_args[@]}"
+
+        # Monta make com -j + PKG_MAKE_OPTS
+        local make_args=( "-j$(nproc)" )
+        if declare -p PKG_MAKE_OPTS >/dev/null 2>&1; then
+          # shellcheck disable=SC2154
+          make_args+=("${PKG_MAKE_OPTS[@]}")
+        fi
+
+        run_cmd make "${make_args[@]}"
       )
+      touch "${state_dir}/built"
     fi
-    [[ "${ADM_DRY_RUN}" = "1" ]] || touch "${state_dir}/built"
   else
     log_info "Já marcado como built; pulando passo de compilação"
   fi
 
   log_info "Instalando em DESTDIR: ${destdir}"
   if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-    log_warn "DRY-RUN: make DESTDIR='${destdir}' install"
+    local make_install_preview=" make DESTDIR='${destdir}' install"
+    if declare -p PKG_MAKE_INSTALL_OPTS >/dev/null 2>&1; then
+      # shellcheck disable=SC2154
+      make_install_preview=" make DESTDIR='${destdir}' ${PKG_MAKE_INSTALL_OPTS[*]} install"
+    fi
+    log_warn "[DRY-RUN] (cd '${build_dir}' &&${make_install_preview})"
   else
     (
       cd "$build_dir"
-      make DESTDIR="${destdir}" install
+      local mi_args=( "DESTDIR=${destdir}" )
+      if declare -p PKG_MAKE_INSTALL_OPTS >/dev/null 2>&1; then
+        # shellcheck disable=SC2154
+        mi_args+=("${PKG_MAKE_INSTALL_OPTS[@]}")
+      fi
+      run_cmd make "${mi_args[@]}" install
     )
   fi
 
   log_info "Executando strip em binários e libs..."
   if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-    log_warn "DRY-RUN: strip em arquivos ELF"
+    log_warn "[DRY-RUN] strip em arquivos ELF sob ${destdir}"
   else
     find "${destdir}" -type f -print0 | while IFS= read -r -d '' f; do
       if file "$f" | grep -q "ELF"; then
-        strip --strip-unneeded "$f" || true
+        "${STRIP:-strip}" --strip-unneeded "$f" 2>/dev/null || true
       fi
     done
   fi
@@ -575,21 +807,34 @@ build_and_install_pkg() {
   tarball=$(pkg_tarball_path "$full" "${PKG_VERSION}")
   log_info "Empacotando em ${tarball}"
   if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-    log_warn "DRY-RUN: tar -I 'zstd -19' -cf '${tarball}' -C '${destdir}' ."
+    log_warn "[DRY-RUN] tar -I 'zstd -19' -cf '${tarball}' -C '${destdir}' ."
   else
-    tar -I 'zstd -19' -cf "${tarball}" -C "${destdir}" .
+    run_cmd tar -I 'zstd -19' -cf "${tarball}" -C "${destdir}" .
   fi
 
   # Cópia para rootfs
   log_info "Instalando em rootfs: ${ADM_ROOTFS}"
   if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-    log_warn "DRY-RUN: rsync -a '${destdir}/' '${ADM_ROOTFS}/'"
+    log_warn "[DRY-RUN] rsync -a '${destdir}/' '${ADM_ROOTFS}/'"
   else
-    rsync -a "${destdir}/" "${ADM_ROOTFS}/"
+    run_cmd rsync -a "${destdir}/" "${ADM_ROOTFS}/"
   fi
 
   # Registro
   register_install "$full" "$destdir"
+
+  # Execução de comandos pós-instalação (dentro do rootfs)
+  if [[ -n "${PKG_POST_INSTALL_CMDS:-}" ]]; then
+    log_info "Executando PKG_POST_INSTALL_CMDS dentro de ${ADM_ROOTFS}"
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+      log_warn "[DRY-RUN] (cd '${ADM_ROOTFS}' && /bin/sh -c '${PKG_POST_INSTALL_CMDS}')"
+    else
+      (
+        cd "${ADM_ROOTFS}"
+        /bin/sh -c "${PKG_POST_INSTALL_CMDS}"
+      )
+    fi
+  fi
 
   # Post-install hook
   run_hook "$full" "post_install"
