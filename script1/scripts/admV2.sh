@@ -403,13 +403,7 @@ load_pkg_metadata() {
 is_git_url() {
   local url="$1"
   case "$url" in
-    git://* | git+* | ssh://git@* | git@* )
-      return 0 ;;
-    *.git | */*.git )
-      return 0 ;;
-    https://github.com/* | http://github.com/* )
-      return 0 ;;
-    https://gitlab.com/* | http://gitlab.com/* )
+    git://* | git+* | ssh://git@* | git@* | *.git )
       return 0 ;;
     *)
       return 1 ;;
