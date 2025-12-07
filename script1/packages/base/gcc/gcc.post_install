@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Hook post_install do GCC 15.2.0 para sanity-check completo
+
+set -euo pipefail
+
+: "${ADM_ROOT:=/opt/adm}"
+: "${ADM_ROOTFS:=/opt/adm/rootfs}"
+
+LOG_DIR="${ADM_ROOT}/log"
+mkdir -p "${LOG_DIR}"
+LOG_HOST="${LOG_DIR}/gcc-15.2.0-sanity.log"
+
+echo "==> [gcc.post_install] Iniciando sanity-check do GCC 15.2.0" | tee -a "${LOG_HOST}"
+echo "    ROOTFS: ${ADM_ROOTFS}" | tee -a "${LOG_HOST}"
+
+if ! command -v chroot >/dev/null 2>&1; then
+  echo "!! chroot não encontrado no host – não é possível rodar sanity-check dentro do rootfs." | tee -a "${LOG_HOST}"
+  echo "!! Prosseguindo sem sanity-check (considere instalar util-linux/mount para ter chroot)." | tee -a "${LOG_HOST}"
+  exit 0
+fi
+
+if [[ ! -d "${ADM_ROOTFS}" ]]; then
+  echo "!! ADM_ROOTFS (${ADM_ROOTFS}) não existe. Abortando sanity-check." | tee -a "${LOG_HOST}"
+  exit 1
+fi
+
+# Executa o sanity-check dentro do rootfs e captura o log
+chroot "${ADM_ROOTFS}" /bin/sh -c '
+set -e
+
+LOG="/var/log/gcc-15.2.0-sanity.log"
+mkdir -p /var/log
+
+{
+  echo "===== GCC 15.2.0 Sanity Check ====="
+  echo "Data: $(date)"
+  echo "Kernel / Arch: $(uname -srmo)"
+  echo "PATH: $PATH"
+  echo
+
+  echo "-- Compilando programa dummy com cc..."
+  echo "int main(){}" > dummy.c
+  cc dummy.c -v -Wl,--verbose &> dummy.log
+
+  echo
+  echo "-- Verificando interpretador dinâmico em a.out (readelf -l)..."
+  readelf -l a.out | grep ": /lib"
+
+  echo
+  echo "-- Verificando crt*.o usados..."
+  grep -E -o "/usr/lib.*/S?crt[1in].*succeeded" dummy.log
+
+  echo
+  echo "-- Verificando diretórios de include..."
+  grep -B4 "^ /usr/include" dummy.log
+
+  echo
+  echo "-- Verificando SEARCH_DIR do linker..."
+  grep "SEARCH.*/usr/lib" dummy.log | sed "s|; |\n|g"
+
+  echo
+  echo "-- Verificando libc usada..."
+  grep "/lib.*/libc.so.6 " dummy.log || {
+    echo "!! libc.so.6 não encontrada no log do linker (verifique configuração)" >&2
+    exit 1
+  }
+
+  echo
+  echo "-- Verificando dynamic linker (ld-linux*)..."
+  grep "found .*ld-linux" dummy.log || {
+    echo "!! dynamic linker ld-linux-* não encontrado (verifique configuração)" >&2
+    exit 1
+  }
+
+  echo
+  echo "-- Removendo arquivos temporários..."
+  rm -f a.out dummy.c dummy.log
+
+  echo
+  echo "===== Fim do sanity-check do GCC 15.2.0 ====="
+} | tee -a "$LOG"
+' | tee -a "${LOG_HOST}"
+
+echo "==> [gcc.post_install] Sanity-check do GCC 15.2.0 concluído." | tee -a "${LOG_HOST}"
