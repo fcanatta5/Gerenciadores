@@ -329,19 +329,35 @@ pkg_db_dir() {
 
 pkg_state_dir() {
   local full="$1"
-  echo "${ADM_STATE_DIR}/${full}"
+
+  # Garante valores razoáveis mesmo se ainda não tiver chamado setup_profiles
+  local profile="${ADM_PROFILE:-glibc}"
+  local triplet="${TARGET_TRIPLET:-native}"
+
+  # Mantém a estrutura categoria/pacote dentro de state
+  echo "${ADM_STATE_DIR}/${profile}/${triplet}/${full}"
 }
 
 pkg_build_dir() {
   local full="$1"
   local name="${full##*/}"
-  echo "${ADM_BUILD_ROOT}/${name}"
+
+  local profile="${ADM_PROFILE:-glibc}"
+  local triplet="${TARGET_TRIPLET:-native}"
+
+  # Diretório de build separado por perfil e triplet
+  echo "${ADM_BUILD_ROOT}/${profile}/${triplet}/${name}"
 }
 
 pkg_destdir() {
   local full="$1"
   local name="${full##*/}"
-  echo "${ADM_BUILD_ROOT}/dest/${name}"
+
+  local profile="${ADM_PROFILE:-glibc}"
+  local triplet="${TARGET_TRIPLET:-native}"
+
+  # DEST separado por perfil e triplet
+  echo "${ADM_BUILD_ROOT}/${profile}/${triplet}/dest/${name}"
 }
 
 pkg_tarball_path() {
