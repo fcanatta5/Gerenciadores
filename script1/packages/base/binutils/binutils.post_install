@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# Hook post_install do Binutils 2.45.1 – sanity-check inteligente (glibc / musl)
+
+set -euo pipefail
+
+: "${ADM_ROOT:=/opt/adm}"
+: "${ADM_ROOTFS:=/opt/adm/rootfs}"
+
+LOG_DIR="${ADM_ROOT}/log"
+mkdir -p "${LOG_DIR}"
+LOG_HOST="${LOG_DIR}/binutils-2.45.1-sanity.log"
+
+echo "==> [binutils.post_install] Iniciando sanity-check do Binutils 2.45.1" | tee -a "${LOG_HOST}"
+echo "    ROOTFS: ${ADM_ROOTFS}" | tee -a "${LOG_HOST}"
+
+if ! command -v chroot >/dev/null 2>&1; then
+  echo "!! chroot não encontrado no host – não é possível rodar sanity-check dentro do rootfs." | tee -a "${LOG_HOST}"
+  echo "!! Prosseguindo sem sanity-check (considere instalar util-linux/mount para ter chroot)." | tee -a "${LOG_HOST}"
+  exit 0
+fi
+
+if [[ ! -d "${ADM_ROOTFS}" ]]; then
+  echo "!! ADM_ROOTFS (${ADM_ROOTFS}) não existe. Abortando sanity-check." | tee -a "${LOG_HOST}"
+  exit 1
+fi
+
+###############################################################################
+# Detectar automaticamente se o rootfs usa glibc ou musl
+###############################################################################
+detect_libc_type() {
+  chroot "${ADM_ROOTFS}" /bin/sh -c '
+set -eu
+# 1) Se existir ldd, usar a saída dele
+if command -v ldd >/dev/null 2>&1; then
+  if ldd --version 2>&1 | grep -iq musl; then
+    echo musl
+  else
+    echo glibc
+  fi
+  exit 0
+fi
+
+# 2) Sem ldd: heurísticas por arquivos conhecidos
+if ls /lib/ld-musl-*so.1 >/dev/null 2>&1; then
+  echo musl
+  exit 0
+fi
+
+if ls /lib64/ld-linux-*so.2 >/dev/null 2>&1 || ls /lib/ld-linux-*so.2 >/dev/null 2>&1; then
+  echo glibc
+  exit 0
+fi
+
+echo unknown
+'
+}
+
+LIBC_TYPE="$(detect_libc_type || echo unknown)"
+echo "    Detected libc type inside rootfs: ${LIBC_TYPE}" | tee -a "${LOG_HOST}"
+
+if [[ "${LIBC_TYPE}" = "unknown" ]]; then
+  echo "!! Não foi possível determinar se é glibc ou musl – sanity-check será genérico." | tee -a "${LOG_HOST}"
+fi
+
+###############################################################################
+# Executar sanity-check do Binutils dentro do rootfs
+###############################################################################
+chroot "${ADM_ROOTFS}" /bin/sh -c "
+set -e
+
+LIBC_TYPE='${LIBC_TYPE}'
+LOG='/var/log/binutils-2.45.1-sanity.log'
+mkdir -p /var/log
+
+{
+  echo '===== Binutils 2.45.1 Sanity Check ====='
+  echo 'Data: '\"\$(date)\"
+  echo 'Kernel / Arch: '\"\$(uname -srmo)\"
+  echo 'PATH: '\"\$PATH\"
+  echo 'LIBC_TYPE: '\"\$LIBC_TYPE\"
+  echo
+
+  echo '-- Verificando ld --version...'
+  ld --version || {
+    echo '!! ld não conseguiu rodar ld --version' >&2
+    exit 1
+  }
+
+  echo
+  echo '-- Verificando as --version...'
+  if command -v as >/dev/null 2>&1; then
+    as --version >/dev/null 2>&1 || {
+      echo '!! as não conseguiu rodar as --version' >&2
+      exit 1
+    }
+  else
+    echo '!! as não encontrado no PATH dentro do rootfs' >&2
+  fi
+
+  echo
+  echo '-- Rodando ld --verbose para inspeção de SEARCH_DIR e libs...'
+  ld --verbose > ld-verbose.log 2>&1 || {
+    echo '!! ld --verbose falhou' >&2
+    exit 1
+  }
+
+  echo
+  echo '-- Verificando SEARCH_DIR em ld-verbose.log...'
+  grep 'SEARCH_DIR(\"=/usr/lib\"' ld-verbose.log >/dev/null 2>&1 || {
+    echo '!! /usr/lib não aparece como SEARCH_DIR em ld --verbose' >&2
+    exit 1
+  }
+  # Aceita /lib ou /lib64 como diretórios válidos de sistema
+  if ! grep -E 'SEARCH_DIR\(\"=/(lib|lib64)\"' ld-verbose.log >/dev/null 2>&1; then
+    echo '!! Nem /lib nem /lib64 aparecem como SEARCH_DIR em ld --verbose' >&2
+    exit 1
+  fi
+
+  echo
+  echo '-- Verificando libc/dynamic linker de acordo com LIBC_TYPE...'
+  case \"\$LIBC_TYPE\" in
+    glibc)
+      # Para glibc esperamos ver referências a libc.so.6 e ld-linux-*.so.*
+      if ! grep '/lib.*/libc.so.6' ld-verbose.log >/dev/null 2>&1; then
+        echo '!! libc.so.6 não apareceu em ld --verbose (glibc esperada)' >&2
+        exit 1
+      fi
+      if ! grep -E '/lib(64)?/ld-linux-.*so.2' ld-verbose.log >/dev/null 2>&1; then
+        echo '!! ld-linux-*.so.2 (dynamic linker) não apareceu em ld --verbose (glibc)' >&2
+        exit 1
+      fi
+      ;;
+    musl)
+      # Para musl, normalmente libc é libc.musl-*.so.1 e ld-musl-*.so.1
+      if ! grep -E '/lib.*/libc.musl.*so.1' ld-verbose.log >/dev/null 2>&1; then
+        echo '!! libc.musl-*.so.1 não apareceu claramente em ld --verbose (musl esperada)' >&2
+        echo '   (isso pode indicar que o linker ainda está configurado para glibc)' >&2
+        exit 1
+      fi
+      if ! grep -E '/lib.*/ld-musl-.*so.1' ld-verbose.log >/dev/null 2>&1; then
+        echo '!! ld-musl-*.so.1 (dynamic linker) não apareceu em ld --verbose (musl)' >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo '!! LIBC_TYPE=unknown – pulando asserts de libc específica, mas SEARCH_DIR foi checado.'
+      ;;
+  esac
+
+  echo
+  echo '-- Testando readelf em um binário do sistema (/bin/sh ou /bin/ls)...'
+  BIN_CANDIDATE=\"\"
+  for b in /bin/sh /bin/ls; do
+    if [ -x \"\$b\" ]; then
+      BIN_CANDIDATE=\"\$b\"
+      break
+    fi
+  done
+  if [ -n \"\$BIN_CANDIDATE\" ]; then
+    readelf -h \"\$BIN_CANDIDATE\" >/dev/null 2>&1 || {
+      echo \"!! readelf falhou ao inspecionar \$BIN_CANDIDATE\" >&2
+      exit 1
+    }
+  else
+    echo '!! Nenhum binário padrão (/bin/sh ou /bin/ls) encontrado para testar readelf' >&2
+  fi
+
+  echo
+  echo '-- Limpeza de arquivos temporários...'
+  rm -f ld-verbose.log
+
+  echo
+  echo '===== Fim do sanity-check do Binutils 2.45.1 ====='
+} | tee -a \"\$LOG\"
+" | tee -a "${LOG_HOST}"
+
+echo "==> [binutils.post_install] Sanity-check do Binutils 2.45.1 concluído." | tee -a "${LOG_HOST}"
