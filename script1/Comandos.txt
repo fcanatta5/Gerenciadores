@@ -1,38 +1,97 @@
-Como usar (resumo)
+Formas de selecionar o profile musl
 
-1. Instalar script:
+Você tem duas maneiras equivalentes:
 
-sudo mkdir -p /opt/adm
-sudo nano /opt/adm/adm   # cole o script
-sudo chmod +x /opt/adm/adm
+a) Via variável de ambiente
 
-2. Configurar repositório git das receitas (opcional, mas recomendado):
+sudo ADM_PROFILE=musl /opt/adm/adm build core/gzip
 
-export ADM_GIT_REPO="https://github.com/SEU_USUARIO/SEU_REPO_ADM.git"
-sudo /opt/adm/adm update
+ou, se você chamou sem categoria:
 
-3. Criar uma receita de pacote (ex.: gzip):
+sudo ADM_PROFILE=musl /opt/adm/adm build gzip
 
-sudo mkdir -p /opt/adm/packages/core/gzip
-sudo nano /opt/adm/packages/core/gzip/gzip.sh
-# (cole o exemplo de receita adaptado)
+b) Via opção de linha de comando (-P / --profile)
 
-4. Build + install com deps:
+sudo /opt/adm/adm -P musl build core/gzip
+# ou
+sudo /opt/adm/adm -P musl build gzip
 
-# Compilar com perfil glibc
-sudo /opt/adm/adm build core/gzip
+Internamente, isso faz:
 
-# Compilar com perfil aggressive
-sudo ADM_PROFILE=aggressive /opt/adm/adm build core/gzip
+ADM_PROFILE=musl
 
-5. Dry run (simulação completa, sem executar):
+ADM_TARGET_LIBC=musl
 
-sudo /opt/adm/adm --dry-run build core/gzip
+TARGET_TRIPLET padrão para x86_64 → x86_64-linux-musl
 
-6. Uninstall com resolução reversa de dependências:
+CC, CXX, AR, RANLIB, LD, AS, STRIP apontando para ${ADM_TOOLCHAIN_PREFIX}/bin/${TARGET_TRIPLET}-*
+(ADM_TOOLCHAIN_PREFIX padrão: /opt/cross/x86_64-linux-musl)
 
-sudo /opt/adm/adm uninstall core/gzip
 
-7. Rebuild world:
+Então, para funcionar de verdade com musl, você precisa:
 
-sudo /opt/adm/adm rebuild world
+Ter o toolchain x86_64-linux-musl-* instalado em /opt/cross/x86_64-linux-musl/bin
+ou
+
+Forçar uso do toolchain nativo com:
+
+
+sudo ADM_PROFILE=musl ADM_USE_NATIVE=1 /opt/adm/adm build core/gzip
+
+Nesse caso ele usa gcc, g++ nativos, mas ainda aplica as flags específicas do profile musl (-O2 -fstack-protector-strong, etc.).
+
+
+---
+
+2. Exemplo completo de instalação com musl
+
+Supondo que você já tenha uma receita toolchain/binutils/binutils.sh:
+
+sudo /opt/adm/adm -P musl build toolchain/binutils
+
+ou com env:
+
+sudo ADM_PROFILE=musl /opt/adm/adm build toolchain/binutils
+
+O fluxo será:
+
+1. Carrega a receita do pacote (binutils.sh).
+
+
+2. Chama setup_profiles com ADM_PROFILE=musl.
+
+
+3. Baixa o source, verifica checksum (se definido).
+
+
+4. Configura com ./configure + ADM_CONFIGURE_ARGS_COMMON + PKG_CONFIGURE_OPTS.
+
+
+5. make + make DESTDIR=... install.
+
+
+6. strip dos binários.
+
+
+7. Gera tar.zst.
+
+
+8. Copia para ${ADM_ROOTFS}.
+
+
+9. Registra no DB (/opt/adm/db/toolchain/binutils).
+
+
+
+
+---
+
+3. Testar em modo simulação (dry-run)
+
+Antes de rodar pra valer, é útil testar:
+
+sudo /opt/adm/adm -P musl -n build core/gzip
+# ou
+sudo ADM_PROFILE=musl ADM_DRY_RUN=1 /opt/adm/adm build core/gzip
+
+Ele vai mostrar todos os comandos que seriam executados, sem tocar no sistema.
