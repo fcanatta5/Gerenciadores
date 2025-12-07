@@ -679,16 +679,24 @@ register_install() {
 ###############################################################################
 # Build + install + strip + pacote
 ###############################################################################
+
 build_and_install_pkg() {
   local full="$1"
+
+  # Carrega metadata da receita
   load_pkg_metadata "$full"
+
+  # Permite override de TARGET_TRIPLET pela receita antes de configurar perfis/toolchain.
+  # setup_profiles só define TARGET_TRIPLET se estiver vazio.
+  if [[ -n "${PKG_TARGET_TRIPLET:-}" ]]; then
+    TARGET_TRIPLET="${PKG_TARGET_TRIPLET}"
+  else
+    unset TARGET_TRIPLET
+  fi
 
   setup_profiles
 
-  # overrides por pacote
-  if [[ -n "${PKG_TARGET_TRIPLET:-}" ]]; then
-    TARGET_TRIPLET="${PKG_TARGET_TRIPLET}"
-  fi
+  # overrides por pacote (flags adicionais)
   if [[ -n "${PKG_CFLAGS_EXTRA:-}" ]]; then
     CFLAGS="${CFLAGS} ${PKG_CFLAGS_EXTRA}"
     CXXFLAGS="${CXXFLAGS} ${PKG_CFLAGS_EXTRA}"
@@ -697,22 +705,49 @@ build_and_install_pkg() {
     LDFLAGS="${LDFLAGS} ${PKG_LDFLAGS_EXTRA}"
   fi
 
-  fetch_source "$full"
-  extract_source "$full"
+  # Diretórios de build/destdir e estado
+  local state_dir
+  state_dir=$(pkg_state_dir "$full")
+  mkdir -p "$state_dir"
 
   local build_dir
   build_dir=$(pkg_build_dir "$full")
   local destdir
   destdir=$(pkg_destdir "$full")
+
+  # Stamp de build inclui versão, perfil e triplet,
+  # evitando confusão entre builds diferentes.
+  local build_stamp="${state_dir}/built-${PKG_VERSION}-${ADM_PROFILE}-${TARGET_TRIPLET}"
+
+  # Se ainda não houve build com estes parâmetros, limpa qualquer resquício antigo
+  if [[ ! -f "${build_stamp}" ]]; then
+    if [[ -d "${build_dir}" ]]; then
+      log_info "Limpando diretório de build antigo: ${build_dir}"
+      if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+        log_warn "[DRY-RUN] rm -rf '${build_dir}'"
+      else
+        rm -rf "${build_dir}"
+      fi
+    fi
+    if [[ -d "${destdir}" ]]; then
+      log_info "Limpando DESTDIR antigo: ${destdir}"
+      if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+        log_warn "[DRY-RUN] rm -rf '${destdir}'"
+      else
+        rm -rf "${destdir}"
+      fi
+    fi
+  fi
+
   run_cmd "mkdir -p '${destdir}'"
+
+  # Baixa e extrai fontes (idempotente; extract_source apenas retorna se build_dir já existir)
+  fetch_source "$full"
+  extract_source "$full"
 
   run_hook "$full" "pre_install"
 
-  local state_dir
-  state_dir=$(pkg_state_dir "$full")
-  mkdir -p "$state_dir"
-
-  if [[ ! -f "${state_dir}/built" ]]; then
+  if [[ ! -f "${build_stamp}" ]]; then
     log_info "Configurando e compilando ${PKG_NAME}-${PKG_VERSION}..."
 
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
@@ -763,10 +798,10 @@ build_and_install_pkg() {
 
         run_cmd make "${make_args[@]}"
       )
-      touch "${state_dir}/built"
+      touch "${build_stamp}"
     fi
   else
-    log_info "Já marcado como built; pulando passo de compilação"
+    log_info "Já compilado para ${PKG_NAME}-${PKG_VERSION} (${ADM_PROFILE}/${TARGET_TRIPLET}); pulando passo de compilação"
   fi
 
   log_info "Instalando em DESTDIR: ${destdir}"
@@ -788,9 +823,7 @@ build_and_install_pkg() {
   fi
 
   log_info "Executando strip em binários e libs..."
-  if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-    log_warn "[DRY-RUN] strip em arquivos ELF sob ${destdir}"
-  else
+  if [[ "${ADM_DRY_RUN}" != "1" ]]; then
     find "${destdir}" -type f -print0 | while IFS= read -r -d '' f; do
       if file "$f" | grep -q "ELF"; then
         "${STRIP:-strip}" --strip-unneeded "$f" 2>/dev/null || true
@@ -831,7 +864,7 @@ build_and_install_pkg() {
   run_hook "$full" "post_install"
 
   log_ok "Pacote ${full} (${PKG_VERSION}) instalado com sucesso."
-}
+} 
 
 ###############################################################################
 # Dependências (topological sort via Kahn)
