@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# toolchain/libstdc++-pass1/libstdc++-pass1.post_install
+# Sanity-check do Libstdc++ (GCC-15.2.0 Pass 1) e limpeza de arquivos .la
+
+set -euo pipefail
+
+: "${ADM_ROOTFS:?libstdc++-pass1.post_install: ADM_ROOTFS não definido}"
+: "${TARGET_TRIPLET:?libstdc++-pass1.post_install: TARGET_TRIPLET não definido}"
+
+gxx_cmd="${ADM_ROOTFS}/tools/bin/${TARGET_TRIPLET}-g++"
+include_dir="${ADM_ROOTFS}/tools/${TARGET_TRIPLET}/include/c++/15.2.0"
+libdir="${ADM_ROOTFS}/usr/lib"
+
+if [[ ! -x "${gxx_cmd}" ]]; then
+  echo "libstdc++-pass1.post_install: não encontrei ${gxx_cmd} (g++ do toolchain temporário)." >&2
+  exit 1
+fi
+
+if [[ ! -d "${include_dir}" ]]; then
+  echo "libstdc++-pass1.post_install: diretório de includes não encontrado: ${include_dir}" >&2
+  exit 1
+fi
+
+if [[ ! -d "${libdir}" ]]; then
+  echo "libstdc++-pass1.post_install: diretório de libs não encontrado: ${libdir}" >&2
+  exit 1
+fi
+
+# Pelo menos libstdc++.a deve existir
+if ! ls "${libdir}/libstdc++."* >/dev/null 2>&1; then
+  echo "libstdc++-pass1.post_install: nenhuma libstdc++.* encontrada em ${libdir}" >&2
+  exit 1
+fi
+
+echo "libstdc++-pass1.post_install: headers em ${include_dir} e libs em ${libdir} encontrados."
+
+# ---------------------------------------------------------------------------
+# Sanity-check: compilar um pequeno programa C++ (somente -c, sem link)
+# ---------------------------------------------------------------------------
+tmpdir="$(mktemp -d -t libstdcpp-pass1-sanity-XXXXXX)"
+trap 'rm -rf "${tmpdir}"' EXIT
+
+cat > "${tmpdir}/hello.cpp" << 'EOF'
+#include <iostream>
+
+int main() {
+    std::cout << "hello from libstdc++ pass1" << std::endl;
+    return 0;
+}
+EOF
+
+echo "libstdc++-pass1.post_install: compilando hello.cpp com ${gxx_cmd} (-c, sem link)..."
+
+build_log="${tmpdir}/build.log"
+if ! "${gxx_cmd}" -v -c "${tmpdir}/hello.cpp" -o "${tmpdir}/hello.o" >"${build_log}" 2>&1; then
+  echo "libstdc++-pass1.post_install: FALHA ao compilar hello.cpp" >&2
+  cat "${build_log}" >&2 || true
+  exit 1
+fi
+
+if [[ ! -f "${tmpdir}/hello.o" ]]; then
+  echo "libstdc++-pass1.post_install: compilação não gerou hello.o" >&2
+  exit 1
+fi
+
+echo "libstdc++-pass1.post_install: compilação de teste OK (headers + g++ funcionando)."
+
+# ---------------------------------------------------------------------------
+# Remover arquivos .la da libstdc++ em /usr/lib (recomendação LFS)
+# ---------------------------------------------------------------------------
+echo "libstdc++-pass1.post_install: removendo arquivos .la potencialmente nocivos..."
+for la in "${libdir}"/lib{stdc++,stdc++exp,stdc++fs,supc++}.la; do
+  if [[ -f "${la}" ]]; then
+    rm -v "${la}" || true
+  fi
+done
+
+echo "libstdc++-pass1.post_install: sanity-check concluído com sucesso."
