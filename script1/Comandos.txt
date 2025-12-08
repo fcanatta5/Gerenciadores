@@ -21,6 +21,13 @@ chmod +x "${ADM_PACKAGES_DIR}/toolchain/musl/musl.post_install"
 ADM_PROFILE=musl ADM_TARGET_ARCH=x86_64 \
   ./adm.sh build toolchain/musl
 
+# Para glibc
+ADM_PROFILE=musl    ADM_TARGET_ARCH=x86_64 \
+  ./adm.sh build toolchain/libstdc++-pass1
+
+ADM_PROFILE=glibc   ADM_TARGET_ARCH=x86_64 \
+  ./adm.sh build toolchain/libstdc++-pass1
+
 
 
 Formas de selecionar o profile musl
