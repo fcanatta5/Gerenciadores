@@ -41,7 +41,27 @@ run_cmd() {
 ###############################################################################
 # Configuração de diretórios
 ###############################################################################
-ADM_ROOT="${ADM_ROOT:-/opt/adm}"
+# ADM_ROOT="${ADM_ROOT:-/opt/adm}"
+# Rootfs segregado por perfil/libc automaticamente
+if [[ -n "${ADM_ROOTFS:-}" ]]; then
+  # Se o usuário já definiu explicitamente, respeita
+  ADM_ROOTFS="${ADM_ROOTFS}"
+else
+  case "${ADM_PROFILE:-glibc}" in
+    glibc)
+      ADM_ROOTFS="${ADM_ROOT}/rootfs-glibc"
+      ;;
+    musl)
+      ADM_ROOTFS="${ADM_ROOT}/rootfs-musl"
+      ;;
+    aggressive)
+      ADM_ROOTFS="${ADM_ROOT}/rootfs-aggressive"
+      ;;
+    *)
+      ADM_ROOTFS="${ADM_ROOT}/rootfs"
+      ;;
+  esac
+fi
 
 # Diretório de receitas
 ADM_PACKAGES_DIR="${ADM_PACKAGES_DIR:-${ADM_ROOT}/packages}"
