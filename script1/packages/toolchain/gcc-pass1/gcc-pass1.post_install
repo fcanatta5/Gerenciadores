@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# toolchain/gcc-pass1/gcc-pass1.post_install
+# Sanity-check do GCC em /tools + geração do limits.h completo
+
+set -euo pipefail
+
+: "${ADM_ROOTFS:?ADM_ROOTFS não definido}"
+: "${ADM_BUILD_ROOT:?ADM_BUILD_ROOT não definido}"
+: "${ADM_PROFILE:?ADM_PROFILE não definido}"
+: "${TARGET_TRIPLET:?TARGET_TRIPLET não definido}"
+
+pkg_name="gcc-pass1"
+
+tools_bindir="${ADM_ROOTFS}/tools/bin"
+build_dir="${ADM_BUILD_ROOT}/${ADM_PROFILE}/${TARGET_TRIPLET}/${pkg_name}"
+
+# ---------------------------------------------------------------------------
+# 1) Descobrir o binário do GCC em /tools
+# ---------------------------------------------------------------------------
+gcc_cmd=""
+
+if [[ -x "${tools_bindir}/${TARGET_TRIPLET}-gcc" ]]; then
+  gcc_cmd="${tools_bindir}/${TARGET_TRIPLET}-gcc"
+elif [[ -x "${tools_bindir}/gcc" ]]; then
+  gcc_cmd="${tools_bindir}/gcc"
+else
+  echo "gcc-pass1.post_install: GCC não encontrado em ${tools_bindir} (nem ${TARGET_TRIPLET}-gcc nem gcc)." >&2
+  exit 1
+fi
+
+echo "gcc-pass1.post_install: usando GCC para sanity-check: ${gcc_cmd}"
+
+# ---------------------------------------------------------------------------
+# 2) Sanity-check simples (compila um hello.c com -c)
+# ---------------------------------------------------------------------------
+tmpdir="$(mktemp -d -t gcc-pass1-sanity-XXXXXX)"
+trap 'rm -rf "${tmpdir}"' EXIT
+
+cat > "${tmpdir}/hello.c" <<'EOF'
+int main(void) {
+    return 0;
+}
+EOF
+
+echo "gcc-pass1.post_install: compilando teste simples (sem link)..."
+if ! "${gcc_cmd}" -v -c "${tmpdir}/hello.c" -o "${tmpdir}/hello.o" >/"${tmpdir}/build.log" 2>&1; then
+  echo "gcc-pass1.post_install: FALHA ao compilar hello.c (pass1). Veja o log em ${tmpdir}/build.log" >&2
+  cat "${tmpdir}/build.log" >&2 || true
+  exit 1
+fi
+
+echo "gcc-pass1.post_install: sanity-check de compilação OK."
+
+# Validar (quando possível) que o triplet bate
+dumpmachine="$("${gcc_cmd}" -dumpmachine || true)"
+if [[ -n "${dumpmachine}" ]]; then
+  echo "gcc-pass1.post_install: -dumpmachine retornou: ${dumpmachine}"
+  # Não forço erro aqui se não bater exatamente, mas aviso.
+  if [[ "${dumpmachine}" != "${TARGET_TRIPLET}" ]]; then
+    echo "gcc-pass1.post_install: AVISO: dumpmachine='${dumpmachine}' difere de TARGET_TRIPLET='${TARGET_TRIPLET}'." >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3) Geração do limits.h completo (como no LFS 5.3) 
+# ---------------------------------------------------------------------------
+if [[ -d "${build_dir}" ]]; then
+  echo "gcc-pass1.post_install: gerando limits.h completo usando headers internos do GCC..."
+
+  cd "${build_dir}"
+
+  # Arquivos internos do GCC
+  if [[ ! -f gcc/limitx.h || ! -f gcc/glimits.h || ! -f gcc/limity.h ]]; then
+    echo "gcc-pass1.post_install: arquivos gcc/limitx.h, glimits.h ou limity.h não encontrados em ${build_dir}." >&2
+    echo "Pulando geração do limits.h, verifique seu tree do GCC se houver problemas com glibc depois." >&2
+  else
+    # Local onde o libgcc está instalado (usando o próprio GCC em /tools)
+    libgcc_dir="$(dirname "$("${gcc_cmd}" -print-libgcc-file-name)")"
+    include_dir="${libgcc_dir}/include"
+
+    mkdir -p "${include_dir}"
+
+    cat gcc/limitx.h gcc/glimits.h gcc/limity.h > "${include_dir}/limits.h"
+
+    echo "gcc-pass1.post_install: limits.h gerado em ${include_dir}/limits.h"
+  fi
+else
+  echo "gcc-pass1.post_install: diretório de build ${build_dir} não encontrado; pulando geração de limits.h." >&2
+fi
+
+echo "gcc-pass1.post_install: sanity-check do GCC-15.2.0 Pass 1 concluído com sucesso."
