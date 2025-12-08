@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Hook post_install de sanity-check para Binutils-2.45.1 Pass 1
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Garantir que ambiente do ADM está disponível no hook
+# ---------------------------------------------------------------------------
+: "${ADM_ROOTFS:?binutils-pass1.post_install: ADM_ROOTFS não definido}"
+: "${TARGET_TRIPLET:?binutils-pass1.post_install: TARGET_TRIPLET não definido}"
+
+bin_prefix="${ADM_ROOTFS}/usr/bin/${TARGET_TRIPLET}-"
+
+# Verifica se os principais binários existem
+missing=0
+for tool in as ld objdump; do
+  if [[ ! -x "${bin_prefix}${tool}" ]]; then
+    echo "binutils-pass1.sanity-check: não encontrei ${bin_prefix}${tool}" >&2
+    missing=1
+  fi
+done
+
+if [[ "${missing}" -ne 0 ]]; then
+  echo "binutils-pass1.sanity-check: binários essenciais do binutils não estão presentes/execitáveis." >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Teste funcional simples: montar e linkar um pequeno programa
+# ---------------------------------------------------------------------------
+tmpdir="$(mktemp -d -t binutils-pass1-sanity-XXXXXX)"
+trap 'rm -rf "${tmpdir}"' EXIT
+
+cat > "${tmpdir}/dummy.s" << 'EOF'
+        .global _start
+_start:
+        nop
+EOF
+
+# Monta
+"${bin_prefix}as" -o "${tmpdir}/dummy.o" "${tmpdir}/dummy.s"
+
+# Linka
+"${bin_prefix}ld" -o "${tmpdir}/dummy" "${tmpdir}/dummy.o"
+
+# Inspeciona o binário resultante para garantir que é um ELF válido do target
+if ! "${bin_prefix}objdump" -f "${tmpdir}/dummy" | grep -q "file format"; then
+  echo "binutils-pass1.sanity-check: objdump não conseguiu inspecionar o binário gerado." >&2
+  exit 1
+fi
+
+echo "binutils-pass1.sanity-check: OK (${TARGET_TRIPLET} em ${ADM_ROOTFS})"
