@@ -63,23 +63,21 @@ log_ok() {
 }
 
 run_cmd() {
-  # Wrapper para honrar dry-run
+  # Wrapper para honrar dry-run e logar o comando de forma segura
   if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-    # Log em stderr para não misturar com saídas "reais"
-    echo -e "${COLOR_WARN}[DRY-RUN]${COLOR_RESET} $*" >&2
+    # Log em stderr, com quoting tipo shell (%q)
+    printf '%s[DRY-RUN]%s ' "${COLOR_WARN}" "${COLOR_RESET}" >&2
+    printf '%q ' "$@" >&2
+    echo >&2
     return 0
   fi
 
-  echo -e "${COLOR_INFO}[CMD]${COLOR_RESET} $*" >&2
+  printf '%s[CMD]%s ' "${COLOR_INFO}" "${COLOR_RESET}" >&2
+  printf '%q ' "$@" >&2
+  echo >&2
 
-  # Compatibilidade:
-  # - 1 argumento: trata como comando de shell completo (eval)
-  # - >1 argumento: executa diretamente via execve
-  if [[ $# -eq 1 ]]; then
-    eval "$1"
-  else
-    "$@"
-  fi
+  # Executa diretamente, sem eval
+  "$@"
 }
 
 ###############################################################################
@@ -520,9 +518,10 @@ download_one_source() {
   else
     log_info "Baixando (idx=${idx}) ${url} -> ${tarball_path}"
     if command -v curl >/dev/null 2>&1; then
-      run_cmd "curl -fL '${url}' -o '${tarball_path}'"
+      # Uso seguro: cada argumento separado
+      run_cmd curl -fL "$url" -o "$tarball_path"
     elif command -v wget >/dev/null 2>&1; then
-      run_cmd "wget -c '${url}' -O '${tarball_path}'"
+      run_cmd wget -c "$url" -O "$tarball_path"
     else
       log_error "Nem curl nem wget encontrados para download."
       exit 1
@@ -608,12 +607,16 @@ extract_source() {
     return 0
   fi
 
-  run_cmd "mkdir -p '${build_dir}'"
+  # Cria diretório de build via run_cmd (honra dry-run e log)
+  run_cmd mkdir -p "$build_dir"
 
   if is_git_url "$main_url"; then
     log_info "Clonando fonte git principal para diretório de build: ${main_url}"
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
       log_warn "[DRY-RUN] git clone '${main_url}' '${build_dir}'"
+      if [[ -n "${PKG_GIT_REF:-}" ]]; then
+        log_warn "[DRY-RUN] (cd '${build_dir}' && git checkout '${PKG_GIT_REF}')"
+      fi
     else
       git clone "${main_url}" "${build_dir}"
       if [[ -n "${PKG_GIT_REF:-}" ]]; then
@@ -635,7 +638,8 @@ extract_source() {
     fi
 
     log_info "Extraindo ${tarball_path} para ${build_dir}"
-    run_cmd "tar -xf '${tarball_path}' -C '${build_dir}' --strip-components=1"
+    # Uso seguro de tar com args separados
+    run_cmd tar -xf "$tarball_path" -C "$build_dir" --strip-components=1
   fi
 
   local patch_file
