@@ -5,6 +5,20 @@ set -euo pipefail
 IFS=$'\n\t'
 
 ###############################################################################
+# Defaults de ambiente (evitam "unbound variable" com set -u)
+###############################################################################
+ADM_ROOT="${ADM_ROOT:-/opt/adm}"
+ADM_PROFILE="${ADM_PROFILE:-glibc}"
+ADM_TARGET_ARCH="${ADM_TARGET_ARCH:-x86_64}"
+ADM_DRY_RUN="${ADM_DRY_RUN:-0}"
+ADM_ENABLE_BIN_CACHE="${ADM_ENABLE_BIN_CACHE:-1}"
+ADM_STRIP_BINARIES="${ADM_STRIP_BINARIES:-1}"
+ADM_JOBS="${ADM_JOBS:-}"
+ADM_USE_NATIVE="${ADM_USE_NATIVE:-0}"
+ADM_FORCE_REBUILD="${ADM_FORCE_REBUILD:-0}"
+ADM_GIT_REPO="${ADM_GIT_REPO:-}"
+
+###############################################################################
 # Cores e logging
 ###############################################################################
 if [[ -t 2 ]]; then
@@ -39,132 +53,71 @@ run_cmd() {
 }
 
 ###############################################################################
-# Raiz e diretórios básicos, isolados por perfil (glibc/musl/aggressive)
+# Paths isolados por perfil (glibc/musl/aggressive)
 ###############################################################################
+init_paths() {
+  # Diretório de receitas (compartilhado)
+  ADM_PACKAGES_DIR="${ADM_PACKAGES_DIR:-${ADM_ROOT}/packages}"
 
-# Raiz do ADM (compartilhada entre perfis)
-ADM_ROOT="${ADM_ROOT:-/opt/adm}"
-
-# Perfil padrão (pode ser sobrescrito por env ou pela opção -P/--profile)
-ADM_PROFILE="${ADM_PROFILE:-glibc}"
-
-# Diretório de receitas (compartilhado entre perfis)
-ADM_PACKAGES_DIR="${ADM_PACKAGES_DIR:-${ADM_ROOT}/packages}"
-
-# Rootfs segregado por perfil (pode ser sobrescrito por ADM_ROOTFS)
-if [[ -n "${ADM_ROOTFS:-}" ]]; then
-  # Usuário já definiu explicitamente, não mexe
-  ADM_ROOTFS="${ADM_ROOTFS}"
-else
+  # Sufixo por perfil
+  local suffix=""
   case "${ADM_PROFILE}" in
-    glibc)
-      ADM_ROOTFS="${ADM_ROOT}/rootfs-glibc"
-      ;;
-    musl)
-      ADM_ROOTFS="${ADM_ROOT}/rootfs-musl"
-      ;;
-    aggressive)
-      ADM_ROOTFS="${ADM_ROOT}/rootfs-aggressive"
-      ;;
-    *)
-      # fallback genérico
-      ADM_ROOTFS="${ADM_ROOT}/rootfs"
-      ;;
+    glibc)      suffix="-glibc" ;;
+    musl)       suffix="-musl" ;;
+    aggressive) suffix="-aggressive" ;;
+    *)          suffix="" ;;
   esac
-fi
 
-# Diretório de build segregado por perfil (pode ser sobrescrito por ADM_BUILD_ROOT)
-if [[ -n "${ADM_BUILD_ROOT:-}" ]]; then
-  ADM_BUILD_ROOT="${ADM_BUILD_ROOT}"
-else
-  case "${ADM_PROFILE}" in
-    glibc)
-      ADM_BUILD_ROOT="${ADM_ROOT}/build-glibc"
-      ;;
-    musl)
-      ADM_BUILD_ROOT="${ADM_ROOT}/build-musl"
-      ;;
-    aggressive)
-      ADM_BUILD_ROOT="${ADM_ROOT}/build-aggressive"
-      ;;
-    *)
-      ADM_BUILD_ROOT="${ADM_ROOT}/build"
-      ;;
-  esac
-fi
+  # Rootfs segregado por perfil, se não for informado pelo usuário
+  ADM_ROOTFS="${ADM_ROOTFS:-${ADM_ROOT}/rootfs${suffix}}"
 
-# Diretório de estado segregado por perfil (locks, stamps, etc.)
-if [[ -n "${ADM_STATE_DIR:-}" ]]; then
-  ADM_STATE_DIR="${ADM_STATE_DIR}"
-else
-  case "${ADM_PROFILE}" in
-    glibc)
-      ADM_STATE_DIR="${ADM_ROOT}/state-glibc"
-      ;;
-    musl)
-      ADM_STATE_DIR="${ADM_ROOT}/state-musl"
-      ;;
-    aggressive)
-      ADM_STATE_DIR="${ADM_ROOT}/state-aggressive"
-      ;;
-    *)
-      ADM_STATE_DIR="${ADM_ROOT}/state"
-      ;;
-  esac
-fi
+  # Diretório de build segregado por perfil
+  ADM_BUILD_ROOT="${ADM_BUILD_ROOT:-${ADM_ROOT}/build${suffix}}"
 
-# Banco de dados de pacotes instalados segregado por perfil
-if [[ -n "${ADM_DB_DIR:-}" ]]; then
-  ADM_DB_DIR="${ADM_DB_DIR}"
-else
-  case "${ADM_PROFILE}" in
-    glibc)
-      ADM_DB_DIR="${ADM_ROOT}/db-glibc"
-      ;;
-    musl)
-      ADM_DB_DIR="${ADM_ROOT}/db-musl"
-      ;;
-    aggressive)
-      ADM_DB_DIR="${ADM_ROOT}/db-aggressive"
-      ;;
-    *)
-      ADM_DB_DIR="${ADM_ROOT}/db"
-      ;;
-  esac
-fi
+  # Diretório de estado segregado por perfil
+  ADM_STATE_DIR="${ADM_STATE_DIR:-${ADM_ROOT}/state${suffix}}"
 
-# Diretórios comuns (não segregados por perfil; mude se quiser tudo 100% separado)
-ADM_LOG_DIR="${ADM_LOG_DIR:-${ADM_ROOT}/log}"
-ADM_CACHE_DIR="${ADM_CACHE_DIR:-${ADM_ROOT}/cache}"
-ADM_PKG_OUTPUT_DIR="${ADM_PKG_OUTPUT_DIR:-${ADM_ROOT}/pkgs}"
+  # Banco de dados segregado por perfil
+  ADM_DB_DIR="${ADM_DB_DIR:-${ADM_ROOT}/db${suffix}}"
 
-# Toolchain raiz (compartilhado, mas você pode segregar depois se quiser)
-ADM_TOOLCHAIN_PREFIX="${ADM_TOOLCHAIN_PREFIX:-${ADM_ROOT}/toolchain}"
-ADM_USE_NATIVE="${ADM_USE_NATIVE:-0}"
+  # Diretórios comuns
+  ADM_LOG_DIR="${ADM_LOG_DIR:-${ADM_ROOT}/log}"
+  ADM_CACHE_DIR="${ADM_CACHE_DIR:-${ADM_ROOT}/cache}"
+  ADM_PKG_OUTPUT_DIR="${ADM_PKG_OUTPUT_DIR:-${ADM_ROOT}/pkgs}"
+  ADM_TOOLCHAIN_PREFIX="${ADM_TOOLCHAIN_PREFIX:-${ADM_ROOT}/toolchain}"
 
-# Cria diretórios base
-mkdir -p \
-  "${ADM_PACKAGES_DIR}" \
-  "${ADM_BUILD_ROOT}" \
-  "${ADM_STATE_DIR}" \
-  "${ADM_DB_DIR}" \
-  "${ADM_LOG_DIR}" \
-  "${ADM_CACHE_DIR}" \
-  "${ADM_PKG_OUTPUT_DIR}" \
-  "${ADM_ROOTFS}"
+  mkdir -p \
+    "${ADM_PACKAGES_DIR}" \
+    "${ADM_BUILD_ROOT}" \
+    "${ADM_STATE_DIR}" \
+    "${ADM_DB_DIR}" \
+    "${ADM_LOG_DIR}" \
+    "${ADM_CACHE_DIR}" \
+    "${ADM_PKG_OUTPUT_DIR}" \
+    "${ADM_ROOTFS}"
+}
 
 ###############################################################################
 # Checagem de dependências
 ###############################################################################
 check_dependencies() {
   local required=(
-    git tar patch rsync find xargs file
+    git
+    tar
+    patch
+    rsync
+    find
+    xargs
+    file
+    sha256sum
+    md5sum
+    make
   )
-  local at_least_one_downloader=0
+  local have_downloader=0
 
   for cmd in curl wget; do
     if command -v "$cmd" >/dev/null 2>&1; then
-      at_least_one_downloader=1
+      have_downloader=1
       break
     fi
   done
@@ -176,13 +129,13 @@ check_dependencies() {
     fi
   done
 
-  if (( at_least_one_downloader == 0 )); then
+  if (( have_downloader == 0 )); then
     log_error "Nem curl nem wget encontrados; é necessário pelo menos um."
     exit 1
   fi
 
   if ! command -v zstd >/dev/null 2>&1; then
-    log_warn "zstd não encontrado; cache binário não funcionará com compressão. (recomendado instalar zstd)"
+    log_warn "zstd não encontrado; cache binário usará tar sem compressão."
   fi
 }
 
@@ -191,7 +144,6 @@ check_dependencies() {
 ###############################################################################
 setup_profiles() {
   ADM_PROFILE="${ADM_PROFILE:-glibc}"
-  ADM_TARGET_ARCH="${ADM_TARGET_ARCH:-x86_64}"
 
   case "${ADM_PROFILE}" in
     glibc|aggressive) ADM_TARGET_LIBC="${ADM_TARGET_LIBC:-glibc}" ;;
@@ -211,15 +163,16 @@ setup_profiles() {
 
   ADM_SYSROOT="${ADM_SYSROOT:-${ADM_ROOTFS}}"
 
-  SYS_INC_DIR="${ADM_SYSROOT}/usr/include"
-  SYS_LIB_DIR="${ADM_SYSROOT}/usr/lib"
-  SYS_LIB64_DIR="${ADM_SYSROOT}/usr/lib64"
+  local SYS_INC_DIR="${ADM_SYSROOT}/usr/include"
+  local SYS_LIB_DIR="${ADM_SYSROOT}/usr/lib"
+  local SYS_LIB64_DIR="${ADM_SYSROOT}/usr/lib64"
 
-  CFLAGS_COMMON="-pipe"
-  CXXFLAGS_COMMON="-pipe"
-  CPPFLAGS_COMMON="-I${SYS_INC_DIR}"
-  LDFLAGS_COMMON="-L${SYS_LIB_DIR} -L${SYS_LIB64_DIR}"
+  local CFLAGS_COMMON="-pipe"
+  local CXXFLAGS_COMMON="-pipe"
+  local CPPFLAGS_COMMON="-I${SYS_INC_DIR}"
+  local LDFLAGS_COMMON="-L${SYS_LIB_DIR} -L${SYS_LIB64_DIR}"
 
+  local CFLAGS_OPT CXXFLAGS_OPT LDFLAGS_OPT
   case "${ADM_PROFILE}" in
     glibc)
       CFLAGS_OPT="-O2"
@@ -270,13 +223,6 @@ setup_profiles() {
 
   export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR:-${SYS_LIB_DIR}/pkgconfig:${SYS_LIB64_DIR}/pkgconfig}"
   export PKG_CONFIG_SYSROOT_DIR="${PKG_CONFIG_SYSROOT_DIR:-${ADM_SYSROOT}}"
-
-  if [[ "${ADM_USE_NATIVE}" != "1" ]]; then
-    case ":$PATH:" in
-      *:"${ADM_TOOLCHAIN_PREFIX}/bin":*) ;;
-      *) export PATH="${ADM_TOOLCHAIN_PREFIX}/bin:${PATH}" ;;
-    esac
-  fi
 }
 
 ###############################################################################
@@ -290,25 +236,26 @@ Opções globais:
   -P, --profile PERFIL      Perfil de build (glibc, musl, aggressive)
   -n, --dry-run             Não executar comandos, apenas simular
 
-Comandos principais:
+Comandos:
   update                    Atualiza receitas a partir do repositório git
-  build   <cat/pkg|pkg>     Constrói (e instala no rootfs) um pacote
-  install <cat/pkg|pkg>     Alias para build
-  uninstall <cat/pkg|pkg>   Remove um pacote (com resolução reversa de deps)
-  rebuild [world|pkg]       Rebuild do sistema inteiro ou de um pacote
-  info   <cat/pkg|pkg>      Mostra informações do pacote
-  search <padrão>           Procura por pacotes pelo nome
+  build   <pkg>             Constrói (e instala) um pacote com deps
+  install <pkg>             Alias para build
+  uninstall <pkg>           Remove um pacote (com resolução reversa)
+  rebuild [world|pkg]       Rebuild do mundo ou de um pacote
+  info   <pkg>              Mostra informações da receita
+  search <padrão>           Procura pacotes pelo nome
   list-installed            Lista pacotes instalados
-  graph-deps <pkg>          Mostra ordem de build por dependências
-  dry-run <...>             Executa um comando em dry-run temporário
+  graph-deps <pkg>          Mostra grafo de dependências
+  dry-run <comando...>      Executa um comando em modo simulação
 
 Exemplos:
-  ADM_PROFILE=aggressive $(basename "$0") build core/gzip
-  $(basename "$0") -P musl build gzip
-  $(basename "$0") uninstall core/gzip
+  ADM_PROFILE=aggressive $(basename "$0") build core/m4
+  $(basename "$0") -P musl build m4
 
 EOF
 }
+
+ADM_ARGS=()
 
 parse_global_args() {
   ADM_ARGS=()
@@ -443,7 +390,6 @@ load_pkg_metadata() {
     unset "$v"
   done < <(compgen -v PKG_ || true)
 
-  # Defaults
   PKG_NAME=""
   PKG_VERSION=""
   PKG_URL=""
@@ -451,7 +397,6 @@ load_pkg_metadata() {
   PKG_DEPENDS=()
 
   # shellcheck source=/dev/null
-  # (Receitas são consideradas confiáveis)
   source "$script"
 
   if [[ -z "${PKG_NAME:-}" || -z "${PKG_VERSION:-}" ]]; then
@@ -482,20 +427,12 @@ is_git_url() {
 
 verify_checksum() {
   local file="$1"
-  local sha256="$2"
-  local md5="$3"
+  local sha256="${2:-}"
+  local md5="${3:-}"
 
   if [[ -n "$sha256" ]]; then
-    if ! command -v sha256sum >/dev/null 2>&1; then
-      log_error "sha256sum não encontrado para verificar checksum."
-      exit 1
-    fi
     echo "${sha256}  ${file}" | sha256sum -c -
   elif [[ -n "$md5" ]]; then
-    if ! command -v md5sum >/dev/null 2>&1; then
-      log_error "md5sum não encontrado para verificar checksum."
-      exit 1
-    fi
     echo "${md5}  ${file}" | md5sum -c -
   fi
 }
@@ -528,6 +465,10 @@ download_one_source() {
   if [[ -f "$tarball_path" ]]; then
     log_info "Tarball já em cache (idx=${idx}): ${tarball_path}"
   else
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+      log_warn "[DRY-RUN] Baixaria (idx=${idx}) ${url} -> ${tarball_path}"
+      return 0
+    fi
     log_info "Baixando (idx=${idx}) ${url} -> ${tarball_path}"
     if command -v curl >/dev/null 2>&1; then
       run_cmd curl -fL "$url" -o "$tarball_path"
@@ -618,7 +559,7 @@ extract_source() {
 
   if is_git_url "$main_url"; then
     log_info "Clonando fonte git principal para diretório de build: ${main_url}"
-    if [[ "${ADM_DRY_RUN:-0}" = "1" ]]; then
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
       log_warn "[DRY-RUN] git clone '${main_url}' '${build_dir}'"
       if [[ -n "${PKG_GIT_REF:-}" ]]; then
         log_warn "[DRY-RUN] (cd '${build_dir}' && git checkout '${PKG_GIT_REF}')"
@@ -719,30 +660,21 @@ build_and_install_pkg() {
 
   load_pkg_metadata "$full"
 
+  # Ajusta triplet específico se a receita pedir
   if [[ -n "${PKG_TARGET_TRIPLET:-}" ]]; then
     TARGET_TRIPLET="${PKG_TARGET_TRIPLET}"
   else
-    unset TARGET_TRIPLET
+    unset TARGET_TRIPLET || true
   fi
 
   setup_profiles
 
-  # Diretórios básicos
   local state_dir build_dir destdir
   state_dir=$(pkg_state_dir "$full")
   build_dir=$(pkg_build_dir "$full")
   destdir=$(pkg_destdir "$full")
-  mkdir -p "$state_dir"
+  mkdir -p "$state_dir" "$build_dir" "$destdir"
 
-  # Lock simples por pacote
-  local lock_dir="${state_dir}/.build.lock"
-  if ! mkdir "$lock_dir" 2>/dev/null; then
-    log_error "Outro build de ${full} parece estar em andamento (lock: ${lock_dir})"
-    exit 1
-  fi
-  trap 'rmdir "'"$lock_dir"'" 2>/dev/null || true' EXIT
-
-  # Stamps de fase (para retomada)
   local stamp_prefix="${state_dir}/${PKG_VERSION}-${ADM_PROFILE}-${TARGET_TRIPLET}"
   local stamp_fetch="${stamp_prefix}.fetch"
   local stamp_extract="${stamp_prefix}.extract"
@@ -750,16 +682,21 @@ build_and_install_pkg() {
   local stamp_build="${stamp_prefix}.build"
   local stamp_install="${stamp_prefix}.install"
 
-  # Caminho do tarball (cache binário)
+  # Rebuild força limpar stamps
+  if [[ "${ADM_FORCE_REBUILD}" = "1" ]]; then
+    rm -f "${stamp_fetch}" "${stamp_extract}" "${stamp_configure}" "${stamp_build}" "${stamp_install}"
+  fi
+
+  # Tarball só agora que TARGET_TRIPLET está definido
   local tarball
   tarball=$(pkg_tarball_path "$full" "${PKG_VERSION}")
 
-  # Se binário já está em cache e não há rebuild forçado, reutiliza
-  if [[ "${ADM_ENABLE_BIN_CACHE}" = "1" && "${ADM_FORCE_REBUILD:-0}" != "1" && -f "${tarball}" ]]; then
+  # Cache binário
+  if [[ "${ADM_ENABLE_BIN_CACHE}" = "1" && "${ADM_FORCE_REBUILD}" != "1" && -f "${tarball}" ]]; then
     log_info "Encontrado pacote binário em cache: ${tarball}"
     log_info "Reinstalando ${PKG_NAME}-${PKG_VERSION} a partir do cache binário"
 
-    if [[ "${ADM_DRY_RUN:-0}" = "1" ]]; then
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
       log_warn "[DRY-RUN] rm -rf '${destdir}'"
       log_warn "[DRY-RUN] mkdir -p '${destdir}'"
       log_warn "[DRY-RUN] zstd -d -c '${tarball}' | tar -xf - -C '${destdir}'"
@@ -771,8 +708,11 @@ build_and_install_pkg() {
       if command -v zstd >/dev/null 2>&1; then
         zstd -d -c "${tarball}" | tar -xf - -C "${destdir}"
       else
-        log_error "zstd não encontrado para descompactar cache binário."
-        exit 1
+        log_warn "zstd não encontrado; tentando extrair tar sem compressão."
+        tar -xf "${tarball}" -C "${destdir}" || {
+          log_error "Falha ao extrair ${tarball}"
+          exit 1
+        }
       fi
 
       run_cmd rsync -a "${destdir}/" "${ADM_ROOTFS}/"
@@ -784,7 +724,7 @@ build_and_install_pkg() {
     return 0
   fi
 
-  # Flags extras da receita
+  # Flags extras
   if [[ -n "${PKG_CFLAGS_EXTRA:-}" ]]; then
     CFLAGS="${CFLAGS} ${PKG_CFLAGS_EXTRA}"
     CXXFLAGS="${CXXFLAGS} ${PKG_CFLAGS_EXTRA}"
@@ -793,13 +733,11 @@ build_and_install_pkg() {
     LDFLAGS="${LDFLAGS} ${PKG_LDFLAGS_EXTRA}"
   fi
 
-  mkdir -p "${build_dir}" "${destdir}"
-
   # FETCH
   if [[ ! -f "${stamp_fetch}" ]]; then
     log_info "Buscando fontes para ${PKG_NAME}-${PKG_VERSION}..."
     fetch_source "$full"
-    [[ "${ADM_DRY_RUN:-0}" = "1" ]] || touch "${stamp_fetch}"
+    [[ "${ADM_DRY_RUN}" = "1" ]] || touch "${stamp_fetch}"
   else
     log_info "Fase FETCH já concluída (retomando)."
   fi
@@ -808,7 +746,7 @@ build_and_install_pkg() {
   if [[ ! -f "${stamp_extract}" ]]; then
     log_info "Extraindo fontes para ${build_dir}..."
     extract_source "$full"
-    [[ "${ADM_DRY_RUN:-0}" = "1" ]] || touch "${stamp_extract}"
+    [[ "${ADM_DRY_RUN}" = "1" ]] || touch "${stamp_extract}"
   else
     log_info "Fase EXTRACT já concluída (retomando)."
   fi
@@ -819,9 +757,8 @@ build_and_install_pkg() {
   if [[ ! -f "${stamp_configure}" ]]; then
     log_info "Configurando ${PKG_NAME}-${PKG_VERSION}..."
 
-    if [[ "${ADM_DRY_RUN:-0}" = "1" ]]; then
-      local cfg_preview=" ./configure"
-      cfg_preview+=" --host='${TARGET_TRIPLET}' --build='${TARGET_TRIPLET}' --prefix=/usr --sysconfdir=/etc --localstatedir=/var"
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+      local cfg_preview=" ./configure --host='${TARGET_TRIPLET}' --build='${TARGET_TRIPLET}' --prefix=/usr --sysconfdir=/etc --localstatedir=/var"
       if declare -p PKG_CONFIGURE_OPTS >/dev/null 2>&1; then
         cfg_preview+=" ${PKG_CONFIGURE_OPTS[*]}"
       fi
@@ -855,7 +792,6 @@ build_and_install_pkg() {
   if [[ ! -f "${stamp_build}" ]]; then
     log_info "Compilando ${PKG_NAME}-${PKG_VERSION}..."
 
-    # Determina número de jobs
     local jobs
     if [[ -n "${ADM_JOBS}" ]]; then
       jobs="${ADM_JOBS}"
@@ -865,7 +801,7 @@ build_and_install_pkg() {
       jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
     fi
 
-    if [[ "${ADM_DRY_RUN:-0}" = "1" ]]; then
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
       local make_preview=" make -j'${jobs}'"
       if declare -p PKG_MAKE_OPTS >/dev/null 2>&1; then
         make_preview+=" ${PKG_MAKE_OPTS[*]}"
@@ -894,7 +830,7 @@ build_and_install_pkg() {
   if [[ ! -f "${stamp_install}" ]]; then
     log_info "Instalando ${PKG_NAME}-${PKG_VERSION} em DESTDIR..."
 
-    if [[ "${ADM_DRY_RUN:-0}" = "1" ]]; then
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
       local make_install_preview=" make DESTDIR='${destdir}' install"
       if declare -p PKG_MAKE_INSTALL_OPTS >/dev/null 2>&1; then
         make_install_preview+=" ${PKG_MAKE_INSTALL_OPTS[*]}"
@@ -910,7 +846,7 @@ build_and_install_pkg() {
         if command -v make >/dev/null 2>&1; then
           run_cmd make "${install_args[@]}"
         else
-          log_warn "make não encontrado; assumindo instalação custom via hook."
+          log_warn "make não encontrado; assumindo instalação via hook."
         fi
       )
       touch "${stamp_install}"
@@ -922,7 +858,7 @@ build_and_install_pkg() {
   run_hook "$full" "pre_install"
 
   # Strip de binários ELF (opcional)
-  if [[ "${ADM_STRIP_BINARIES}" = "1" && "${ADM_DRY_RUN:-0}" != "1" ]]; then
+  if [[ "${ADM_STRIP_BINARIES}" = "1" && "${ADM_DRY_RUN}" != "1" ]]; then
     if command -v file >/dev/null 2>&1 && command -v "${STRIP:-strip}" >/dev/null 2>&1; then
       log_info "Executando strip em binários ELF instalados..."
       find "${destdir}" -type f -print0 | while IFS= read -r -d '' f; do
@@ -937,7 +873,7 @@ build_and_install_pkg() {
 
   # Geração de tarball (cache binário)
   log_info "Gerando tarball em cache: ${tarball}"
-  if [[ "${ADM_DRY_RUN:-0}" = "1" ]]; then
+  if [[ "${ADM_DRY_RUN}" = "1" ]]; then
     log_warn "[DRY-RUN] (cd '${destdir}' && tar -cf - . | zstd -19 -o '${tarball}')"
   else
     mkdir -p "$(dirname "${tarball}")"
@@ -951,7 +887,7 @@ build_and_install_pkg() {
 
   # Instala em rootfs
   log_info "Instalando em rootfs: ${ADM_ROOTFS}"
-  if [[ "${ADM_DRY_RUN:-0}" = "1" ]]; then
+  if [[ "${ADM_DRY_RUN}" = "1" ]]; then
     log_warn "[DRY-RUN] rsync -a '${destdir}/' '${ADM_ROOTFS}/'"
   else
     run_cmd rsync -a "${destdir}/" "${ADM_ROOTFS}/"
@@ -963,7 +899,7 @@ build_and_install_pkg() {
 }
 
 ###############################################################################
-# Dependências / grafos / uninstall / rebuild / comandos
+# Dependências / grafos
 ###############################################################################
 collect_deps_recursive() {
   local full="$1"
@@ -984,10 +920,9 @@ collect_deps_recursive() {
   done
 }
 
-# Topological sort simples via DFS
 topo_sort_dfs() {
   local pkgs=("$@")
-  declare -A visited
+  declare -A visited=()
   local stack=()
 
   _dfs() {
@@ -1021,7 +956,6 @@ topo_sort_dfs() {
     fi
   done
 
-  # stack em ordem topológica (deps primeiro)
   printf '%s\n' "${stack[@]}"
 }
 
@@ -1046,6 +980,9 @@ build_with_deps() {
   done
 }
 
+###############################################################################
+# Uninstall / rebuild
+###############################################################################
 uninstall_pkg() {
   local full
   full=$(normalize_pkg_name "$1")
@@ -1064,19 +1001,22 @@ uninstall_pkg() {
   fi
 
   log_info "Removendo arquivos de ${full}"
-  if [[ "${ADM_DRY_RUN:-0}" = "1" ]]; then
-    while IFS= read -r f; do
+
+  mapfile -t paths < "$files"
+
+  if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+    for f in "${paths[@]}"; do
       log_warn "[DRY-RUN] rm -f '${ADM_ROOTFS}${f}'"
-    done < "$files"
+    done
   else
     # Remove arquivos
-    while IFS= read -r f; do
+    for f in "${paths[@]}"; do
       rm -f "${ADM_ROOTFS}${f}" 2>/dev/null || true
-    done < "$files"
+    done
     # Remove diretórios vazios (melhor esforço)
-    tac "$files" 2>/dev/null | while IFS= read -r f; do
-      local d
-      d=$(dirname "${ADM_ROOTFS}${f}")
+    local idx d
+    for (( idx=${#paths[@]}-1; idx>=0; idx-- )); do
+      d=$(dirname "${ADM_ROOTFS}${paths[$idx]}")
       rmdir "$d" 2>/dev/null || true
     done
     rm -rf "$dbdir"
@@ -1093,8 +1033,8 @@ uninstall_with_reverse_deps() {
     return 0
   fi
 
-  declare -A deps_of
-  declare -A all_pkgs
+  declare -A deps_of=()
+  declare -A all_pkgs=()
 
   while IFS= read -r meta_file; do
     local pkg
@@ -1112,18 +1052,23 @@ uninstall_with_reverse_deps() {
         if [[ "$d" == */* ]]; then
           dep_full="$d"
         else
-          dep_full=$(normalize_pkg_name "$d")
+          # Se não conseguir resolver, apenas ignore essa dependência
+          if dep_full=$(normalize_pkg_name "$d" 2>/dev/null); then
+            :
+          else
+            log_warn "Dependência '${d}' em ${pkg} não pôde ser resolvida; ignorando."
+            continue
+          fi
         fi
         deps_of["$dep_full"]+="${pkg} "
       done
     fi
   done < <(find "${ADM_DB_DIR}" -mindepth 2 -maxdepth 2 -type f -name meta | sort)
 
-  declare -A to_remove
+  declare -A to_remove=()
   local queue=("$full")
   to_remove["$full"]=1
 
-  local q
   while (( ${#queue[@]} > 0 )); do
     local cur="${queue[0]}"
     queue=("${queue[@]:1}")
@@ -1195,6 +1140,9 @@ rebuild_pkg() {
   ADM_FORCE_REBUILD=1 build_with_deps "$full"
 }
 
+###############################################################################
+# Comandos de alto nível
+###############################################################################
 cmd_info() {
   local full
   full=$(normalize_pkg_name "$1")
@@ -1204,7 +1152,7 @@ cmd_info() {
   echo "Nome:   ${PKG_NAME}"
   echo "Versão: ${PKG_VERSION}"
   echo "Perfil: ${ADM_PROFILE}"
-  echo "Triplet:${TARGET_TRIPLET}"
+  echo "Triplet:${TARGET_TRIPLET:-}"
   echo "URL(s):"
   if declare -p PKG_URLS >/dev/null 2>&1; then
     printf '  - %s\n' "${PKG_URLS[@]}"
@@ -1280,11 +1228,11 @@ cmd_update() {
 # main
 ###############################################################################
 main() {
-  ADM_DRY_RUN="${ADM_DRY_RUN:-0}"
-  check_dependencies
-
   parse_global_args "$@"
   set -- "${ADM_ARGS[@]}"
+
+  # Agora ADM_PROFILE final está definido → calcula paths
+  init_paths
 
   local cmd="${1:-}"
   shift || true
@@ -1294,6 +1242,7 @@ main() {
       usage
       ;;
     update)
+      check_dependencies
       cmd_update
       ;;
     build|install)
@@ -1301,6 +1250,7 @@ main() {
         log_error "Informe o pacote para build/install."
         exit 1
       fi
+      check_dependencies
       build_with_deps "$1"
       ;;
     uninstall)
@@ -1308,9 +1258,11 @@ main() {
         log_error "Informe o pacote para uninstall."
         exit 1
       fi
+      check_dependencies
       uninstall_with_reverse_deps "$1"
       ;;
     rebuild)
+      check_dependencies
       if [[ $# -eq 0 || "$1" = "world" ]]; then
         rebuild_world
       else
@@ -1343,6 +1295,10 @@ main() {
       ;;
     dry-run)
       ADM_DRY_RUN=1
+      if [[ $# -lt 1 ]]; then
+        log_error "Informe o comando a ser executado em dry-run."
+        exit 1
+      fi
       main "$@"
       ;;
     *)
