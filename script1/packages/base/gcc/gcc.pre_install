@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Nome do pacote = basename do arquivo sem extensão
+pkg_name="$(basename "${BASH_SOURCE[0]%.*}")"
+
+profile="${ADM_PROFILE:-glibc}"
+triplet="${TARGET_TRIPLET:-native}"
+
+build_dir="${ADM_BUILD_ROOT}/${profile}/${triplet}/${pkg_name}"
+
+# Garante que o diretório existe (extract_source já deve ter rodado)
+if [[ ! -d "${build_dir}" ]]; then
+  echo "[gcc pre_install] ERRO: build_dir não existe: ${build_dir}" >&2
+  exit 1
+fi
+
+cd "${build_dir}"
+
+# Integra libmpfr
+mpfr_ver="4.2.2"
+mpfr_tar="${ADM_CACHE_DIR}/mpfr-${mpfr_ver}.tar.xz"
+if [[ -f "${mpfr_tar}" && ! -d mpfr ]]; then
+  echo "[gcc pre_install] Extraindo MPFR ${mpfr_ver}..."
+  tar -xf "${mpfr_tar}"
+  if [[ -d "mpfr-${mpfr_ver}" ]]; then
+    mv "mpfr-${mpfr_ver}" mpfr
+  fi
+fi
+
+# Integra gmp
+gmp_ver="6.3.0"
+gmp_tar="${ADM_CACHE_DIR}/gmp-${gmp_ver}.tar.xz"
+if [[ -f "${gmp_tar}" && ! -d gmp ]]; then
+  echo "[gcc pre_install] Extraindo GMP ${gmp_ver}..."
+  tar -xf "${gmp_tar}"
+  if [[ -d "gmp-${gmp_ver}" ]]; then
+    mv "gmp-${gmp_ver}" gmp
+  fi
+fi
+
+# Integra mpc
+mpc_ver="1.3.1"
+mpc_tar="${ADM_CACHE_DIR}/mpc-${mpc_ver}.tar.gz"
+if [[ -f "${mpc_tar}" && ! -d mpc ]]; then
+  echo "[gcc pre_install] Extraindo MPC ${mpc_ver}..."
+  tar -xf "${mpc_tar}"
+  if [[ -d "mpc-${mpc_ver}" ]]; then
+    mv "mpc-${mpc_ver}" mpc
+  fi
+fi
+
+# Ajusta t-linux64 para usar lib em vez de lib64 em x86_64,
+# garantindo FHS mais simples em /usr/lib.
+case "${TARGET_TRIPLET}" in
+  x86_64-*)
+    if [[ -f gcc/config/i386/t-linux64 ]]; then
+      sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64 || true
+    fi
+    ;;
+esac
