@@ -39,15 +39,24 @@ run_cmd() {
 }
 
 ###############################################################################
-# Configuração de diretórios
+# Raiz e diretórios básicos, isolados por perfil (glibc/musl/aggressive)
 ###############################################################################
-# ADM_ROOT="${ADM_ROOT:-/opt/adm}"
-# Rootfs segregado por perfil/libc automaticamente
+
+# Raiz do ADM (compartilhada entre perfis)
+ADM_ROOT="${ADM_ROOT:-/opt/adm}"
+
+# Perfil padrão (pode ser sobrescrito por env ou pela opção -P/--profile)
+ADM_PROFILE="${ADM_PROFILE:-glibc}"
+
+# Diretório de receitas (compartilhado entre perfis)
+ADM_PACKAGES_DIR="${ADM_PACKAGES_DIR:-${ADM_ROOT}/packages}"
+
+# Rootfs segregado por perfil (pode ser sobrescrito por ADM_ROOTFS)
 if [[ -n "${ADM_ROOTFS:-}" ]]; then
-  # Se o usuário já definiu explicitamente, respeita
+  # Usuário já definiu explicitamente, não mexe
   ADM_ROOTFS="${ADM_ROOTFS}"
 else
-  case "${ADM_PROFILE:-glibc}" in
+  case "${ADM_PROFILE}" in
     glibc)
       ADM_ROOTFS="${ADM_ROOT}/rootfs-glibc"
       ;;
@@ -58,49 +67,90 @@ else
       ADM_ROOTFS="${ADM_ROOT}/rootfs-aggressive"
       ;;
     *)
+      # fallback genérico
       ADM_ROOTFS="${ADM_ROOT}/rootfs"
       ;;
   esac
 fi
 
-# Diretório de receitas
-ADM_PACKAGES_DIR="${ADM_PACKAGES_DIR:-${ADM_ROOT}/packages}"
+# Diretório de build segregado por perfil (pode ser sobrescrito por ADM_BUILD_ROOT)
+if [[ -n "${ADM_BUILD_ROOT:-}" ]]; then
+  ADM_BUILD_ROOT="${ADM_BUILD_ROOT}"
+else
+  case "${ADM_PROFILE}" in
+    glibc)
+      ADM_BUILD_ROOT="${ADM_ROOT}/build-glibc"
+      ;;
+    musl)
+      ADM_BUILD_ROOT="${ADM_ROOT}/build-musl"
+      ;;
+    aggressive)
+      ADM_BUILD_ROOT="${ADM_ROOT}/build-aggressive"
+      ;;
+    *)
+      ADM_BUILD_ROOT="${ADM_ROOT}/build"
+      ;;
+  esac
+fi
 
-# Build e estado
-ADM_BUILD_ROOT="${ADM_BUILD_ROOT:-${ADM_ROOT}/build}"
+# Diretório de estado segregado por perfil (locks, stamps, etc.)
+if [[ -n "${ADM_STATE_DIR:-}" ]]; then
+  ADM_STATE_DIR="${ADM_STATE_DIR}"
+else
+  case "${ADM_PROFILE}" in
+    glibc)
+      ADM_STATE_DIR="${ADM_ROOT}/state-glibc"
+      ;;
+    musl)
+      ADM_STATE_DIR="${ADM_ROOT}/state-musl"
+      ;;
+    aggressive)
+      ADM_STATE_DIR="${ADM_ROOT}/state-aggressive"
+      ;;
+    *)
+      ADM_STATE_DIR="${ADM_ROOT}/state"
+      ;;
+  esac
+fi
+
+# Banco de dados de pacotes instalados segregado por perfil
+if [[ -n "${ADM_DB_DIR:-}" ]]; then
+  ADM_DB_DIR="${ADM_DB_DIR}"
+else
+  case "${ADM_PROFILE}" in
+    glibc)
+      ADM_DB_DIR="${ADM_ROOT}/db-glibc"
+      ;;
+    musl)
+      ADM_DB_DIR="${ADM_ROOT}/db-musl"
+      ;;
+    aggressive)
+      ADM_DB_DIR="${ADM_ROOT}/db-aggressive"
+      ;;
+    *)
+      ADM_DB_DIR="${ADM_ROOT}/db"
+      ;;
+  esac
+fi
+
+# Diretórios comuns (não segregados por perfil; mude se quiser tudo 100% separado)
 ADM_LOG_DIR="${ADM_LOG_DIR:-${ADM_ROOT}/log}"
-ADM_DB_DIR="${ADM_DB_DIR:-${ADM_ROOT}/db}"
-ADM_STATE_DIR="${ADM_STATE_DIR:-${ADM_ROOT}/state}"
-
-# Cache (sources)
 ADM_CACHE_DIR="${ADM_CACHE_DIR:-${ADM_ROOT}/cache}"
-
-# Cache binário (tarballs)
 ADM_PKG_OUTPUT_DIR="${ADM_PKG_OUTPUT_DIR:-${ADM_ROOT}/pkgs}"
 
-# Rootfs alvo
-ADM_ROOTFS="${ADM_ROOTFS:-${ADM_ROOT}/rootfs}"
-
-# Toolchain e perfil
+# Toolchain raiz (compartilhado, mas você pode segregar depois se quiser)
 ADM_TOOLCHAIN_PREFIX="${ADM_TOOLCHAIN_PREFIX:-${ADM_ROOT}/toolchain}"
-ADM_PROFILE="${ADM_PROFILE:-glibc}"
 ADM_USE_NATIVE="${ADM_USE_NATIVE:-0}"
 
-# Controle de cache e strip
-ADM_ENABLE_BIN_CACHE="${ADM_ENABLE_BIN_CACHE:-1}"
-ADM_STRIP_BINARIES="${ADM_STRIP_BINARIES:-1}"
-
-# Paralelismo
-ADM_JOBS="${ADM_JOBS:-}"
-
+# Cria diretórios base
 mkdir -p \
   "${ADM_PACKAGES_DIR}" \
   "${ADM_BUILD_ROOT}" \
+  "${ADM_STATE_DIR}" \
+  "${ADM_DB_DIR}" \
+  "${ADM_LOG_DIR}" \
   "${ADM_CACHE_DIR}" \
   "${ADM_PKG_OUTPUT_DIR}" \
-  "${ADM_LOG_DIR}" \
-  "${ADM_DB_DIR}" \
-  "${ADM_STATE_DIR}" \
   "${ADM_ROOTFS}"
 
 ###############################################################################
