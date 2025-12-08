@@ -4,50 +4,41 @@
 PKG_NAME="gcc-pass1"
 PKG_VERSION="15.2.0"
 
-# URLs oficiais do GCC 15.2.0
 PKG_URLS=(
   "https://ftp.gnu.org/gnu/gcc/gcc-${PKG_VERSION}/gcc-${PKG_VERSION}.tar.xz"
 )
 
-# SHA256 do tarball principal (confira no seu mirror se quiser):
-# gcc-15.2.0.tar.xz → SHA256 oficial em https://ftp.gnu.org
-PKG_SHA256S=(
-  "3b734d1fc0c158f5ad7881e5341c04a7e7a1a9ad4550f8e910a2c8421c0db172"
-)
+# SHA256 opcional (confirme com o mirror que você usar)
+# PKG_SHA256S=(
+#   "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+# )
 
-# Dependências (ajuste conforme sua árvore)
-# Em Pass 1, você precisa de:
-# - binutils-pass1 (já em /tools)
-# - headers mínimos (glibc headers ou similares) se for fazer um cross já com libc
+# Dependências típicas:
 PKG_DEPENDS=(
   "core/binutils-pass1"
-  # "core/linux-headers"   # se você tiver
-  # "core/glibc-headers"   # opcional, depende da estratégia
+  # "core/linux-headers"
+  # "core/glibc-headers"
 )
 
-# Se quiser forçar explicitamente um target estilo LFS:
-# Exemplo para x86_64:
-# PKG_TARGET_TRIPLET="x86_64-lfs-linux-gnu"
-# Se deixar sem, o adm calcula com base em ADM_TARGET_ARCH + ADM_PROFILE.
-
-# GCC precisa de bibliotecas de suporte no source tree (gmp, mpfr, mpc etc.)
-# Em ambiente LFS-like, costuma-se usar as cópias internas do tarball do GCC,
-# ou apontar para pacotes externos. Aqui vou assumir uso das libs internas que
-# vêm junto no tarball (GCC 15.x oferece --with-gmp=..., mas o caminho padrão
-# já resolve se você extrair gmp/mpfr/mpc na árvore do GCC).
+# OBS IMPORTANTES:
+# - O adm.sh já monta ADM_CONFIGURE_ARGS_COMMON com:
+#     --host=...
+#     --build=...
+#     --prefix=/usr
+#     --sysconfdir=/etc
+#     --localstatedir=/var
+# - Aqui só colocamos as opções específicas do GCC Pass 1.
+# - NÃO vamos usar TARGET_TRIPLET diretamente aqui, pelo mesmo motivo do binutils
+#   (não está definido no momento do source).
 #
-# Se você quiser usar libs externas, adicione PKG_DEPENDS e configure:
-#   --with-gmp=/algum/caminho  etc.
+# Caso você queira um cross de verdade, pode:
+#   - definir PKG_TARGET_TRIPLET="x86_64-lfs-linux-gnu" (por exemplo), e
+#   - editar PKG_CONFIGURE_OPTS para adicionar um "--target=SEU_TRIPLET" fixo.
 
-# PREFIX de Pass 1: /tools (isolado do sistema final)
 PKG_CONFIGURE_OPTS=(
-  "--prefix=/tools"
-  "--build=${ADM_TARGET_ARCH}-pc-linux-gnu"  # ajuste conforme host se quiser
-  "--host=${ADM_TARGET_ARCH}-pc-linux-gnu"
-  "--target=${TARGET_TRIPLET}"              # definido pelo adm em setup_profiles
-  "--with-sysroot=${ADM_ROOTFS}"
-  "--with-newlib"
+  "--prefix=/tools"          # Prefix temporário para Pass 1
   "--without-headers"
+  "--with-newlib"
   "--disable-nls"
   "--disable-shared"
   "--disable-multilib"
@@ -61,16 +52,19 @@ PKG_CONFIGURE_OPTS=(
   "--enable-languages=c"
 )
 
-# GCC Pass 1 não precisa de C++ ainda; só C.
-# Flags extras, se quiser "segurar" otimizações no Pass 1:
+# Se quiser, você pode adicionar flags extras:
 # PKG_CFLAGS_EXTRA="-O2"
 # PKG_LDFLAGS_EXTRA=""
 
-# Como o adm.sh faz build diretamente dentro de ${build_dir}, e o
-# binutils recomenda out-of-source build, você pode optar por
-# reconfigurar o adm para criar um subdir "build" dentro de gcc, mas
-# aqui vamos assumir build-in-tree mesmo, para simplificar.
-#
-# Se você QUISER explicitamente out-of-source, o caminho é usar um
-# hook pre_build que crie um subdir e rode configure/make lá, mas aí o
-# adm precisa ser adaptado para não rodar ./configure na raiz.
+# MAKE padrão:
+#   make -j$(nproc) ${PKG_MAKE_OPTS[@]}
+# Em Pass 1, normalmente não precisa de nada especial aqui.
+# PKG_MAKE_OPTS=()
+
+# INSTALL padrão:
+#   make ${PKG_MAKE_INSTALL_OPTS[@]} DESTDIR="${destdir}" install
+# Para GCC Pass 1, em muitos cenários basta "make install". Se você quiser
+# algo mais fino (por exemplo, instalar só certas partes), pode customizar:
+# PKG_MAKE_INSTALL_OPTS=(
+#   # opções extras de make install, se necessário
+# )
