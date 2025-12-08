@@ -65,13 +65,16 @@ log_ok() {
 run_cmd() {
   # Wrapper para honrar dry-run
   if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-    echo -e "${COLOR_WARN}[DRY-RUN]${COLOR_RESET} $*"
+    # Log em stderr para não misturar com saídas "reais"
+    echo -e "${COLOR_WARN}[DRY-RUN]${COLOR_RESET} $*" >&2
     return 0
   fi
 
-  echo -e "${COLOR_INFO}[CMD]${COLOR_RESET} $*"
+  echo -e "${COLOR_INFO}[CMD]${COLOR_RESET} $*" >&2
 
-  # Se vier uma string única, aceita shell completo; se vier args, executa direto
+  # Compatibilidade:
+  # - 1 argumento: trata como comando de shell completo (eval)
+  # - >1 argumento: executa diretamente via execve
   if [[ $# -eq 1 ]]; then
     eval "$1"
   else
@@ -125,6 +128,7 @@ setup_profiles() {
   SYS_LIB_DIR="${ADM_SYSROOT}/usr/lib"
   SYS_LIB64_DIR="${ADM_SYSROOT}/usr/lib64"
 
+  # Flags base
   CFLAGS_COMMON="-pipe"
   CXXFLAGS_COMMON="-pipe"
   CPPFLAGS_COMMON="-I${SYS_INC_DIR}"
@@ -150,10 +154,11 @@ setup_profiles() {
 
   export TARGET_TRIPLET
 
-  export CFLAGS="${CFLAGS:-${CFLAGS_COMMON} ${CFLAGS_OPT}}"
-  export CXXFLAGS="${CXXFLAGS:-${CXXFLAGS_COMMON} ${CXXFLAGS_OPT}}"
-  export CPPFLAGS="${CPPFLAGS:-${CPPFLAGS_COMMON}}"
-  export LDFLAGS="${LDFLAGS:-${LDFLAGS_COMMON} ${LDFLAGS_OPT}}"
+  # IMPORTANTE: zera as flags a cada chamada (não herda de builds anteriores)
+  export CFLAGS="${CFLAGS_COMMON} ${CFLAGS_OPT}"
+  export CXXFLAGS="${CXXFLAGS_COMMON} ${CXXFLAGS_OPT}"
+  export CPPFLAGS="${CPPFLAGS_COMMON}"
+  export LDFLAGS="${LDFLAGS_COMMON} ${LDFLAGS_OPT}"
 
   ADM_USE_NATIVE="${ADM_USE_NATIVE:-0}"
 
@@ -197,18 +202,14 @@ setup_profiles() {
   export BUILD_TRIPLET="${BUILD_TRIPLET:-${TARGET_TRIPLET}}"
   export HOST_TRIPLET="${HOST_TRIPLET:-${TARGET_TRIPLET}}"
 
-  export ADM_CONFIGURE_ARGS_COMMON="
-    --host=${HOST_TRIPLET}
-    --build=${BUILD_TRIPLET}
-    --prefix=/usr
-    --sysconfdir=/etc
-    --localstatedir=/var
-  "
-
-  export DESTDIR="${DESTDIR:-}"
-  export SYSROOT="${ADM_SYSROOT}"
-
-  export ADM_PROFILE ADM_TARGET_ARCH ADM_TARGET_LIBC ADM_ROOT ADM_ROOTFS ADM_SYSROOT
+  # Agora como array, evitando problemas com string multi-linha
+  ADM_CONFIGURE_ARGS_COMMON=(
+    "--host=${HOST_TRIPLET}"
+    "--build=${BUILD_TRIPLET}"
+    "--prefix=/usr"
+    "--sysconfdir=/etc"
+    "--localstatedir=/var"
+  )
 }
 
 ###############################################################################
@@ -243,7 +244,7 @@ EOF
 }
 
 parse_global_args() {
-  local args=()
+  ADM_ARGS=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -P|--profile)
@@ -253,11 +254,9 @@ parse_global_args() {
       -h|--help)
         usage; exit 0;;
       *)
-        args+=("$1"); shift;;
+        ADM_ARGS+=("$1"); shift;;
     esac
   done
-  set -- "${args[@]}"
-  echo "$@"
 }
 
 ###############################################################################
@@ -712,7 +711,7 @@ build_and_install_pkg() {
 
   setup_profiles
 
-  # overrides por pacote (flags adicionais)
+  # overrides por pacote (flags adicionais) – valem só para este build
   if [[ -n "${PKG_CFLAGS_EXTRA:-}" ]]; then
     CFLAGS="${CFLAGS} ${PKG_CFLAGS_EXTRA}"
     CXXFLAGS="${CXXFLAGS} ${PKG_CFLAGS_EXTRA}"
@@ -755,9 +754,8 @@ build_and_install_pkg() {
     fi
   fi
 
-  run_cmd "mkdir -p '${destdir}'"
+  mkdir -p "${build_dir}" "${destdir}"
 
-  # Baixa e extrai fontes (idempotente; extract_source apenas retorna se build_dir já existir)
   fetch_source "$full"
   extract_source "$full"
 
@@ -768,8 +766,8 @@ build_and_install_pkg() {
 
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
       local cfg_preview=" ./configure"
-      if [[ -n "${ADM_CONFIGURE_ARGS_COMMON:-}" ]]; then
-        cfg_preview+=" ${ADM_CONFIGURE_ARGS_COMMON}"
+      if [[ ${#ADM_CONFIGURE_ARGS_COMMON[@]:-0} -gt 0 ]]; then
+        cfg_preview+=" ${ADM_CONFIGURE_ARGS_COMMON[*]}"
       else
         cfg_preview+=" --host='${TARGET_TRIPLET}' --build='${TARGET_TRIPLET}' --prefix=/usr --sysconfdir=/etc --localstatedir=/var"
       fi
@@ -788,11 +786,10 @@ build_and_install_pkg() {
         cd "$build_dir"
 
         local cfg_args=()
-        if [[ -n "${ADM_CONFIGURE_ARGS_COMMON:-}" ]]; then
-          # shellcheck disable=SC2206
-          cfg_args=(${ADM_CONFIGURE_ARGS_COMMON})
+        if [[ ${#ADM_CONFIGURE_ARGS_COMMON[@]:-0} -gt 0 ]]; then
+          cfg_args+=("${ADM_CONFIGURE_ARGS_COMMON[@]}")
         else
-          cfg_args=(
+          cfg_args+=(
             "--host=${TARGET_TRIPLET}"
             "--build=${TARGET_TRIPLET}"
             "--prefix=/usr"
@@ -830,10 +827,11 @@ build_and_install_pkg() {
   else
     (
       cd "$build_dir"
-      local mi_args=( "DESTDIR=${destdir}" )
+      local mi_args=()
       if declare -p PKG_MAKE_INSTALL_OPTS >/dev/null 2>&1; then
         mi_args+=("${PKG_MAKE_INSTALL_OPTS[@]}")
       fi
+      mi_args+=( "DESTDIR=${destdir}" )
       run_cmd make "${mi_args[@]}" install
     )
   fi
@@ -849,10 +847,11 @@ build_and_install_pkg() {
 
   local tarball
   tarball=$(pkg_tarball_path "$full" "${PKG_VERSION}")
-  log_info "Empacotando em ${tarball}"
+  log_info "Gerando tarball em cache: ${tarball}"
   if [[ "${ADM_DRY_RUN}" = "1" ]]; then
     log_warn "[DRY-RUN] tar -I 'zstd -19' -cf '${tarball}' -C '${destdir}' ."
   else
+    mkdir -p "$(dirname "${tarball}")"
     run_cmd tar -I 'zstd -19' -cf "${tarball}" -C "${destdir}" .
   fi
 
@@ -865,22 +864,8 @@ build_and_install_pkg() {
 
   register_install "$full" "$destdir"
 
-  if [[ -n "${PKG_POST_INSTALL_CMDS:-}" ]]; then
-    log_info "Executando PKG_POST_INSTALL_CMDS dentro de ${ADM_ROOTFS}"
-    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      log_warn "[DRY-RUN] (cd '${ADM_ROOTFS}' && /bin/sh -c '${PKG_POST_INSTALL_CMDS}')"
-    else
-      (
-        cd "${ADM_ROOTFS}"
-        /bin/sh -c "${PKG_POST_INSTALL_CMDS}"
-      )
-    fi
-  fi
-
   run_hook "$full" "post_install"
-
-  log_ok "Pacote ${full} (${PKG_VERSION}) instalado com sucesso."
-} 
+}
 
 ###############################################################################
 # Dependências (topological sort via Kahn)
@@ -908,25 +893,29 @@ topo_sort_kahn() {
   done
 
   declare -A indeg
-  declare -A deps
+  declare -A graph
 
+  # Inicializa indegree
   for p in "${pkgs[@]}"; do
     indeg["$p"]=0
   done
 
+  # Constrói grafo: arestas dep -> pacote
   for p in "${pkgs[@]}"; do
     load_pkg_metadata "$p"
     local d
     for d in "${PKG_DEPENDS[@]}"; do
       local dep_full
       dep_full=$(normalize_pkg_name "$d")
+      # Só considera dependências que também estão no conjunto pkgs
       if [[ -n "${indeg[$dep_full]:-}" ]]; then
-        deps["$p"]+="${dep_full} "
+        graph["$dep_full"]+="${p} "
         indeg["$p"]=$(( indeg["$p"] + 1 ))
       fi
     done
   done
 
+  # Fila inicial: nós sem dependências (indegree == 0)
   local -a queue=()
   for p in "${pkgs[@]}"; do
     if [[ "${indeg[$p]}" -eq 0 ]]; then
@@ -939,7 +928,8 @@ topo_sort_kahn() {
     local n="${queue[0]}"
     queue=("${queue[@]:1}")
     result+=("$n")
-    for m in ${deps["$n"]:-}; do
+    local m
+    for m in ${graph["$n"]:-}; do
       indeg["$m"]=$(( indeg["$m"] - 1 ))
       if [[ "${indeg[$m]}" -eq 0 ]]; then
         queue+=("$m")
@@ -1165,13 +1155,28 @@ cmd_info() {
   local dbdir
   dbdir=$(pkg_db_dir "$full")
 
+  local installed_profile=""
+  if [[ -f "${dbdir}/meta" ]]; then
+    installed_profile=$(grep '^profile=' "${dbdir}/meta" | cut -d= -f2- || true)
+  fi
+
   echo "Pacote:    $full"
   echo "Nome:      ${PKG_NAME}"
   echo "Versão:    ${PKG_VERSION}"
   echo "Categoria: ${PKG_CATEGORY}"
   echo "URL:       ${PKG_URL}"
-  echo "Perfil:    ${ADM_PROFILE}"
+
+  if [[ -n "$installed_profile" ]]; then
+    echo "Perfil (instalado): ${installed_profile}"
+    if [[ "$installed_profile" != "${ADM_PROFILE}" ]]; then
+      echo "Perfil atual:       ${ADM_PROFILE}"
+    fi
+  else
+    echo "Perfil:    ${ADM_PROFILE}"
+  fi
+
   echo "Depende:   ${PKG_DEPENDS[*]:-(nenhuma)}"
+
   if [[ -d "$dbdir" ]]; then
     echo "Status:    instalado"
     if [[ -f "${dbdir}/files.list" ]]; then
@@ -1229,10 +1234,8 @@ cmd_update() {
 # main
 ###############################################################################
 main() {
-  local rest
-  rest=$(parse_global_args "$@")
-  # shellcheck disable=SC2086
-  set -- $rest
+  parse_global_args "$@"
+  set -- "${ADM_ARGS[@]}"
 
   local cmd="${1:-}"
   shift || true
