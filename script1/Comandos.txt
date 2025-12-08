@@ -3,3 +3,9 @@
 | `./adm.sh build core/m4`               | `/opt/adm/rootfs-glibc`      |
 | `./adm.sh -P musl build core/m4`       | `/opt/adm/rootfs-musl`       |
 | `./adm.sh -P aggressive build core/m4` | `/opt/adm/rootfs-aggressive` |
+
+# Para uninstall
+./adm.sh -P musl uninstall core/m4
+
+./adm.sh uninstall core/m4
+
