@@ -1,42 +1,44 @@
 #!/usr/bin/env bash
-# Receita ADM para GNU Binutils 2.45.1 - Pass 1 (toolchain inicial)
+# Receita ADM para GNU Binutils 2.45.1 - Pass 1 (toolchain inicial em /tools)
 
 PKG_NAME="binutils-pass1"
 PKG_VERSION="2.45.1"
 
-# Fonte oficial: ajuste se você usa mirror próprio
+# Fonte oficial (ajuste se preferir outro mirror)
 PKG_URLS=(
-  "https://ftp.gnu.org/gnu/binutils/binutils-2.45.1.tar.xz"
+  "https://ftp.gnu.org/gnu/binutils/binutils-${PKG_VERSION}.tar.xz"
 )
 
-# SHA256 oficial; confira com o mirror que for usar
-# Se quiser, comente temporariamente até você validar.
-PKG_SHA256S=(
-  "b1426c2d0fb368c1e1f5086f2a8b8894320bf8c1a6c87d12f1f5c7c9a2e0a9f"
-)
+# SHA256 opcional (preencha com o valor que você quiser validar de fato)
+# Exemplo (pode não ser o definitivo, confirme no espelho que for usar):
+# PKG_SHA256S=(
+#   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# )
 
-# Dependências (ajuste de acordo com a sua árvore)
-# Para Pass 1, normalmente só precisa de um gcc/host mínimo e libc do host.
+# Dependências diretas (ajuste conforme sua árvore)
 PKG_DEPENDS=(
   # "core/gcc-native"
-  # "core/glibc-headers"  # se você tiver esse tipo de pacote
+  # "core/linux-headers"
 )
 
-# Este pacote é especial: ele é um binutils "pass 1".
-# Vamos forçar explicitamente o TARGET_TRIPLET, se você quiser.
-# Se preferir deixar o adm calcular, comente esta linha.
-# Exemplo para um toolchain x86_64-cross:
-# PKG_TARGET_TRIPLET="x86_64-lfs-linux-gnu"
-
-# Opções de configure típicas de Binutils Pass 1 (estilo LFS):
-#   - prefix /usr (ou /tools se você quiser um prefixo isolado)
-#   - disable-nls, disable-werror
-#   - sem gold, sem gprofng, sem ld plugins
+# IMPORTANTE:
+# - O adm.sh já passa:
+#     --host=...
+#     --build=...
+#     --prefix=/usr
+#     --sysconfdir=/etc
+#     --localstatedir=/var
+#   via ADM_CONFIGURE_ARGS_COMMON.
 #
-# O adm.sh já passa:
-#   --host, --build, --prefix=/usr, --sysconfdir=/etc, --localstatedir=/var
+# - Aqui só colocamos opções específicas deste pacote.
+# - NÃO usamos TARGET_TRIPLET aqui porque ele ainda não existe no momento do
+#   source do build.sh. Se você quiser um cross de verdade, pode:
+#   - definir PKG_TARGET_TRIPLET="x86_64-lfs-linux-gnu" (por exemplo), e
+#   - adicionar manualmente um "--target=SEU_TRIPLET" fixo em PKG_CONFIGURE_OPTS.
+#   Mas isso é uma decisão de layout da sua toolchain.
+
 PKG_CONFIGURE_OPTS=(
-  "--prefix=/tools"
+  "--prefix=/tools"              # Isola binutils Pass 1 em /tools
   "--disable-nls"
   "--disable-werror"
   "--disable-gprofng"
@@ -51,16 +53,19 @@ PKG_CONFIGURE_OPTS=(
   "--enable-deterministic-archives"
 )
 
-# O Binutils recomenda build em diretório separado (out-of-source).
-# O nosso adm já cria ${build_dir} vazio e extrai lá,
-# então está consistente com essa prática.
+# MAKE padrão do adm:
+#   make -j$(nproc) ${PKG_MAKE_OPTS[@]}
+# Para Pass 1 geralmente não precisa de nada especial aqui.
+# Se quiser algo extra, descomente:
+# PKG_MAKE_OPTS=(
+#   # opções extras de make, se precisar
+# )
 
-# Se você quiser flags extras específicas para o Pass 1:
-# (por exemplo, forçar build estático)
-# PKG_CFLAGS_EXTRA="-O2"
-# PKG_LDFLAGS_EXTRA="-static"
-
-# Deixe o fluxo padrão do adm:
-#   fetch_source → extract_source → ./configure → make → make install.
-# Se algum ajuste especial for necessário (por exemplo, usar somente 'ld-new'
-# ou renomear bins), isso pode ser feito via hooks (pre_install/post_install).
+# Fase install padrão do adm:
+#   make ${PKG_MAKE_INSTALL_OPTS[@]} DESTDIR="${destdir}" install
+# Para binutils Pass 1, "make install" simples em DESTDIR já funciona bem,
+# então deixamos PKG_MAKE_INSTALL_OPTS vazio.
+# Se precisar de ajustes (por ex. lib-path custom), coloque aqui:
+# PKG_MAKE_INSTALL_OPTS=(
+#   # opções extras de make para a instalação
+# )
