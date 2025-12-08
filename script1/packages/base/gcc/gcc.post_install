@@ -1,159 +1,63 @@
 #!/usr/bin/env bash
-# Hook post_install do GCC 15.2.0 para sanity-check inteligente (glibc / musl)
-
 set -euo pipefail
 
-: "${ADM_ROOT:=/opt/adm}"
-: "${ADM_ROOTFS:=/opt/adm/rootfs}"
+pkg_name="$(basename "${BASH_SOURCE[0]%.*}")"
 
-LOG_DIR="${ADM_ROOT}/log"
-mkdir -p "${LOG_DIR}"
-LOG_HOST="${LOG_DIR}/gcc-15.2.0-sanity.log"
+profile="${ADM_PROFILE:-glibc}"
+triplet="${TARGET_TRIPLET:-native}"
 
-echo "==> [gcc.post_install] Iniciando sanity-check do GCC 15.2.0" | tee -a "${LOG_HOST}"
-echo "    ROOTFS: ${ADM_ROOTFS}" | tee -a "${LOG_HOST}"
+root="${ADM_ROOTFS:-/opt/adm/rootfs}"
 
-if ! command -v chroot >/dev/null 2>&1; then
-  echo "!! chroot não encontrado no host – não é possível rodar sanity-check dentro do rootfs." | tee -a "${LOG_HOST}"
-  echo "!! Prosseguindo sem sanity-check (considere instalar util-linux/mount para ter chroot)." | tee -a "${LOG_HOST}"
-  exit 0
-fi
-
-if [[ ! -d "${ADM_ROOTFS}" ]]; then
-  echo "!! ADM_ROOTFS (${ADM_ROOTFS}) não existe. Abortando sanity-check." | tee -a "${LOG_HOST}"
-  exit 1
-fi
-
-###############################################################################
-# Detectar automaticamente se o rootfs usa glibc ou musl
-###############################################################################
-detect_libc_type() {
-  chroot "${ADM_ROOTFS}" /bin/sh -c '
-set -eu
-# 1) Se existir ldd, usar a saída dele
-if command -v ldd >/dev/null 2>&1; then
-  if ldd --version 2>&1 | grep -iq musl; then
-    echo musl
+# Tenta detectar o comando GCC alvo principal
+gcc_cmd="${root}/usr/bin/${triplet}-gcc"
+if [[ ! -x "${gcc_cmd}" ]]; then
+  # fallback: gcc "nativo" dentro do rootfs, se existir
+  if [[ -x "${root}/usr/bin/gcc" ]]; then
+    gcc_cmd="${root}/usr/bin/gcc"
   else
-    echo glibc
+    echo "[gcc post_install] AVISO: não encontrei ${triplet}-gcc nem gcc em ${root}/usr/bin" >&2
+    gcc_cmd=""
   fi
-  exit 0
 fi
 
-# 2) Sem ldd: heurísticas por arquivos conhecidos
-if ls /lib/ld-musl-*so.1 >/dev/null 2>&1; then
-  echo musl
-  exit 0
+if [[ -n "${gcc_cmd}" ]]; then
+  target="$("${gcc_cmd}" -dumpmachine 2>/dev/null || echo "${triplet}")"
+
+  # Ajusta donos dos headers internos do GCC
+  inc_base="${root}/usr/lib/gcc/${target}/15.2.0"
+  if [[ -d "${inc_base}/include" ]]; then
+    chown -R root:root "${inc_base}/include"
+  fi
+  if [[ -d "${inc_base}/include-fixed" ]]; then
+    chown -R root:root "${inc_base}/include-fixed"
+  fi
+
+  # Symlinks e plugin de LTO conforme LFS
+  (
+    cd "${root}"
+
+    # /usr/lib/cpp -> /usr/bin/cpp
+    if [[ -x usr/bin/cpp ]]; then
+      ln -svr usr/bin/cpp usr/lib || true
+    fi
+
+    # man page cc.1 -> gcc.1
+    if [[ -f usr/share/man/man1/gcc.1 ]]; then
+      ln -sv gcc.1 usr/share/man/man1/cc.1 || true
+    fi
+
+    # plugin LTO para binutils
+    mkdir -p usr/lib/bfd-plugins
+    if [[ -f "usr/libexec/gcc/${target}/15.2.0/liblto_plugin.so" ]]; then
+      ln -sfv "../../libexec/gcc/${target}/15.2.0/liblto_plugin.so" \
+        "usr/lib/bfd-plugins/liblto_plugin.so" || true
+    fi
+  )
 fi
 
-if ls /lib64/ld-linux-*so.2 >/dev/null 2>&1 || ls /lib/ld-linux-*so.2 >/dev/null 2>&1; then
-  echo glibc
-  exit 0
+# Se existir um hook *.sanity-check ao lado deste arquivo, execute-o
+sanity_hook="${BASH_SOURCE[0]%.*}.sanity-check"
+if [[ -f "${sanity_hook}" ]]; then
+  echo "[gcc post_install] Executando sanity-check: ${sanity_hook}"
+  "${ADM_HOOK_SHELL:-/bin/bash}" "${sanity_hook}"
 fi
-
-echo unknown
-'
-}
-
-LIBC_TYPE="$(detect_libc_type || echo unknown)"
-echo "    Detected libc type inside rootfs: ${LIBC_TYPE}" | tee -a "${LOG_HOST}"
-
-if [[ "${LIBC_TYPE}" = "unknown" ]]; then
-  echo "!! Não foi possível determinar de forma confiável se é glibc ou musl." | tee -a "${LOG_HOST}"
-  echo "!! Será feito um sanity-check genérico (sem assert específico de libc)." | tee -a "${LOG_HOST}"
-fi
-
-###############################################################################
-# Executar sanity-check dentro do rootfs
-###############################################################################
-chroot "${ADM_ROOTFS}" /bin/sh -c "
-set -e
-
-LIBC_TYPE='${LIBC_TYPE}'
-LOG='/var/log/gcc-15.2.0-sanity.log'
-mkdir -p /var/log
-
-{
-  echo '===== GCC 15.2.0 Sanity Check ====='
-  echo 'Data: '\"\$(date)\"
-  echo 'Kernel / Arch: '\"\$(uname -srmo)\"
-  echo 'PATH: '\"\$PATH\"
-  echo 'LIBC_TYPE: '\"\$LIBC_TYPE\"
-  echo
-
-  echo '-- Compilando programa dummy com cc...'
-  echo 'int main(){}' > dummy.c
-  cc dummy.c -v -Wl,--verbose &> dummy.log
-
-  echo
-  echo '-- Verificando interpretador dinâmico em a.out (readelf -l)...'
-  readelf -l a.out | grep 'Requesting program interpreter:' || {
-    echo '!! Não foi possível encontrar linha de interpretador dinâmico em readelf -l a.out' >&2
-    exit 1
-  }
-
-  echo
-  echo '-- Verificando crt*.o usados...'
-  grep -E -o '/usr/lib.*/S?crt[1in].*succeeded' dummy.log || {
-    echo '!! crt1.o/crti.o/crtn.o não apareceram como succeeded no log do linker' >&2
-    exit 1
-  }
-
-  echo
-  echo '-- Verificando diretórios de include...'
-  grep -B4 '^ /usr/include' dummy.log || {
-    echo '!! /usr/include não apareceu no bloco de includes do GCC' >&2
-    exit 1
-  }
-
-  echo
-  echo '-- Verificando SEARCH_DIR do linker...'
-  grep 'SEARCH.*/usr/lib' dummy.log | sed 's|; |\n|g' || {
-    echo '!! SEARCH_DIR do linker não mostra /usr/lib (verifique specs/ld)' >&2
-    exit 1
-  }
-
-  echo
-  echo '-- Verificando libc e dynamic linker específicos para '\"\$LIBC_TYPE\"'...'
-  case \"\$LIBC_TYPE\" in
-    glibc)
-      # Libc: libc.so.6
-      if ! grep '/lib.*/libc.so.6 ' dummy.log >/dev/null 2>&1; then
-        echo '!! libc.so.6 não encontrada no log do linker (glibc esperada)' >&2
-        exit 1
-      fi
-      # Dynamic linker: ld-linux-*.so.2 (paths típicos)
-      if ! grep 'found .*ld-linux' dummy.log >/dev/null 2>&1; then
-        echo '!! dynamic linker ld-linux-*.so.* não encontrado no log do linker (glibc)' >&2
-        exit 1
-      fi
-      ;;
-    musl)
-      # Para musl, o binário costuma usar /lib/ld-musl-ARCH.so.1 e libc é o mesmo .so
-      # Checar pelo nome típico da biblioteca musl
-      if ! grep -E '/lib.*/libc.musl.*so.1' dummy.log >/dev/null 2>&1; then
-        echo '!! libc.musl-*.so.1 não encontrada claramente no log do linker (musl esperada)' >&2
-        echo '   (verifique se o toolchain está apontando para musl corretamente)' >&2
-        exit 1
-      fi
-      # Checar interpretador dinâmico ld-musl-* em readelf
-      if ! readelf -l a.out | grep -q 'ld-musl-'; then
-        echo '!! Interpretador dinâmico ld-musl-* não encontrado em readelf -l a.out' >&2
-        exit 1
-      fi
-      ;;
-    *)
-      echo '!! LIBC_TYPE=unknown – pulando asserts específicos de libc/ld, mas sanity geral foi feito.'
-      ;;
-  esac
-
-  echo
-  echo '-- Removendo arquivos temporários...'
-  rm -f a.out dummy.c dummy.log
-
-  echo
-  echo '===== Fim do sanity-check do GCC 15.2.0 ====='
-} | tee -a \"\$LOG\"
-" | tee -a "${LOG_HOST}"
-
-echo "==> [gcc.post_install] Sanity-check do GCC 15.2.0 concluído." | tee -a "${LOG_HOST}"
