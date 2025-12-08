@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# toolchain/musl/musl.pre_install
+# Aplica patches de segurança (iconv / CVE-2025-26519) no musl-1.2.5
+
+set -euo pipefail
+
+: "${ADM_BUILD_ROOT:?musl.pre_install: ADM_BUILD_ROOT não definido}"
+: "${ADM_PROFILE:?musl.pre_install: ADM_PROFILE não definido}"
+: "${ADM_CACHE_DIR:?musl.pre_install: ADM_CACHE_DIR não definido}"
+: "${TARGET_TRIPLET:?musl.pre_install: TARGET_TRIPLET não definido}"
+
+pkg_name="musl"
+build_dir="${ADM_BUILD_ROOT}/${ADM_PROFILE}/${TARGET_TRIPLET}/${pkg_name}"
+
+if [[ ! -d "${build_dir}" ]]; then
+  echo "musl.pre_install: diretório de build não existe: ${build_dir}" >&2
+  exit 1
+fi
+
+cd "${build_dir}"
+
+# Nome dos patches conforme o índice da Bootlin
+patches=(
+  "0004-iconv-fix-erroneous-input-validation-in-EUC-KR-decod.patch"
+  "0005-iconv-harden-UTF-8-output-code-path-against-input-de.patch"
+)
+
+for p in "${patches[@]}"; do
+  patch_path="${ADM_CACHE_DIR}/${p}"
+  if [[ ! -f "${patch_path}" ]]; then
+    echo "musl.pre_install: patch de segurança não encontrado no cache: ${patch_path}" >&2
+    echo "Verifique se 'adm fetch toolchain/musl' baixou todos os arquivos." >&2
+    exit 1
+  fi
+
+  echo "musl.pre_install: aplicando patch ${p}"
+  patch -p1 < "${patch_path}"
+done
+
+echo "musl.pre_install: patches de segurança aplicados com sucesso."
