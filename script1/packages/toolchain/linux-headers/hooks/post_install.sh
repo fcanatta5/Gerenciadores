@@ -1,94 +1,77 @@
 #!/usr/bin/env bash
-# Hook post_install para Linux-6.17.9 API Headers
+# Hook post_install para Linux API Headers 6.17.9
 
 set -euo pipefail
 
 PKG_EXPECTED_VERSION="6.17.9"
 
-ROOTFS="${ADM_HOOK_ROOTFS:-/}"
+ROOTFS="${ADM_ROOTFS:-/opt/adm/rootfs}"
 ROOTFS="${ROOTFS%/}"
+
+BUILDROOT="${ADM_BUILD_ROOT:-/opt/adm/build}"
+PKG_FULL="core/linux-headers"
+
+BUILDDIR="${BUILDROOT}/${PKG_FULL}"
+
+echo "[linux-headers/post_install] Instalando Linux API Headers ${PKG_EXPECTED_VERSION}..."
+
+cd "${BUILDDIR}"
+
+# Processo OFICIAL do kernel:
+make headers_check
+
+make INSTALL_HDR_PATH="${ROOTFS}/usr" headers_install
+
+# =========================
+# SANITY CHECK REAL
+# =========================
 
 INCLUDE_DIR="${ROOTFS}/usr/include"
 LINUX_DIR="${INCLUDE_DIR}/linux"
 ASM_DIR="${INCLUDE_DIR}/asm"
-ASM_GENERIC_DIR="${INCLUDE_DIR}/asm-generic"
-
-echo "[linux-headers/post_install] Sanity-check dos Linux API Headers (${PKG_EXPECTED_VERSION})..."
-
-# 1) Verifica diretórios básicos
-if [[ ! -d "${INCLUDE_DIR}" ]]; then
-  echo "[linux-headers/post_install] ERRO: diretório ${INCLUDE_DIR} não existe." >&2
-  exit 1
-fi
+ASMGEN_DIR="${INCLUDE_DIR}/asm-generic"
 
 if [[ ! -d "${LINUX_DIR}" ]]; then
-  echo "[linux-headers/post_install] ERRO: diretório ${LINUX_DIR} não existe." >&2
+  echo "[linux-headers/post_install] ERRO: ${LINUX_DIR} inexistente." >&2
   exit 1
 fi
 
-if [[ ! -d "${ASM_DIR}" && ! -d "${ASM_GENERIC_DIR}" ]]; then
-  echo "[linux-headers/post_install] ERRO: nem ${ASM_DIR} nem ${ASM_GENERIC_DIR} existem." >&2
-  echo "[linux-headers/post_install]        headers de asm não foram instalados corretamente." >&2
+if [[ ! -d "${ASM_DIR}" && ! -d "${ASMGEN_DIR}" ]]; then
+  echo "[linux-headers/post_install] ERRO: asm ou asm-generic ausente." >&2
   exit 1
 fi
 
-echo "[linux-headers/post_install] Encontrado /usr/include/linux e asm/asm-generic OK."
-
-# 2) Verifica alguns headers críticos
 critical_headers=(
-  "linux/limits.h"
+  "linux/types.h"
   "linux/errno.h"
   "linux/ioctl.h"
-  "linux/types.h"
+  "linux/limits.h"
 )
 
 for h in "${critical_headers[@]}"; do
   if [[ ! -f "${INCLUDE_DIR}/${h}" ]]; then
-    echo "[linux-headers/post_install] ERRO: header crítico ausente: ${INCLUDE_DIR}/${h}" >&2
+    echo "[linux-headers/post_install] ERRO: header ausente: ${h}" >&2
     exit 1
   fi
 done
 
-echo "[linux-headers/post_install] Headers críticos presentes."
-
-# 3) Tenta extrair versão dos headers
-#    Dependendo da versão do kernel, a info pode estar em:
-#    - include/linux/version.h
-#    - include/generated/uapi/linux/version.h
-#    - ou macros UTS_RELEASE em headers relacionados.
+# Detecção de versão (best-effort)
 version_files=(
   "${INCLUDE_DIR}/linux/version.h"
   "${INCLUDE_DIR}/generated/uapi/linux/version.h"
 )
 
-header_version=""
-for vf in "${version_files[@]}"; do
-  if [[ -f "${vf}" ]]; then
-    # Procura algo tipo 6.17.9
-    if grep -Eq '6\.17\.9' "${vf}"; then
-      header_version="${PKG_EXPECTED_VERSION}"
-      break
-    fi
-    # Como fallback, tenta extrair qualquer coisa parecida com X.Y.Z
-    candidate="$(grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' "${vf}" | head -n1 || true)"
-    if [[ -n "${candidate}" ]]; then
-      header_version="${candidate}"
-      break
-    fi
+detected=""
+for f in "${version_files[@]}"; do
+  if [[ -f "$f" ]]; then
+    detected="$(grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' "$f" | head -n1 || true)"
+    [[ -n "$detected" ]] && break
   fi
 done
 
-if [[ -z "${header_version}" ]]; then
-  echo "[linux-headers/post_install] AVISO: não consegui determinar a versão exata dos headers."
-  echo "[linux-headers/post_install]         Verifique manualmente algum arquivo em ${LINUX_DIR}."
-else
-  echo "[linux-headers/post_install] Versão detectada dos headers: ${header_version}"
-  if [[ "${header_version}" != "${PKG_EXPECTED_VERSION}" ]]; then
-    echo "[linux-headers/post_install] AVISO: versão dos headers (${header_version}) difere da esperada (${PKG_EXPECTED_VERSION})." >&2
-    # Não dou exit 1 aqui porque alguns arranjos podem ter número um pouco diferente
-    # (por exemplo, se você aplicar patch manualmente).
-  fi
+if [[ -n "$detected" ]]; then
+  echo "[linux-headers/post_install] Versão detectada: $detected"
 fi
 
-echo "[linux-headers/post_install] OK: Linux API Headers parecem instalados corretamente em ${ROOTFS}/usr/include."
+echo "[linux-headers/post_install] ✅ Linux API Headers instalados corretamente em ${ROOTFS}/usr/include"
 exit 0
