@@ -1,42 +1,50 @@
 #!/usr/bin/env bash
-# Receita do GCC 15.2.0 para o ADM
 
-# Metadados básicos
-PKG_NAME="gcc"
+# Pacote: GCC 15.2.0 (toolchain final, C e C++)
+PKG_NAME="gcc-15.2.0"
 PKG_VERSION="15.2.0"
 PKG_CATEGORY="base"
+PKG_SUMMARY="GNU Compiler Collection 15.2.0 (C e C++)"
+PKG_LICENSE="GPL-3.0-or-later"
 
-# URLs de download (failover)
+# URLs das fontes: GCC + dependências embutidas (GMP, MPFR, MPC)
+# (checksums confirmados em distros grandes / upstream)
+# gcc-15.2.0.tar.xz       -> sha256 438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e 
+# mpfr-4.2.2.tar.xz       -> sha256 b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01 
+# gmp-6.3.0.tar.xz        -> sha256 a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898 
+# mpc-1.3.1.tar.gz        -> sha256 ab642492f5cf882b74aa0cb730cd410a81edcdbec895183ce930e706c1c759b8 
+
 PKG_URLS=(
   "https://ftp.gnu.org/gnu/gcc/gcc-${PKG_VERSION}/gcc-${PKG_VERSION}.tar.xz"
-  "https://ftpmirror.gnu.org/gnu/gcc/gcc-${PKG_VERSION}/gcc-${PKG_VERSION}.tar.xz"
-  "https://sourceware.org/pub/gcc/releases/gcc-${PKG_VERSION}/gcc-${PKG_VERSION}.tar.xz"
+  "https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.xz"
+  "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
+  "https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz"
 )
 
-# Checksums oficiais do tarball .tar.xz
-PKG_SHA256="438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e"
-PKG_MD5="b861b092bf1af683c46a8aa2e689a6fd"
+PKG_SHA256S=(
+  "438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e"
+  "b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01"
+  "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+  "ab642492f5cf882b74aa0cb730cd410a81edcdbec895183ce930e706c1c759b8"
+)
 
-# Dependências (ajuste para os nomes reais no seu tree)
+# Ajuste conforme sua árvore de pacotes real, se quiser dependências explícitas
+# (binutils final, libc, gmp, mpfr, mpc já instalados no sysroot).
 PKG_DEPENDS=(
-  "libs/gmp"
-  "libs/mpfr"
-  "libs/mpc"
-  "libs/isl"
-  "core/zlib"
-  "toolchain/binutils"
+  # "toolchain/binutils-2.45.1"
+  # "libs/gmp-6.3.0"
+  # "libs/mpfr-4.2.2"
+  # "libs/mpc-1.3.1"
+  # "libc/glibc-2.x" ou "libc/musl-1.2.x"
 )
 
-# Flags extras específicas do GCC (opcional, o ADM já define CFLAGS/LDFLAGS padrão)
-# Exemplo: otimizações adicionais para aggressive
-if [[ "${ADM_PROFILE:-glibc}" == "aggressive" ]]; then
-  PKG_CFLAGS_EXTRA="-fno-semantic-interposition"
-  PKG_LDFLAGS_EXTRA="-Wl,-O2"
-fi
-
-# Opções de configure (serão acrescentadas a ADM_CONFIGURE_ARGS_COMMON)
-# Baseadas no LFS 12.4 GCC-15.2.0
+# Opções adicionais de ./configure
+# O ADM já passa --host/--build/--prefix/--sysconfdir/--localstatedir
+# via ADM_CONFIGURE_ARGS_COMMON. Aqui só acrescentamos o que é específico do GCC.
 PKG_CONFIGURE_OPTS=(
+  "LD=ld"
+  "--target=${TARGET_TRIPLET}"
+  "--with-sysroot=${ADM_SYSROOT:-${ADM_ROOTFS}}"
   "--enable-languages=c,c++"
   "--enable-default-pie"
   "--enable-default-ssp"
@@ -47,46 +55,9 @@ PKG_CONFIGURE_OPTS=(
   "--with-system-zlib"
 )
 
-# Opções extras para make (paralelismo, etc.) - o ADM já usa -j$(nproc) por padrão
-PKG_MAKE_OPTS=()
-
-# make install (o ADM injeta DESTDIR automaticamente)
-PKG_MAKE_INSTALL_OPTS=()
-
-# Pós-instalação dentro do rootfs (rodado pelo ADM em chroot lógico: cd "${ADM_ROOTFS}")
-# Aqui entram os passos de pós-instalação e ajustes recomendados pelo LFS.
-PKG_POST_INSTALL_CMDS='
-set -eu
-
-# Ajustar owner dos headers instalados do GCC
-if command -v gcc >/dev/null 2>&1; then
-  chown -v -R root:root /usr/lib/gcc/$(gcc -dumpmachine)/'"${PKG_VERSION}"'/include{,-fixed} || true
+# Ajustes específicos para musl (evita problemas com libsanitizer etc.)
+if [[ "${ADM_PROFILE:-glibc}" == "musl" ]]; then
+  PKG_CONFIGURE_OPTS+=(
+    "--disable-libsanitizer"
+  )
 fi
-
-# Symlink exigido historicamente pelo FHS
-ln -svr /usr/bin/cpp /usr/lib || true
-
-# Manpage de cc -> gcc.1
-mkdir -pv /usr/share/man/man1
-ln -svf gcc.1 /usr/share/man/man1/cc.1 || true
-
-# Plugin LTO para o bfd
-mkdir -pv /usr/lib/bfd-plugins
-if command -v gcc >/dev/null 2>&1; then
-  ln -sfv ../../libexec/gcc/$(gcc -dumpmachine)/'"${PKG_VERSION}"'/liblto_plugin.so \
-    /usr/lib/bfd-plugins/ || true
-fi
-
-# Arquivos auto-load do gdb
-mkdir -pv /usr/share/gdb/auto-load/usr/lib
-if ls /usr/lib/*gdb.py >/dev/null 2>&1; then
-  mv -v /usr/lib/*gdb.py /usr/share/gdb/auto-load/usr/lib || true
-fi
-'
-
-# Opcional: para builds nativos (sem cross toolchain), force ADM_USE_NATIVE=1 antes de chamar o adm:
-#   ADM_USE_NATIVE=1 /opt/adm/adm build toolchain/gcc
-#
-# Caso você queira forçar LD=ld (como no LFS final), pode exportar no ambiente
-# antes de rodar o adm:
-#   LD=ld /opt/adm/adm build toolchain/gcc
