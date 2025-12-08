@@ -3,6 +3,26 @@ ADM_PROFILE=glibc   \   # ou musl, o pacote de headers é agnóstico
 ADM_TARGET_ARCH=x86_64 \
 ./adm.sh build toolchain/linux-headers
 
+# Criar musl
+# 1) Criar diretório do pacote
+mkdir -p "${ADM_PACKAGES_DIR}/toolchain/musl"
+
+# 2) Criar arquivos
+#   - musl.sh
+#   - musl.pre_install
+#   - musl.post_install
+# (colando exatamente os conteúdos acima)
+
+# 3) Tornar hooks executáveis
+chmod +x "${ADM_PACKAGES_DIR}/toolchain/musl/musl.pre_install"
+chmod +x "${ADM_PACKAGES_DIR}/toolchain/musl/musl.post_install"
+
+# 4) Construir para o perfil musl
+ADM_PROFILE=musl ADM_TARGET_ARCH=x86_64 \
+  ./adm.sh build toolchain/musl
+
+
+
 Formas de selecionar o profile musl
 
 Você tem duas maneiras equivalentes:
