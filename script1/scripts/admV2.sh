@@ -248,13 +248,26 @@ parse_global_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -P|--profile)
-        ADM_PROFILE="$2"; shift 2;;
+        # Garante que há argumento para o profile
+        if [[ $# -lt 2 ]]; then
+          log_error "Opção '$1' requer um argumento (nome do perfil)."
+          exit 1
+        fi
+        ADM_PROFILE="$2"
+        shift 2
+        ;;
       -n|--dry-run)
-        ADM_DRY_RUN=1; shift;;
+        ADM_DRY_RUN=1
+        shift
+        ;;
       -h|--help)
-        usage; exit 0;;
+        usage
+        exit 0
+        ;;
       *)
-        ADM_ARGS+=("$1"); shift;;
+        ADM_ARGS+=("$1")
+        shift
+        ;;
     esac
   done
 }
@@ -264,7 +277,9 @@ parse_global_args() {
 ###############################################################################
 normalize_pkg_name() {
   local input="$1"
+  local mode="${2:-strict}"  # 'strict' (padrão) ou 'soft'
 
+  # Já está no formato categoria/nome
   if [[ "$input" == */* ]]; then
     echo "$input"
     return 0
@@ -276,14 +291,24 @@ normalize_pkg_name() {
   )
 
   local count="${#candidates[@]}"
+
   if (( count == 0 )); then
     log_error "Pacote '$input' não encontrado em ${ADM_PACKAGES_DIR}"
-    exit 1
+    if [[ "$mode" == "soft" ]]; then
+      # Chamador decide o que fazer
+      return 1
+    else
+      exit 1
+    fi
   elif (( count > 1 )); then
     log_error "Pacote '$input' é ambíguo; encontrado em:"
     printf '  - %s\n' "${candidates[@]}" >&2
     log_error "Use 'categoria/${input}' explicitamente."
-    exit 1
+    if [[ "$mode" == "soft" ]]; then
+      return 1
+    else
+      exit 1
+    fi
   fi
 
   local dir="${candidates[0]}"
@@ -361,11 +386,15 @@ pkg_destdir() {
 
 pkg_tarball_path() {
   local full="$1"
-  local cat="${full%%/*}"
-  local name="${full##*/}"
   local version="$2"
-  mkdir -p "${ADM_ROOT}/pkgs/${cat}"
-  echo "${ADM_ROOT}/pkgs/${cat}/${name}-${version}-${ADM_PROFILE}.tar.zst"
+
+  local cat="${full%/*}"
+  local name="${full##*/}"
+  local profile="${ADM_PROFILE:-default}"
+  local triplet="${TARGET_TRIPLET:-native}"
+
+  # Agora inclui perfil e triplet no nome do tarball, evitando colisões
+  echo "${ADM_ROOT}/pkgs/${cat}/${name}-${version}-${profile}-${triplet}.tar.zst"
 }
 
 ###############################################################################
@@ -1024,93 +1053,143 @@ uninstall_pkg() {
 }
 
 uninstall_with_reverse_deps() {
-  local full="$1"
+  local root_pkg="$1"
 
-  declare -A graph indeg allpkgs
+  local root_db
+  root_db=$(pkg_db_dir "$root_pkg")
+  if [[ ! -d "$root_db" ]]; then
+    log_error "Pacote '$root_pkg' não está instalado."
+    exit 1
+  fi
 
-  while IFS= read -r d; do
-    [[ -d "$d" ]] || continue
-    local p
-    p="${d#${ADM_DB_DIR}/}"
-    allpkgs["$p"]=1
-    indeg["$p"]=0
-  done < <(find "${ADM_DB_DIR}" -mindepth 2 -maxdepth 2 -type d)
+  log_info "Calculando árvore de reverse-deps para '$root_pkg'..."
 
-  for p in "${!allpkgs[@]}"; do
-    local meta="${ADM_DB_DIR}/${p}/meta"
-    [[ -f "$meta" ]] || continue
-    local deps
-    deps=$(grep '^depends=' "$meta" | cut -d= -f2- || true)
-    for d in $deps; do
-      local dep_full
-      dep_full=$(normalize_pkg_name "$d" || true)
-      [[ -n "$dep_full" ]] || continue
-      if [[ -n "${allpkgs[$dep_full]:-}" ]]; then
-        graph["$dep_full"]+="${p} "
-        indeg["$p"]=$(( indeg["$p"] + 1 ))
-      fi
-    done
-  done
+  declare -A graph=()      # dep -> lista de pacotes que dependem dele
+  declare -A installed=()  # conjunto de pacotes instalados (cat/pkg)
 
-  declare -A sub
-  local queue=("$full")
-  while [[ ${#queue[@]} -gt 0 ]]; do
-    local n="${queue[0]}"
-    queue=("${queue[@]:1}")
-    [[ -n "${sub[$n]:-}" ]] && continue
-    sub["$n"]=1
-    for m in ${graph["$n"]:-}; do
-      queue+=("$m")
-    done
-  done
+  # Carrega grafo de reverse deps a partir do DB instalado
+  local pdir p pkg dep_line d dep_full
+  for pdir in "${ADM_DB_DIR}"/*/*; do
+    [[ -d "$pdir" ]] || continue
 
-  declare -A indeg_sub
-  for p in "${!sub[@]}"; do
-    indeg_sub["$p"]=0
-  done
-  for p in "${!sub[@]}"; do
-    for m in ${graph["$p"]:-}; do
-      if [[ -n "${sub[$m]:-}" ]]; then
-        indeg_sub["$m"]=$(( indeg_sub["$m"] + 1 ))
-      fi
-    done
-  done
+    # p é algo como categoria/pkg
+    p="${pdir#${ADM_DB_DIR}/}"
+    installed["$p"]=1
 
-  local -a q2=()
-  for p in "${!sub[@]}"; do
-    if [[ "${indeg_sub[$p]}" -eq 0 ]]; then
-      q2+=("$p")
+    if [[ -f "${pdir}/meta" ]]; then
+      dep_line=$(grep '^depends=' "${pdir}/meta" 2>/dev/null || true)
+      dep_line=${dep_line#depends=}
+      [[ -n "$dep_line" ]] || continue
+
+      for d in $dep_line; do
+        # Se dependência já vier como categoria/pacote, usa direto.
+        if [[ "$d" == */* ]]; then
+          dep_full="$d"
+        else
+          # Nome curto: tenta encontrar exatamente um instalado com esse nome.
+          dep_full=""
+          local match
+          for match in "${ADM_DB_DIR}"/*/"$d"; do
+            [[ -e "$match" ]] || continue
+            if [[ -n "$dep_full" ]]; then
+              # Mais de um match → ambíguo, ignora
+              dep_full=""
+              break
+            fi
+            dep_full="${match#${ADM_DB_DIR}/}"
+          done
+        fi
+
+        # Se não conseguiu resolver a dependência, apenas avisa e segue.
+        if [[ -z "$dep_full" ]]; then
+          log_warn "Ignorando dependência '$d' do pacote '$p' (não encontrada na base instalada)."
+          continue
+        fi
+
+        # Só consideramos dependência se o pacote estiver instalado
+        if [[ -n "${installed[$dep_full]:-}" ]]; then
+          graph["$dep_full"]+="$p "
+        fi
+      done
     fi
   done
 
-  local -a result=()
-  while [[ ${#q2[@]} -gt 0 ]]; do
-    local n="${q2[0]}"
-    q2=("${q2[@]:1}")
-    result+=("$n")
-    for m in ${graph["$n"]:-}; do
-      if [[ -n "${sub[$m]:-}" ]]; then
-        indeg_sub["$m"]=$(( indeg_sub["$m"] - 1 ))
-        if [[ "${indeg_sub[$m]}" -eq 0 ]]; then
-          q2+=("$m")
+  # Descobrir todos os pacotes a remover: root_pkg + todos que dependem dele (direta/indiretamente)
+  declare -A to_remove=()
+  local queue=()
+
+  to_remove["$root_pkg"]=1
+  queue+=("$root_pkg")
+
+  while [[ ${#queue[@]} -gt 0 ]]; do
+    local n="${queue[0]}"
+    queue=("${queue[@]:1}")
+
+    for pkg in ${graph["$n"]:-}; do
+      if [[ -z "${to_remove[$pkg]:-}" ]]; then
+        to_remove["$pkg"]=1
+        queue+=("$pkg")
+      fi
+    done
+  done
+
+  # Agora precisamos da ordem de remoção: dependentes antes dos dependidos.
+  # Vamos fazer um sort topológico no subgrafo induzido por to_remove.
+  declare -A indeg_sub=()
+  local k
+  for k in "${!to_remove[@]}"; do
+    indeg_sub["$k"]=0
+  done
+
+  # Calcula indegree dentro do subgrafo to_remove
+  for dep_full in "${!to_remove[@]}"; do
+    for pkg in ${graph["$dep_full"]:-}; do
+      if [[ -n "${to_remove[$pkg]:-}" ]]; then
+        indeg_sub["$pkg"]=$(( indeg_sub["$pkg"] + 1 ))
+      fi
+    done
+  done
+
+  # Fila de nós com indegree 0
+  local -a q=()
+  for pkg in "${!to_remove[@]}"; do
+    if [[ "${indeg_sub[$pkg]}" -eq 0 ]]; then
+      q+=("$pkg")
+    fi
+  done
+
+  local -a topo=()
+  while [[ ${#q[@]} -gt 0 ]]; do
+    local n="${q[0]}"
+    q=("${q[@]:1}")
+    topo+=("$n")
+    for pkg in ${graph["$n"]:-}; do
+      if [[ -n "${to_remove[$pkg]:-}" ]]; then
+        indeg_sub["$pkg"]=$(( indeg_sub["$pkg"] - 1 ))
+        if [[ "${indeg_sub[$pkg]}" -eq 0 ]]; then
+          q+=("$pkg")
         fi
       fi
     done
   done
 
-  if [[ "${#result[@]}" -ne "${#sub[@]}" ]]; then
-    log_error "Ciclo em reverse deps na árvore de $full"
+  if [[ "${#topo[@]}" -ne "${#to_remove[@]}" ]]; then
+    log_error "Ciclo de dependências detectado na árvore de reverse-deps de '$root_pkg'."
     exit 1
   fi
 
-  log_info "Ordem de desinstalação (dependentes primeiro):"
-  printf '  %s\n' "${result[@]}"
+  # Para desinstalar, queremos remover primeiro quem DEPENDE dos outros.
+  # Ou seja, removemos na ordem reversa do topológico.
+  log_info "Pacotes a remover (da ponta para a base):"
+  printf '  - %s\n' "${topo[@]}" | tac
 
-  for ((i=${#result[@]}-1; i>=0; i--)); do
-    uninstall_pkg "${result[i]}"
+  local i
+  for ((i=${#topo[@]}-1; i>=0; i--)); do
+    local p_un="${topo[i]}"
+    log_info ">>> Desinstalando pacote: ${p_un}"
+    uninstall_pkg "${p_un}"
   done
 }
-
 ###############################################################################
 # Rebuild
 ###############################################################################
@@ -1214,18 +1293,25 @@ cmd_graph_deps() {
 ###############################################################################
 cmd_update() {
   if [[ -d "${ADM_PACKAGES_DIR}/.git" ]]; then
-    log_info "Atualizando receitas em ${ADM_PACKAGES_DIR} (git pull)..."
-    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      log_warn "[DRY-RUN] git -C '${ADM_PACKAGES_DIR}' pull --ff-only"
-    else
-      git -C "${ADM_PACKAGES_DIR}" pull --ff-only
-    fi
+    log_info "Atualizando repositório de pacotes em ${ADM_PACKAGES_DIR}..."
+    ( cd "${ADM_PACKAGES_DIR}" && run_cmd git pull --ff-only )
   else
-    log_info "Clonando receitas em ${ADM_PACKAGES_DIR} a partir de ${ADM_GIT_REPO}"
-    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      log_warn "[DRY-RUN] git clone '${ADM_GIT_REPO}' '${ADM_PACKAGES_DIR}'"
+    if [[ -e "${ADM_PACKAGES_DIR}" ]]; then
+      # Diretório/arquivo existe, mas não é um repositório git.
+      # Evita tentar clonar por cima e falhar de forma silenciosa/confusa.
+      if [[ -d "${ADM_PACKAGES_DIR}" && -z "$(ls -A "${ADM_PACKAGES_DIR}" 2>/dev/null)" ]]; then
+        # Diretório vazio: pode clonar.
+        log_info "Clonando repositório de pacotes em diretório vazio ${ADM_PACKAGES_DIR}..."
+        run_cmd git clone "${ADM_GIT_REPO}" "${ADM_PACKAGES_DIR}"
+      else
+        log_error "Diretório '${ADM_PACKAGES_DIR}' já existe e não é um repositório Git vazio."
+        log_error "Por favor, mova/remova este diretório ou inicialize um repositório Git nele antes de rodar 'update'."
+        exit 1
+      fi
     else
-      git clone "${ADM_GIT_REPO}" "${ADM_PACKAGES_DIR}"
+      # Não existe: clone normalmente.
+      log_info "Clonando repositório de pacotes em ${ADM_PACKAGES_DIR}..."
+      run_cmd git clone "${ADM_GIT_REPO}" "${ADM_PACKAGES_DIR}"
     fi
   fi
 }
