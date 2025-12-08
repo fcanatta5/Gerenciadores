@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# toolchain/libstdc++-pass1/libstdc++-pass1.pre_install
+# Prepara wrapper de configure/Makefile para construir só o libstdc++-v3
+
+set -euo pipefail
+
+: "${ADM_BUILD_ROOT:?libstdc++-pass1.pre_install: ADM_BUILD_ROOT não definido}"
+: "${ADM_PROFILE:?libstdc++-pass1.pre_install: ADM_PROFILE não definido}"
+: "${TARGET_TRIPLET:?libstdc++-pass1.pre_install: TARGET_TRIPLET não definido}"
+
+pkg_name="libstdc++-pass1"
+build_dir="${ADM_BUILD_ROOT}/${ADM_PROFILE}/${TARGET_TRIPLET}/${pkg_name}"
+
+if [[ ! -d "${build_dir}" ]]; then
+  echo "libstdc++-pass1.pre_install: diretório de build não existe: ${build_dir}" >&2
+  exit 1
+fi
+
+cd "${build_dir}"
+
+# Diretório de build dedicado para libstdc++
+mkdir -p libstdcpp-build
+
+# -----------------------------------------------------------------------------
+# Wrapper de ./configure → entra em libstdcpp-build e roda ../libstdc++-v3/configure
+# -----------------------------------------------------------------------------
+cat > configure << 'EOF'
+#!/usr/bin/env sh
+set -eu
+# Este script é chamado pelo ADM em ${build_dir}.
+# Ele apenas redireciona para o configure da libstdc++ em um build dir separado.
+cd libstdcpp-build
+exec ../libstdc++-v3/configure "$@"
+EOF
+chmod +x configure
+
+# -----------------------------------------------------------------------------
+# Makefile wrapper: delega todos os targets para libstdcpp-build
+# -----------------------------------------------------------------------------
+cat > Makefile << 'EOF'
+# Makefile wrapper para libstdc++-pass1
+# Todos os targets são redirecionados para o diretório libstdcpp-build.
+
+.DEFAULT_GOAL := all
+
+all:
+	$(MAKE) -C libstdcpp-build all
+
+install:
+	$(MAKE) -C libstdcpp-build install
+
+clean:
+	$(MAKE) -C libstdcpp-build clean || true
+
+distclean:
+	$(MAKE) -C libstdcpp-build distclean || true
+
+%:
+	$(MAKE) -C libstdcpp-build $@
+EOF
