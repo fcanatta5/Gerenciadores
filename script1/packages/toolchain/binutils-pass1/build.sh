@@ -34,8 +34,8 @@ PKG_DEPENDS=(
 #
 # Aqui definimos um padrão estilo LFS. Se quiser customizar, basta exportar
 # PKG_TARGET_TRIPLET antes de chamar o ADM ou editar a linha abaixo.
-
-PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
+# PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
+PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_TRIPLET}}"
 
 ###############################################################################
 # Opções de configure
