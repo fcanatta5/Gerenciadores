@@ -174,6 +174,11 @@ PKG_MD5=""
 PKG_DEPENDS=()
 PKG_PATCHES=()
 
+# NOVO: suporte a patches remotos
+PKG_PATCH_URLS=()        # URLs dos patches
+PKG_PATCH_SHA256=()      # checksums SHA256 por índice (opcional)
+PKG_PATCH_MD5=()         # checksums MD5 por índice (opcional)
+
 PKG_FILE=""
 
 find_package_file() {
@@ -200,6 +205,11 @@ load_package_def() {
     PKG_MD5=""
     PKG_DEPENDS=()
     PKG_PATCHES=()
+
+    # NOVO: suporte a patches remotos
+    PKG_PATCH_URLS=()        # URLs dos patches
+    PKG_PATCH_SHA256=()      # checksums SHA256 por índice (opcional)
+    PKG_PATCH_MD5=()         # checksums MD5 por índice (opcional)
 
     # shellcheck disable=SC1090
     source "$PKG_FILE"
@@ -323,6 +333,75 @@ ensure_source_downloaded() {
             log_warn "Checksum não confere após download, repetindo..."
             rm -f "$cache_file"
         fi
+    done
+}
+
+# ------------- Download de patches (PKG_PATCH_URLS) -------------
+
+ensure_patches_downloaded() {
+    # Se o pacote não declarou PKG_PATCH_URLS, não há nada a fazer.
+    if [ "${#PKG_PATCH_URLS[@]:-0}" -eq 0 ]; then
+        return 0
+    fi
+
+    # Garante que PKG_PATCHES exista (mesmo se o pacote já tiver preenchido algo manualmente)
+    PKG_PATCHES=("${PKG_PATCHES[@]:-}")
+
+    local i url dest sum_sha sum_md5 sum_have
+
+    for i in "${!PKG_PATCH_URLS[@]}"; do
+        url="${PKG_PATCH_URLS[$i]}"
+        # Usamos o mesmo cache de sources do adm
+        dest="${SOURCE_CACHE}/$(basename "$url")"
+
+        # Checksums esperados (podem estar vazios)
+        sum_sha="${PKG_PATCH_SHA256[$i]:-}"
+        sum_md5="${PKG_PATCH_MD5[$i]:-}"
+
+        # Se o arquivo já existir, conferir checksum (se definido)
+        if [ -f "$dest" ]; then
+            if [ -n "$sum_sha" ]; then
+                sum_have="$(sha256sum_file "$dest")"
+                if [ "$sum_have" != "$sum_sha" ]; then
+                    log_warn "SHA256 do patch $dest não confere, removendo para re-download."
+                    rm -f "$dest"
+                fi
+            elif [ -n "$sum_md5" ]; then
+                sum_have="$(md5sum_file "$dest")"
+                if [ "$sum_have" != "$sum_md5" ]; then
+                    log_warn "MD5 do patch $dest não confere, removendo para re-download."
+                    rm -f "$dest"
+                fi
+            fi
+        fi
+
+        # Se não existe (ou checksum não bateu), baixar
+        if [ ! -f "$dest" ]; then
+            log_info "Baixando patch: $url"
+            download_with_cache "$dest" "$url"
+
+            # Verificar checksum após download, se definido
+            if [ -n "$sum_sha" ]; then
+                sum_have="$(sha256sum_file "$dest")"
+                if [ "$sum_have" != "$sum_sha" ]; then
+                    log_error "SHA256 inválido para patch ${dest}: esperado=${sum_sha}, obtido=${sum_have}"
+                    exit 1
+                fi
+            elif [ -n "$sum_md5" ]; then
+                sum_have="$(md5sum_file "$dest")"
+                if [ "$sum_have" != "$sum_md5" ]; then
+                    log_error "MD5 inválido para patch ${dest}: esperado=${sum_md5}, obtido=${sum_have}"
+                    exit 1
+                fi
+            else
+                log_warn "Nenhum checksum definido para patch ${dest}; download sem verificação."
+            fi
+        else
+            log_info "Patch em cache: $dest"
+        fi
+
+        # Adiciona o patch baixado à lista de patches a aplicar
+        PKG_PATCHES+=("$dest")
     done
 }
 
