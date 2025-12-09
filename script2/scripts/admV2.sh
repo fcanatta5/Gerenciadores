@@ -109,6 +109,72 @@ check_environment() {
     fi
 }
 
+# ------------- Limpeza de diretórios de trabalho / estado -------------
+
+# Limpa diretório de build e estado de um pacote específico
+clean_pkg_workdir() {
+    local pkg="$1"
+
+    # Precisamos do PKG_NAME/PKG_VERSION para calcular pkg_id / state_file
+    load_package_def "$pkg"
+
+    local build_dir="${ADM_ROOT}/build/${ADM_PROFILE}/$(pkg_id)"
+    local state_file
+    state_file="$(pkg_state_file)"
+
+    log_info "Limpando workdir de $(pkg_id) para profile ${ADM_PROFILE}: ${build_dir}"
+    rm -rf --one-file-system "$build_dir"
+
+    if [ -f "$state_file" ]; then
+        log_info "Removendo arquivo de estado: ${state_file}"
+        rm -f "$state_file"
+    fi
+}
+
+# Limpa todos os diretórios de build e estados do profile atual
+clean_all_workdirs_for_profile() {
+    local profile_build_dir="${ADM_ROOT}/build/${ADM_PROFILE}"
+    local state_dir
+    state_dir="$(profile_state_dir)"
+
+    log_info "Limpando TODOS os workdirs do profile ${ADM_PROFILE}: ${profile_build_dir}"
+    rm -rf --one-file-system "$profile_build_dir"
+    mkdir -p "$profile_build_dir"
+
+    log_info "Limpando estados de build do profile ${ADM_PROFILE}: ${state_dir}"
+    rm -rf --one-file-system "$state_dir"
+    mkdir -p "$state_dir"
+}
+
+# Limpeza "inteligente" de nível mais alto:
+# - se receber pacotes: limpa só esses workdirs
+# - se não receber nada: limpa todos os workdirs do profile atual
+adm_clean() {
+    local pkgs=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -P|--profile)
+                # perfil é tratado fora, em cmd_clean; ignorar aqui
+                shift 2 ;;
+            -*)
+                log_error "Opção desconhecida para clean: $1"
+                exit 1 ;;
+            *)
+                pkgs+=("$1"); shift ;;
+        esac
+    done
+
+    if [ "${#pkgs[@]}" -eq 0 ]; then
+        clean_all_workdirs_for_profile
+    else
+        local p
+        for p in "${pkgs[@]}"; do
+            clean_pkg_workdir "$p"
+        done
+    fi
+}
+
 # ------------- Perfis (glibc / musl) -------------
 
 ADM_PROFILE=""
@@ -899,6 +965,7 @@ Uso:
   adm uninstall [-P profile] pacote1 [pacote2 ...]
   adm sync
   adm list      [-P profile]
+  adm clean     [-P profile] [pacote1 ...]
   adm info      pacote
   adm help
 
@@ -982,6 +1049,33 @@ cmd_uninstall() {
     uninstall_with_deps "${pkgs[@]}"
 }
 
+cmd_clean() {
+    check_environment
+
+    local profile="glibc"
+    local args=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -P|--profile)
+                profile="$2"; shift 2 ;;
+            -*)
+                log_error "Opção desconhecida: $1"
+                exit 1 ;;
+            *)
+                args+=("$1"); shift ;;
+        esac
+    done
+
+    load_profile "$profile"
+    local logf="${LOG_ROOT}/clean-${profile}-$(date +%Y%m%d-%H%M%S).log"
+    log_set_file "$logf"
+    log_info "Log em $logf"
+
+    acquire_lock "clean"
+    adm_clean "${args[@]}"
+}
+
 cmd_list() {
     local profile="glibc"
     if [ "${1:-}" = "-P" ] || [ "${1:-}" = "--profile" ]; then
@@ -1041,6 +1135,7 @@ main() {
         sync)      sync_packages ;;
         list)      cmd_list "$@" ;;
         info)      cmd_info "$@" ;;
+        clean)     cmd_clean "$@" ;;   
         -h|--help|help) usage ;;
         *)
             log_error "Comando desconhecido: $cmd"
