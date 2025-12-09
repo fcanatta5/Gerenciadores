@@ -160,12 +160,22 @@ setup_profiles() {
       ;;
   esac
 
-  if [[ -z "${TARGET_TRIPLET:-}" ]]; then
+  # Define o triplet padrão por perfil, se ainda não veio de fora
+  if [[ -z "${ADM_TARGET_TRIPLET:-}" ]]; then
     case "${ADM_TARGET_LIBC}" in
-      glibc) TARGET_TRIPLET="${ADM_TARGET_ARCH}-pc-linux-gnu" ;;
-      musl)  TARGET_TRIPLET="${ADM_TARGET_ARCH}-unknown-linux-musl" ;;
+      glibc)
+        # Estilo LFS para glibc
+        ADM_TARGET_TRIPLET="${ADM_TARGET_ARCH}-lfs-linux-gnu"
+        ;;
+      musl)
+        # Triplet clássico do musl
+        ADM_TARGET_TRIPLET="${ADM_TARGET_ARCH}-linux-musl"
+        ;;
     esac
   fi
+
+  # TARGET_TRIPLET herda do ADM_TARGET_TRIPLET se não tiver sido definido
+  TARGET_TRIPLET="${TARGET_TRIPLET:-${ADM_TARGET_TRIPLET}}"
 
   ADM_SYSROOT="${ADM_SYSROOT:-${ADM_ROOTFS}}"
 
@@ -196,7 +206,8 @@ setup_profiles() {
       LDFLAGS_OPT="-flto=auto -Wl,-O2,-z,relro,-z,now -Wl,--as-needed"
       ;;
   esac
-
+  
+  export ADM_TARGET_TRIPLET
   export TARGET_TRIPLET
   export CFLAGS="${CFLAGS_COMMON} ${CFLAGS_OPT}"
   export CXXFLAGS="${CXXFLAGS_COMMON} ${CXXFLAGS_OPT}"
