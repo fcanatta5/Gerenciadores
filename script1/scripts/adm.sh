@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ADM - Simple source-based package/build manager
+# ADM - Source Based Construction Manager
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -44,14 +44,20 @@ log_ok()    { printf '%s %b[ OK  ]%b %s\n'  "$(log_ts)" "${_C_GREEN}"  "${_C_RES
 
 run_cmd() {
   log_info "Executando: $*"
+
+  # Desabilita -e temporariamente para capturar o código de saída
+  # sem matar o shell antes de logar o erro.
+  set +e
   "$@"
   local rc=$?
+  set -e
+
   if (( rc != 0 )); then
     log_error "Comando falhou (exit=${rc}): $*"
-    return "$rc"
   fi
-}
 
+  return "$rc"
+}
 ###############################################################################
 # Paths isolados por perfil (glibc/musl/aggressive)
 ###############################################################################
@@ -369,7 +375,9 @@ pkg_tarball_path() {
   local name="${full##*/}"
   local profile="${ADM_PROFILE:-default}"
   local triplet="${TARGET_TRIPLET:-native}"
-  echo "${ADM_PKG_OUTPUT_DIR}/${cat}/${name}-${version}-${profile}-${triplet}.tar.zst"
+
+  # Caminho base, sem extensão; as funções de build escolhem .tar.zst ou .tar
+  echo "${ADM_PKG_OUTPUT_DIR}/${cat}/${name}-${version}-${profile}-${triplet}"
 }
 
 ###############################################################################
@@ -446,6 +454,7 @@ download_one_source() {
 
   mkdir -p "${ADM_CACHE_DIR}"
 
+  # Se for git, não faz download de tarball
   if is_git_url "$url"; then
     log_info "Fonte git detectada (idx=${idx}) para ${full}: ${url}"
     return 0
@@ -453,23 +462,19 @@ download_one_source() {
 
   local tarball_basename
   tarball_basename="${url##*/}"
-  tarball_basename="${tarball_basename%%\?*}"
-
-  if [[ -z "$tarball_basename" || "$tarball_basename" = "." || "$tarball_basename" = "/" ]]; then
-    log_error "Não foi possível determinar nome de arquivo para URL: ${url}"
-    exit 1
-  fi
-
+  tarball_basename="${tarball_basename%%\?*}"   # remove query string
   local tarball_path="${ADM_CACHE_DIR}/${tarball_basename}"
 
   if [[ -f "$tarball_path" ]]; then
-    log_info "Tarball já em cache (idx=${idx}): ${tarball_path}"
+    log_info "Usando tarball já em cache: ${tarball_path}"
   else
+    log_info "Baixando fonte (idx=${idx}) para ${full} a partir de: ${url}"
+
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      log_warn "[DRY-RUN] Baixaria (idx=${idx}) ${url} -> ${tarball_path}"
+      log_warn "[DRY-RUN] Download para '${tarball_path}' a partir de '${url}'"
       return 0
     fi
-    log_info "Baixando (idx=${idx}) ${url} -> ${tarball_path}"
+
     if command -v curl >/dev/null 2>&1; then
       run_cmd curl -fL "$url" -o "$tarball_path"
     elif command -v wget >/dev/null 2>&1; then
@@ -550,27 +555,24 @@ extract_source() {
     exit 1
   fi
 
-  if [[ -d "$build_dir" ]]; then
-    log_info "Diretório de build já existe: ${build_dir} (retomando)"
-    return 0
-  fi
-
-  run_cmd mkdir -p "$build_dir"
+  mkdir -p "${build_dir}"
 
   if is_git_url "$main_url"; then
-    log_info "Clonando fonte git principal para diretório de build: ${main_url}"
+    # Fonte git: clona diretamente para o diretório de build
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
       log_warn "[DRY-RUN] git clone '${main_url}' '${build_dir}'"
       if [[ -n "${PKG_GIT_REF:-}" ]]; then
         log_warn "[DRY-RUN] (cd '${build_dir}' && git checkout '${PKG_GIT_REF}')"
       fi
     else
+      log_info "Clonando fonte git principal para diretório de build: ${main_url}"
       git clone "${main_url}" "${build_dir}"
       if [[ -n "${PKG_GIT_REF:-}" ]]; then
         ( cd "${build_dir}" && git checkout "${PKG_GIT_REF}" )
       fi
     fi
   else
+    # Fonte tarball: usa o cache em ADM_CACHE_DIR
     local tarball_basename
     tarball_basename="${main_url##*/}"
     tarball_basename="${tarball_basename%%\?*}"
@@ -583,9 +585,14 @@ extract_source() {
     fi
 
     log_info "Extraindo ${tarball_path} para ${build_dir}"
-    run_cmd tar -xf "$tarball_path" -C "$build_dir" --strip-components=1
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+      log_warn "[DRY-RUN] tar -xf '${tarball_path}' -C '${build_dir}' --strip-components=1"
+    else
+      run_cmd tar -xf "$tarball_path" -C "$build_dir" --strip-components=1
+    fi
   fi
 
+  # Aplicação de patches, se existirem
   local patch_dir
   patch_dir=$(pkg_patch_path "$full")
   if [[ -d "$patch_dir" ]]; then
@@ -593,7 +600,11 @@ extract_source() {
     for p in "${patch_dir}"/*.patch; do
       [[ -e "$p" ]] || continue
       log_info "Aplicando patch: $p"
-      ( cd "$build_dir" && run_cmd patch -p1 < "$p" )
+      if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+        log_warn "[DRY-RUN] (cd '${build_dir}' && patch -p1 < '${p}')"
+      else
+        ( cd "$build_dir" && run_cmd patch -p1 < "$p" )
+      fi
     done
   fi
 }
@@ -673,55 +684,67 @@ build_and_install_pkg() {
   state_dir=$(pkg_state_dir "$full")
   build_dir=$(pkg_build_dir "$full")
   destdir=$(pkg_destdir "$full")
-  mkdir -p "$state_dir" "$build_dir" "$destdir"
 
-  local stamp_prefix="${state_dir}/${PKG_VERSION}-${ADM_PROFILE}-${TARGET_TRIPLET}"
-  local stamp_fetch="${stamp_prefix}.fetch"
-  local stamp_extract="${stamp_prefix}.extract"
-  local stamp_configure="${stamp_prefix}.configure"
-  local stamp_build="${stamp_prefix}.build"
-  local stamp_install="${stamp_prefix}.install"
+  mkdir -p "${state_dir}" "${build_dir}" "${destdir}" "${ADM_PKG_OUTPUT_DIR}"
 
-  # Rebuild força limpar stamps
-  if [[ "${ADM_FORCE_REBUILD}" = "1" ]]; then
-    rm -f "${stamp_fetch}" "${stamp_extract}" "${stamp_configure}" "${stamp_build}" "${stamp_install}"
-  fi
+  local stamp_fetch="${state_dir}/.fetch"
+  local stamp_extract="${state_dir}/.extract"
+  local stamp_configure="${state_dir}/.configure"
+  local stamp_build="${state_dir}/.build"
+  local stamp_install="${state_dir}/.install"
 
-  # Tarball só agora que TARGET_TRIPLET está definido
-  local tarball
-  tarball=$(pkg_tarball_path "$full" "${PKG_VERSION}")
+  # Caminhos de tarball (cache binário)
+  local tarbase
+  tarbase=$(pkg_tarball_path "$full" "${PKG_VERSION}")
+  local tarball_zst="${tarbase}.tar.zst"
+  local tarball_plain="${tarbase}.tar"
 
-  # Cache binário
-  if [[ "${ADM_ENABLE_BIN_CACHE}" = "1" && "${ADM_FORCE_REBUILD}" != "1" && -f "${tarball}" ]]; then
-    log_info "Encontrado pacote binário em cache: ${tarball}"
-    log_info "Reinstalando ${PKG_NAME}-${PKG_VERSION} a partir do cache binário"
+  # Tenta usar cache binário, se disponível e sem FORCE_REBUILD
+  if [[ "${ADM_ENABLE_BIN_CACHE}" = "1" && "${ADM_FORCE_REBUILD}" != "1" ]]; then
+    local cache_src=""
+    if [[ -f "${tarball_zst}" ]]; then
+      cache_src="${tarball_zst}"
+    elif [[ -f "${tarball_plain}" ]]; then
+      cache_src="${tarball_plain}"
+    fi
 
-    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      log_warn "[DRY-RUN] rm -rf '${destdir}'"
-      log_warn "[DRY-RUN] mkdir -p '${destdir}'"
-      log_warn "[DRY-RUN] zstd -d -c '${tarball}' | tar -xf - -C '${destdir}'"
-      log_warn "[DRY-RUN] rsync -a '${destdir}/' '${ADM_ROOTFS}/'"
-    else
+    if [[ -n "${cache_src}" ]]; then
+      log_info "Encontrado tarball de cache para ${full}: ${cache_src}"
       rm -rf "${destdir}"
       mkdir -p "${destdir}"
 
-      if command -v zstd >/dev/null 2>&1; then
-        zstd -d -c "${tarball}" | tar -xf - -C "${destdir}"
+      if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+        if [[ "${cache_src}" == *.zst ]]; then
+          log_warn "[DRY-RUN] zstd -d -c '${cache_src}' | tar -xf - -C '${destdir}'"
+        else
+          log_warn "[DRY-RUN] tar -xf '${cache_src}' -C '${destdir}'"
+        fi
       else
-        log_warn "zstd não encontrado; tentando extrair tar sem compressão."
-        tar -xf "${tarball}" -C "${destdir}" || {
-          log_error "Falha ao extrair ${tarball}"
-          exit 1
-        }
+        if [[ "${cache_src}" == *.zst ]]; then
+          if command -v zstd >/dev/null 2>&1; then
+            zstd -d -c "${cache_src}" | tar -xf - -C "${destdir}"
+          else
+            log_error "Tarball comprimido (.zst) encontrado, mas zstd não está instalado."
+            exit 1
+          fi
+        else
+          run_cmd tar -xf "${cache_src}" -C "${destdir}"
+        fi
       fi
 
-      run_cmd rsync -a "${destdir}/" "${ADM_ROOTFS}/"
-    fi
+      # Instala em rootfs a partir do cache
+      log_info "Instalando em rootfs a partir do cache: ${ADM_ROOTFS}"
+      if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+        log_warn "[DRY-RUN] rsync -a '${destdir}/' '${ADM_ROOTFS}/'"
+      else
+        run_cmd rsync -a "${destdir}/" "${ADM_ROOTFS}/"
+      fi
 
-    register_install "$full" "$destdir"
-    run_hook "$full" "post_install"
-    log_ok "Instalação de ${full} concluída via cache binário."
-    return 0
+      register_install "$full" "$destdir"
+      run_hook "$full" "post_install"
+      log_ok "Instalação de ${full} concluída a partir de cache binário."
+      return 0
+    fi
   fi
 
   # Flags extras
@@ -733,7 +756,9 @@ build_and_install_pkg() {
     LDFLAGS="${LDFLAGS} ${PKG_LDFLAGS_EXTRA}"
   fi
 
+  #############################################################################
   # FETCH
+  #############################################################################
   if [[ ! -f "${stamp_fetch}" ]]; then
     log_info "Buscando fontes para ${PKG_NAME}-${PKG_VERSION}..."
     fetch_source "$full"
@@ -742,7 +767,9 @@ build_and_install_pkg() {
     log_info "Fase FETCH já concluída (retomando)."
   fi
 
+  #############################################################################
   # EXTRACT
+  #############################################################################
   if [[ ! -f "${stamp_extract}" ]]; then
     log_info "Extraindo fontes para ${build_dir}..."
     extract_source "$full"
@@ -751,113 +778,114 @@ build_and_install_pkg() {
     log_info "Fase EXTRACT já concluída (retomando)."
   fi
 
+  #############################################################################
+  # HOOK: pre_build
+  #############################################################################
+  # Hook executado após os sources estarem disponíveis e antes de configure/build.
   run_hook "$full" "pre_build"
 
+  #############################################################################
   # CONFIGURE
+  #############################################################################
   if [[ ! -f "${stamp_configure}" ]]; then
-    log_info "Configurando ${PKG_NAME}-${PKG_VERSION}..."
-
-    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      local cfg_preview=" ./configure --host='${TARGET_TRIPLET}' --build='${TARGET_TRIPLET}' --prefix=/usr --sysconfdir=/etc --localstatedir=/var"
-      if declare -p PKG_CONFIGURE_OPTS >/dev/null 2>&1; then
-        cfg_preview+=" ${PKG_CONFIGURE_OPTS[*]}"
-      fi
-      log_warn "[DRY-RUN] (cd '${build_dir}' &&${cfg_preview})"
-    else
-      (
-        cd "$build_dir"
-        local cfg_args=(
-          "--host=${TARGET_TRIPLET}"
-          "--build=${TARGET_TRIPLET}"
-          "--prefix=/usr"
-          "--sysconfdir=/etc"
-          "--localstatedir=/var"
+    if declare -p PKG_CONFIGURE_CMD >/dev/null 2>&1 && [[ -n "${PKG_CONFIGURE_CMD:-}" ]]; then
+      log_info "Configurando ${full}..."
+      if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+        log_warn "[DRY-RUN] (cd '${build_dir}' && ${PKG_CONFIGURE_CMD})"
+      else
+        (
+          cd "${build_dir}"
+          eval "${PKG_CONFIGURE_CMD}"
         )
-        if declare -p PKG_CONFIGURE_OPTS >/dev/null 2>&1; then
-          cfg_args+=("${PKG_CONFIGURE_OPTS[@]}")
-        fi
-        if [[ -x "./configure" ]]; then
-          run_cmd ./configure "${cfg_args[@]}"
-        else
-          log_warn "Nenhum ./configure encontrado; pulando fase configure."
-        fi
-      )
-      touch "${stamp_configure}"
+      fi
     fi
+    [[ "${ADM_DRY_RUN}" = "1" ]] || touch "${stamp_configure}"
   else
     log_info "Fase CONFIGURE já concluída (retomando)."
   fi
 
+  #############################################################################
   # BUILD
+  #############################################################################
   if [[ ! -f "${stamp_build}" ]]; then
-    log_info "Compilando ${PKG_NAME}-${PKG_VERSION}..."
-
-    local jobs
-    if [[ -n "${ADM_JOBS}" ]]; then
-      jobs="${ADM_JOBS}"
-    elif command -v nproc >/dev/null 2>&1; then
-      jobs="$(nproc)"
-    else
-      jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-    fi
-
+    log_info "Compilando ${full}..."
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      local make_preview=" make -j'${jobs}'"
-      if declare -p PKG_MAKE_OPTS >/dev/null 2>&1; then
-        make_preview+=" ${PKG_MAKE_OPTS[*]}"
+      if command -v make >/dev/null 2>&1; then
+        log_warn "[DRY-RUN] (cd '${build_dir}' && make -j'${ADM_JOBS:-$(nproc)}')"
+      else
+        log_warn "[DRY-RUN] (build custom via hook ou PKG_BUILD_CMD)"
       fi
-      log_warn "[DRY-RUN] (cd '${build_dir}' &&${make_preview})"
     else
       (
-        cd "$build_dir"
-        local make_args=( "-j${jobs}" )
-        if declare -p PKG_MAKE_OPTS >/dev/null 2>&1; then
-          make_args+=("${PKG_MAKE_OPTS[@]}")
+        cd "${build_dir}"
+        local make_args=()
+        if [[ -n "${ADM_JOBS:-}" ]]; then
+          make_args+=("-j${ADM_JOBS}")
         fi
-        if command -v make >/dev/null 2>&1; then
-          run_cmd make "${make_args[@]}"
+
+        if declare -p PKG_BUILD_CMD >/dev/null 2>&1 && [[ -n "${PKG_BUILD_CMD:-}" ]]; then
+          eval "${PKG_BUILD_CMD}"
         else
-          log_warn "make não encontrado; assumindo build custom via hook."
+          if command -v make >/dev/null 2>&1; then
+            run_cmd make "${make_args[@]}"
+          else
+            log_warn "make não encontrado; assumindo build custom via hook."
+          fi
         fi
       )
-      touch "${stamp_build}"
     fi
+    [[ "${ADM_DRY_RUN}" = "1" ]] || touch "${stamp_build}"
   else
     log_info "Fase BUILD já concluída (retomando)."
   fi
 
-  # INSTALL em DESTDIR
-  if [[ ! -f "${stamp_install}" ]]; then
-    log_info "Instalando ${PKG_NAME}-${PKG_VERSION} em DESTDIR..."
+  #############################################################################
+  # HOOK: post_build
+  #############################################################################
+  # Hook após a compilação, antes da fase INSTALL.
+  run_hook "$full" "post_build"
 
+  #############################################################################
+  # INSTALL
+  #############################################################################
+  if [[ ! -f "${stamp_install}" ]]; then
+    rm -rf "${destdir}"
+    mkdir -p "${destdir}"
+
+    run_hook "$full" "pre_install"
+
+    log_info "Instalando ${full} em destdir: ${destdir}"
     if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-      local make_install_preview=" make DESTDIR='${destdir}' install"
-      if declare -p PKG_MAKE_INSTALL_OPTS >/dev/null 2>&1; then
-        make_install_preview+=" ${PKG_MAKE_INSTALL_OPTS[*]}"
+      if command -v make >/dev/null 2>&1; then
+        log_warn "[DRY-RUN] (cd '${build_dir}' && make DESTDIR='${destdir}' install)"
+      else
+        log_warn "[DRY-RUN] (instalação custom via hook ou PKG_INSTALL_CMD)"
       fi
-      log_warn "[DRY-RUN] (cd '${build_dir}' &&${make_install_preview})"
     else
       (
-        cd "$build_dir"
-        local install_args=( "DESTDIR=${destdir}" "install" )
-        if declare -p PKG_MAKE_INSTALL_OPTS >/dev/null 2>&1; then
-          install_args+=("${PKG_MAKE_INSTALL_OPTS[@]}")
-        fi
-        if command -v make >/dev/null 2>&1; then
-          run_cmd make "${install_args[@]}"
+        cd "${build_dir}"
+        local install_args=()
+        if declare -p PKG_INSTALL_CMD >/dev/null 2>&1 && [[ -n "${PKG_INSTALL_CMD:-}" ]]; then
+          eval "${PKG_INSTALL_CMD}"
         else
-          log_warn "make não encontrado; assumindo instalação via hook."
+          if command -v make >/dev/null 2>&1; then
+            install_args=("DESTDIR=${destdir}" "install")
+            run_cmd make "${install_args[@]}"
+          else
+            log_warn "make não encontrado; assumindo instalação via hook."
+          fi
         fi
       )
-      touch "${stamp_install}"
     fi
+
+    [[ "${ADM_DRY_RUN}" = "1" ]] || touch "${stamp_install}"
   else
     log_info "Fase INSTALL já concluída (retomando)."
   fi
 
-  run_hook "$full" "pre_install"
-
-  # Strip de binários ELF (opcional)
+  #############################################################################
+  # STRIP de binários
+  #############################################################################
   if [[ "${ADM_STRIP_BINARIES}" = "1" && "${ADM_DRY_RUN}" != "1" ]]; then
     if command -v file >/dev/null 2>&1 && command -v "${STRIP:-strip}" >/dev/null 2>&1; then
       log_info "Executando strip em binários ELF instalados..."
@@ -871,21 +899,29 @@ build_and_install_pkg() {
     fi
   fi
 
+  #############################################################################
   # Geração de tarball (cache binário)
-  log_info "Gerando tarball em cache: ${tarball}"
-  if [[ "${ADM_DRY_RUN}" = "1" ]]; then
-    log_warn "[DRY-RUN] (cd '${destdir}' && tar -cf - . | zstd -19 -o '${tarball}')"
-  else
-    mkdir -p "$(dirname "${tarball}")"
-    if command -v zstd >/dev/null 2>&1; then
-      ( cd "${destdir}" && tar -cf - . ) | zstd -19 -o "${tarball}"
+  #############################################################################
+  if [[ "${ADM_ENABLE_BIN_CACHE}" = "1" ]]; then
+    log_info "Gerando tarball em cache para ${full}..."
+    mkdir -p "$(dirname "${tarbase}")"
+    if [[ "${ADM_DRY_RUN}" = "1" ]]; then
+      log_warn "[DRY-RUN] (cd '${destdir}' && tar -cf - . | zstd -19 -o '${tarball_zst}')"
     else
-      log_warn "zstd não encontrado; gerando tarball sem compressão."
-      ( cd "${destdir}" && run_cmd tar -cf "${tarball%.zst}" . )
+      if command -v zstd >/dev/null 2>&1; then
+        ( cd "${destdir}" && tar -cf - . ) | zstd -19 -o "${tarball_zst}"
+        rm -f "${tarball_plain}"
+      else
+        log_warn "zstd não encontrado; gerando tarball sem compressão."
+        ( cd "${destdir}" && run_cmd tar -cf "${tarball_plain}" . )
+        rm -f "${tarball_zst}"
+      fi
     fi
   fi
 
-  # Instala em rootfs
+  #############################################################################
+  # Instalação em rootfs
+  #############################################################################
   log_info "Instalando em rootfs: ${ADM_ROOTFS}"
   if [[ "${ADM_DRY_RUN}" = "1" ]]; then
     log_warn "[DRY-RUN] rsync -a '${destdir}/' '${ADM_ROOTFS}/'"
@@ -895,8 +931,9 @@ build_and_install_pkg() {
 
   register_install "$full" "$destdir"
   run_hook "$full" "post_install"
+
   log_ok "Build e instalação de ${full} concluídos."
-}
+}        
 
 ###############################################################################
 # Dependências / grafos
