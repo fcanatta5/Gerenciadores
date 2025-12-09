@@ -27,9 +27,20 @@ PKG_DEPENDS=( "linux-headers" "gcc-pass1" )
 # Se quiser usar o patch FHS do LFS, baixe-o para um diretório seu
 # e descomente/ajuste a linha abaixo:
 #   https://ftp.osuosl.org/pub/lfs/lfs-packages/12.4/glibc-2.42-fhs-1.patch 
-PKG_PATCHES=(
+#PKG_PATCHES=(
   # "/opt/adm/patches/glibc-2.42-fhs-1.patch"
+#)
+PKG_PATCH_URLS=(
+  "https://ftp.osuosl.org/pub/lfs/lfs-packages/12.4/glibc-2.42-fhs-1.patch"
 )
+
+PKG_PATCH_SHA256=(
+  "0e98bb64d18b96ba6a69f5a6545edc53c440183675682547909c096f66e3b81c"
+)
+# Opcional: se quiser usar MD5 em vez de SHA256:
+# PKG_PATCH_MD5=(
+#   "d41d8cd98f00b204e9800998ecf8427e"
+# )
 
 # ---------------------------------------------------------------------
 # Helpers
