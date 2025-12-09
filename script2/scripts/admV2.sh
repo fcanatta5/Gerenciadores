@@ -391,47 +391,58 @@ verify_source_checksum() {
     return 0
 }
 
-ensure_source_downloaded() {
-    local tarball_name="${PKG_NAME}-${PKG_VERSION}.tar"
-    local cache_file
-    cache_file="${SOURCE_CACHE}/${tarball_name}"
+# ------------- Download unificado de TODOS os sources do pacote -------------
 
-    if [ -n "${PKG_TARBALL:-}" ]; then
-        cache_file="${SOURCE_CACHE}/${PKG_TARBALL}"
+ensure_sources_downloaded() {
+    if [ "${#PKG_SOURCES[@]:-0}" -eq 0 ]; then
+        log_error "PKG_SOURCES está vazio em $(pkg_id)"
+        exit 1
     fi
 
-    local tries=0
-    while :; do
-        if [ -f "$cache_file" ]; then
-            log_info "Source em cache: $cache_file"
-            if verify_source_checksum "$cache_file"; then
-                echo "$cache_file"
-                return 0
-            else
-                log_warn "Checksum não confere para $cache_file, removendo e baixando novamente."
-                rm -f "$cache_file"
-            fi
-        fi
+    mkdir -p "$SOURCE_CACHE"
 
-        tries=$((tries + 1))
-        if [ "$tries" -gt 5 ]; then
-            log_error "Falha ao baixar source após $tries tentativas."
+    local entry name urls sha_list dest tries have u
+    for entry in "${PKG_SOURCES[@]}"; do
+        IFS='|' read -r name urls sha_list <<< "$entry"
+        dest="${SOURCE_CACHE}/${name}"
+
+        if [ -z "$name" ] || [ -z "$urls" ]; then
+            log_error "Entrada inválida em PKG_SOURCES: '$entry'"
             exit 1
         fi
 
-        log_info "Baixando source para $(pkg_id) (tentativa $tries)..."
-        if ! download_with_cache "$cache_file" "${PKG_SOURCE_URLS[@]}"; then
-            log_warn "Download falhou, nova tentativa..."
-            continue
-        fi
+        tries=0
+        while :; do
+            if [ -f "$dest" ]; then
+                if [ -n "${sha_list:-}" ]; then
+                    have="$(sha256sum_file "$dest")"
+                    for u in $sha_list; do
+                        if [ "$have" = "$u" ]; then
+                            log_ok "Source verificado no cache: $name"
+                            break 2
+                        fi
+                    done
+                    log_warn "Checksum inválido para $name, removendo"
+                    rm -f "$dest"
+                else
+                    log_ok "Source sem checksum no cache: $name"
+                    break
+                fi
+            fi
 
-        if verify_source_checksum "$cache_file"; then
-            echo "$cache_file"
-            return 0
-        else
-            log_warn "Checksum não confere após download, repetindo..."
-            rm -f "$cache_file"
-        fi
+            tries=$((tries+1))
+            [ "$tries" -gt 5 ] && {
+                log_error "Falha ao baixar $name após $tries tentativas"
+                exit 1
+            }
+
+            for u in $urls; do
+                log_info "Baixando $name de $u"
+                if download_with_cache "$dest" "$u"; then
+                    break
+                fi
+            done
+        done
     done
 }
 
