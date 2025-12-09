@@ -28,7 +28,8 @@ PKG_DEPENDS=(
 # Triplet alvo (para coerência com o restante do toolchain)
 ###############################################################################
 
-PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
+# PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
+PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_TRIPLET}}"
 
 ###############################################################################
 # Fases customizadas (kernel não usa ./configure padrão)
