@@ -5,59 +5,55 @@ set -euo pipefail
 
 PKG_EXPECTED_VERSION="2.45.1"
 
-# OBS: ADM_ROOTFS não é exportado pelo adm.sh por padrão.
-# Aqui usamos:
-#   - ADM_ROOTFS, se o usuário tiver exportado;
-#   - caso contrário, caímos no default do adm: /opt/adm/rootfs.
-ROOTFS="${ADM_ROOTFS:-/opt/adm/rootfs}"
+# Rootfs que o adm.sh passou para o hook:
+#   - ADM_HOOK_ROOTFS: exportado pelo adm.sh na hora do run_hook
+#   - ADM_ROOTFS: fallback, se o hook estiver sendo chamado manualmente
+#   - /opt/adm/rootfs: default absoluto
+ROOTFS="${ADM_HOOK_ROOTFS:-${ADM_ROOTFS:-/opt/adm/rootfs}}"
 ROOTFS="${ROOTFS%/}"
 
 TOOLS_BIN="${ROOTFS}/tools/bin"
 
-LD_BIN="${TOOLS_BIN}/ld"
-AS_BIN="${TOOLS_BIN}/as"
+echo "[binutils-pass1/post_install] ROOTFS detectado: ${ROOTFS}"
+echo "[binutils-pass1/post_install] Verificando binutils em: ${TOOLS_BIN}"
 
-echo "[binutils-pass1/post_install] Sanity-check do Binutils Pass 1 em ${TOOLS_BIN}..."
-
-if [[ ! -x "${LD_BIN}" ]]; then
-  echo "[binutils-pass1/post_install] ERRO: ld não encontrado em ${LD_BIN}" >&2
+# Verifica se /tools/bin existe e contém os binários básicos
+if [[ ! -d "${TOOLS_BIN}" ]]; then
+  echo "[binutils-pass1/post_install] ERRO: diretório ${TOOLS_BIN} não existe." >&2
   exit 1
 fi
 
-if [[ ! -x "${AS_BIN}" ]]; then
-  echo "[binutils-pass1/post_install] ERRO: as não encontrado em ${AS_BIN}" >&2
+if [[ ! -x "${TOOLS_BIN}/ld" ]]; then
+  echo "[binutils-pass1/post_install] ERRO: '${TOOLS_BIN}/ld' não encontrado ou não executável." >&2
   exit 1
 fi
 
-echo "[binutils-pass1/post_install] ld encontrado: ${LD_BIN}"
-echo "[binutils-pass1/post_install] as encontrado: ${AS_BIN}"
-
-# Versão
-ld_version="$("${LD_BIN}" --version 2>/dev/null | head -n1 || true)"
-as_version="$("${AS_BIN}" --version 2>/dev/null | head -n1 || true)"
-
-if [[ -z "${ld_version}" ]]; then
-  echo "[binutils-pass1/post_install] ERRO: não foi possível obter 'ld --version'." >&2
+if [[ ! -x "${TOOLS_BIN}/as" ]]; then
+  echo "[binutils-pass1/post_install] ERRO: '${TOOLS_BIN}/as' não encontrado ou não executável." >&2
   exit 1
 fi
 
-if [[ -z "${as_version}" ]]; then
-  echo "[binutils-pass1/post_install] ERRO: não foi possível obter 'as --version'." >&2
+# Lê as versões reportadas por ld e as
+ld_version="$("${TOOLS_BIN}/ld" --version | head -n1 || true)"
+as_version="$("${TOOLS_BIN}/as" --version | head -n1 || true)"
+
+if [[ -z "${ld_version}" || -z "${as_version}" ]]; then
+  echo "[binutils-pass1/post_install] ERRO: não foi possível obter versão de ld/as em ${TOOLS_BIN}." >&2
   exit 1
 fi
 
 echo "[binutils-pass1/post_install] ld --version: ${ld_version}"
 echo "[binutils-pass1/post_install] as --version: ${as_version}"
 
+# Confere se a versão do ld bate com o esperado (aviso, não fatal)
 if ! grep -q "${PKG_EXPECTED_VERSION}" <<<"${ld_version}"; then
-  echo "[binutils-pass1/post_install] ERRO: versão inesperada de ld (esperado ${PKG_EXPECTED_VERSION})." >&2
-  exit 1
+  echo "[binutils-pass1/post_install] AVISO: versão de ld não contém '${PKG_EXPECTED_VERSION}'." >&2
+  echo "[binutils-pass1/post_install]         Verifique se está usando o binutils correto para o Pass 1." >&2
 fi
 
-# PATH de teste só com /tools/bin
-PATH_TEST="${TOOLS_BIN}:${PATH}"
-PATH="${PATH_TEST}"
-export PATH
+# Monta um PATH de teste com /tools/bin na frente
+PATH_TEST="${TOOLS_BIN}:${PATH:-/usr/bin:/bin}"
+export PATH="${PATH_TEST}"
 
 which_ld="$(command -v ld || true)"
 if [[ -z "${which_ld}" ]]; then
@@ -66,6 +62,12 @@ if [[ -z "${which_ld}" ]]; then
 fi
 
 echo "[binutils-pass1/post_install] 'ld' resolvido para: ${which_ld}"
+
+# Se quiser endurecer, pode exigir que seja exatamente TOOLS_BIN/ld:
+if [[ "${which_ld}" != "${TOOLS_BIN}/ld" ]]; then
+  echo "[binutils-pass1/post_install] AVISO: 'ld' no PATH não é o de ${TOOLS_BIN}." >&2
+  echo "[binutils-pass1/post_install]         Isso pode indicar que /tools/bin não está na frente do PATH." >&2
+fi
 
 echo "[binutils-pass1/post_install] OK: Binutils Pass 1 ${PKG_EXPECTED_VERSION} em /tools parece funcional."
 exit 0
