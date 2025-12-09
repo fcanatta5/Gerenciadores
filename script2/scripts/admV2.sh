@@ -1095,29 +1095,100 @@ sync_packages() {
 
 usage() {
     cat <<EOF
-adm - sistema de build source-based
+adm - sistema de build source-based para LFS / Linux From Scratch
 
-Uso:
+Uso geral:
   adm build     [-P profile] pacote1 [pacote2 ...]
   adm uninstall [-P profile] pacote1 [pacote2 ...]
-  adm clean     [-P profile] [pacote1 ...]
-  adm sync
   adm list      [-P profile]
-  adm info      [-P profile] pacote
-  adm help
+  adm info      pacote
+  adm sync
+  adm chroot    [-P profile] [opções_chroot...] [--] comando_adm [args...]
 
-Profiles:
-  glibc, musl, glibc-opt, musl-opt
+Comandos:
+
+  build
+    Constrói um ou mais pacotes a partir dos scripts de construção.
+    - Resolve dependências em ordem topológica.
+    - Usa cache de sources e de binários quando disponível.
+    - Instala no rootfs do profile selecionado.
+
+    Exemplo:
+      adm build -P glibc coreutils-9.9 bash-5.3
+
+  uninstall
+    Remove um ou mais pacotes do rootfs do profile.
+    - Remove na ordem reversa de dependências.
+    - Executa hooks de pre/post-uninstall quando definidos.
+
+    Exemplo:
+      adm uninstall -P musl coreutils-9.9
+
+  list
+    Lista os pacotes instalados no profile (e suas versões).
+
+    Exemplo:
+      adm list -P glibc
+
+  info
+    Mostra informações sobre um pacote (metadados, dependências, etc).
+
+    Exemplo:
+      adm info coreutils-9.9
+
+  sync
+    Sincroniza / atualiza os scripts de construção a partir do repositório git
+    configurado em ADM_REPO_URL (por exemplo, atualiza /opt/adm/packages).
+
+    Exemplo:
+      adm sync
+
+  chroot
+    Gerencia e entra em um chroot seguro baseado no rootfs do profile e
+    executa o próprio adm lá dentro (via /opt/adm/adm-chroot.sh).
+
+    Modos principais:
+      1) Shell interativo dentro do chroot:
+           adm chroot -P glibc --shell
+
+      2) Executar um comando do adm dentro do chroot:
+           adm chroot -P glibc -- build coreutils-9.9
+           adm chroot -P musl  -- build bash-5.3
+
+    Opções passadas para o wrapper (adm-chroot.sh):
+      -P, --profile   glibc | musl | glibc-opt | musl-opt
+      --shell         Abre um shell de root dentro do chroot do profile
+      --bind-ro DIR   Faz bind read-only de DIR do host dentro do chroot (pode repetir)
+      --bind-rw DIR   Faz bind read-write de DIR do host dentro do chroot (pode repetir)
+      --debug         Ativa logs detalhados do wrapper
+
+Profiles disponíveis:
+  glibc      - rootfs com glibc padrão
+  musl       - rootfs com musl padrão
+  glibc-opt  - rootfs glibc com flags otimizadas (ex.: -O3 -march=native)
+  musl-opt   - rootfs musl com flags otimizadas
 
 Variáveis de ambiente importantes:
-  ADM_ROOT, ADM_ARCH, ADM_REPO_URL
+  ADM_ROOT   - Diretório raiz do adm (padrão: /opt/adm)
+  ADM_ARCH   - Arquitetura alvo (ex.: x86_64)
+  ADM_REPO_URL - URL do repositório git com scripts de pacotes
 
 Diretórios padrão:
-  Scripts de pacotes:   $PKG_ROOT/<categoria>/<pacote>.sh
-  Rootfs glibc:         $ROOTFS_GLIBC
-  Rootfs musl:          $ROOTFS_MUSL
-  Cache de sources:     $SOURCE_CACHE
-  Cache de binários:    $BIN_CACHE
+  Scripts de pacotes:   \$PKG_ROOT/<categoria>/<pacote>.sh
+  Rootfs glibc:         \$ROOTFS_GLIBC
+  Rootfs musl:          \$ROOTFS_MUSL
+  Cache de sources:     \$SOURCE_CACHE
+  Cache de binários:    \$BIN_CACHE
+
+Exemplos rápidos:
+  # Construir coreutils e bash para glibc (fora do chroot)
+  adm build -P glibc coreutils-9.9 bash-5.3
+
+  # Construir coreutils dentro do chroot glibc-rootfs
+  adm chroot -P glibc -- build coreutils-9.9
+
+  # Entrar em shell dentro do chroot musl-rootfs
+  adm chroot -P musl --shell
 
 EOF
 }
