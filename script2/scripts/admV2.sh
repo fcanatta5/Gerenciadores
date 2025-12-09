@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Caminhos básicos
+# ---------------------------------------------------------------------------
+
 ADM_ROOT=${ADM_ROOT:-/opt/adm}
 PKG_ROOT="${ADM_ROOT}/packages"
 CACHE_ROOT="${ADM_ROOT}/cache"
@@ -17,7 +21,9 @@ mkdir -p "$PKG_ROOT" "$SOURCE_CACHE" "$BIN_CACHE" \
          "$ROOTFS_GLIBC" "$ROOTFS_MUSL" \
          "$DB_ROOT" "$LOG_ROOT" "$LOCK_DIR" "$STATE_DIR"
 
-# ------------- Colors / logging -------------
+# ---------------------------------------------------------------------------
+# Logging / cores
+# ---------------------------------------------------------------------------
 
 if [ -t 1 ]; then
     COLOR_RESET='\033[0m'
@@ -55,10 +61,10 @@ _log() {
     fi
 }
 
-log_info()  { _log INFO "$COLOR_INFO"  "$*"; }
-log_warn()  { _log WARN "$COLOR_WARN"  "$*"; }
+log_info()  { _log INFO  "$COLOR_INFO"  "$*"; }
+log_warn()  { _log WARN  "$COLOR_WARN"  "$*"; }
 log_error() { _log ERROR "$COLOR_ERROR" "$*"; }
-log_ok()    { _log OK "$COLOR_OK" "$*"; }
+log_ok()    { _log OK    "$COLOR_OK"    "$*"; }
 
 on_error() {
     local line="$1"
@@ -66,7 +72,9 @@ on_error() {
 }
 trap 'on_error $LINENO' ERR
 
-# ------------- Lock global -------------
+# ---------------------------------------------------------------------------
+# Lock global
+# ---------------------------------------------------------------------------
 
 acquire_lock() {
     local name="${1:-global}"
@@ -78,7 +86,9 @@ acquire_lock() {
     fi
 }
 
-# ------------- Utilitários -------------
+# ---------------------------------------------------------------------------
+# Utilitários
+# ---------------------------------------------------------------------------
 
 require_cmd() {
     local cmd="$1"
@@ -97,85 +107,18 @@ md5sum_file() {
 }
 
 check_environment() {
-    # Ferramentas básicas exigidas para build de pacotes
     require_cmd tar
     require_cmd patch
     require_cmd rsync
-    # git só é necessário para 'adm sync'
-    # curl ou wget: pelo menos um precisa existir
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         log_error "É necessário ter 'curl' ou 'wget' disponível para downloads."
         exit 1
     fi
 }
 
-# ------------- Limpeza de diretórios de trabalho / estado -------------
-
-# Limpa diretório de build e estado de um pacote específico
-clean_pkg_workdir() {
-    local pkg="$1"
-
-    # Precisamos do PKG_NAME/PKG_VERSION para calcular pkg_id / state_file
-    load_package_def "$pkg"
-
-    local build_dir="${ADM_ROOT}/build/${ADM_PROFILE}/$(pkg_id)"
-    local state_file
-    state_file="$(pkg_state_file)"
-
-    log_info "Limpando workdir de $(pkg_id) para profile ${ADM_PROFILE}: ${build_dir}"
-    rm -rf --one-file-system "$build_dir"
-
-    if [ -f "$state_file" ]; then
-        log_info "Removendo arquivo de estado: ${state_file}"
-        rm -f "$state_file"
-    fi
-}
-
-# Limpa todos os diretórios de build e estados do profile atual
-clean_all_workdirs_for_profile() {
-    local profile_build_dir="${ADM_ROOT}/build/${ADM_PROFILE}"
-    local state_dir
-    state_dir="$(profile_state_dir)"
-
-    log_info "Limpando TODOS os workdirs do profile ${ADM_PROFILE}: ${profile_build_dir}"
-    rm -rf --one-file-system "$profile_build_dir"
-    mkdir -p "$profile_build_dir"
-
-    log_info "Limpando estados de build do profile ${ADM_PROFILE}: ${state_dir}"
-    rm -rf --one-file-system "$state_dir"
-    mkdir -p "$state_dir"
-}
-
-# Limpeza "inteligente" de nível mais alto:
-# - se receber pacotes: limpa só esses workdirs
-# - se não receber nada: limpa todos os workdirs do profile atual
-adm_clean() {
-    local pkgs=()
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            -P|--profile)
-                # perfil é tratado fora, em cmd_clean; ignorar aqui
-                shift 2 ;;
-            -*)
-                log_error "Opção desconhecida para clean: $1"
-                exit 1 ;;
-            *)
-                pkgs+=("$1"); shift ;;
-        esac
-    done
-
-    if [ "${#pkgs[@]}" -eq 0 ]; then
-        clean_all_workdirs_for_profile
-    else
-        local p
-        for p in "${pkgs[@]}"; do
-            clean_pkg_workdir "$p"
-        done
-    fi
-}
-
-# ------------- Perfis (glibc / musl) -------------
+# ---------------------------------------------------------------------------
+# Perfis (glibc / musl / otimizações)
+# ---------------------------------------------------------------------------
 
 ADM_PROFILE=""
 ADM_SYSROOT=""
@@ -242,18 +185,22 @@ load_profile() {
     log_info "Profile carregado: $ADM_PROFILE (TARGET=$ADM_TARGET, SYSROOT=$ADM_SYSROOT)"
 }
 
-# ------------- Carregar definição de pacote -------------
+# ---------------------------------------------------------------------------
+# Carregar definição de pacote
+# ---------------------------------------------------------------------------
 
 PKG_NAME=""
 PKG_VERSION=""
 PKG_CATEGORY=""
 PKG_SOURCE_URLS=()
+PKG_TARBALL=""
 PKG_SHA256=""
 PKG_MD5=""
+PKG_SHA256_LIST=()
+PKG_MD5_LIST=()
 PKG_DEPENDS=()
 PKG_PATCHES=()
 
-# suporte a patches remotos
 PKG_PATCH_URLS=()
 PKG_PATCH_SHA256=()
 PKG_PATCH_MD5=()
@@ -275,16 +222,17 @@ load_package_def() {
     local name="$1"
     find_package_file "$name"
 
-    # limpar variáveis de pacote
     PKG_NAME=""
     PKG_VERSION=""
     PKG_CATEGORY=""
     PKG_SOURCE_URLS=()
+    PKG_TARBALL=""
     PKG_SHA256=""
     PKG_MD5=""
+    PKG_SHA256_LIST=()
+    PKG_MD5_LIST=()
     PKG_DEPENDS=()
     PKG_PATCHES=()
-
     PKG_PATCH_URLS=()
     PKG_PATCH_SHA256=()
     PKG_PATCH_MD5=()
@@ -341,7 +289,9 @@ is_installed() {
     [ -f "$(pkg_manifest_file)" ]
 }
 
-# ------------- Download e cache (source principal) -------------
+# ---------------------------------------------------------------------------
+# Download principal (source)
+# ---------------------------------------------------------------------------
 
 download_with_cache() {
     local dest="$1"; shift
@@ -371,85 +321,169 @@ download_with_cache() {
 
 verify_source_checksum() {
     local file="$1"
+    local have
+
     if [ -n "${PKG_SHA256:-}" ]; then
-        local sum
-        sum="$(sha256sum_file "$file")"
-        if [ "$sum" != "$PKG_SHA256" ]; then
-            log_warn "SHA256 esperado: $PKG_SHA256, obtido: $sum"
+        have="$(sha256sum_file "$file")"
+        if [ "$have" != "$PKG_SHA256" ]; then
+            log_warn "SHA256 esperado: $PKG_SHA256, obtido: $have"
             return 1
         fi
-    elif [ -n "${PKG_MD5:-}" ]; then
-        local sum
-        sum="$(md5sum_file "$file")"
-        if [ "$sum" != "$PKG_MD5" ]; then
-            log_warn "MD5 esperado: $PKG_MD5, obtido: $sum"
-            return 1
-        fi
-    else
-        log_warn "Nenhum checksum definido para $(pkg_id); pulando verificação."
+        return 0
     fi
+
+    if [ "${#PKG_SHA256_LIST[@]:-0}" -gt 0 ]; then
+        have="$(sha256sum_file "$file")"
+        local s
+        for s in "${PKG_SHA256_LIST[@]}"; do
+            if [ "$have" = "$s" ]; then
+                return 0
+            fi
+        done
+        log_warn "SHA256 obtido ($have) não corresponde a nenhum dos valores em PKG_SHA256_LIST."
+        return 1
+    fi
+
+    if [ -n "${PKG_MD5:-}" ]; then
+        have="$(md5sum_file "$file")"
+        if [ "$have" != "$PKG_MD5" ]; then
+            log_warn "MD5 esperado: $PKG_MD5, obtido: $have"
+            return 1
+        fi
+        return 0
+    fi
+
+    if [ "${#PKG_MD5_LIST[@]:-0}" -gt 0 ]; then
+        have="$(md5sum_file "$file")"
+        local m
+        for m in "${PKG_MD5_LIST[@]}"; do
+            if [ "$have" = "$m" ]; then
+                return 0
+            fi
+        done
+        log_warn "MD5 obtido ($have) não corresponde a nenhum dos valores em PKG_MD5_LIST."
+        return 1
+    fi
+
+    log_warn "Nenhum checksum definido para $(pkg_id); pulando verificação."
     return 0
 }
 
-# ------------- Download unificado de TODOS os sources do pacote -------------
+ensure_source_downloaded() {
+    local tarball_name="${PKG_NAME}-${PKG_VERSION}.tar"
+    local cache_file="${SOURCE_CACHE}/${tarball_name}"
 
-ensure_sources_downloaded() {
-    if [ "${#PKG_SOURCES[@]:-0}" -eq 0 ]; then
-        log_error "PKG_SOURCES está vazio em $(pkg_id)"
+    if [ -n "${PKG_TARBALL:-}" ]; then
+        cache_file="${SOURCE_CACHE}/${PKG_TARBALL}"
+    fi
+
+    local tries=0
+    while :; do
+        if [ -f "$cache_file" ]; then
+            log_info "Source em cache: $cache_file"
+            if verify_source_checksum "$cache_file"; then
+                echo "$cache_file"
+                return 0
+            else
+                log_warn "Checksum não confere para $cache_file, removendo e baixando novamente."
+                rm -f "$cache_file"
+            fi
+        fi
+
+        tries=$((tries + 1))
+        if [ "$tries" -gt 5 ]; then
+            log_error "Falha ao baixar source após $tries tentativas."
+            exit 1
+        fi
+
+        log_info "Baixando source para $(pkg_id) (tentativa $tries)..."
+        if ! download_with_cache "$cache_file" "${PKG_SOURCE_URLS[@]}"; then
+            log_warn "Download falhou, nova tentativa..."
+            continue
+        fi
+
+        if verify_source_checksum "$cache_file"; then
+            echo "$cache_file"
+            return 0
+        else
+            log_warn "Checksum não confere após download, repetindo..."
+            rm -f "$cache_file"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Helper para baixar ARQUIVOS extras (gmp/mpfr/mpc, Xorg, etc.)
+# usado nos scripts de pacote (ex.: gcc-pass1)
+# ---------------------------------------------------------------------------
+
+adm_fetch_file() {
+    local name="$1"
+    local urls_str="$2"
+    local sha_list_str="${3:-}"
+    local md5_list_str="${4:-}"
+
+    if [ -z "$name" ] || [ -z "$urls_str" ]; then
+        log_error "adm_fetch_file: parâmetros inválidos (name/urls vazios) para $(pkg_id)"
         exit 1
     fi
 
     mkdir -p "$SOURCE_CACHE"
+    local dest="${SOURCE_CACHE}/${name}"
+    local tries=0
+    local have
+    local -a urls
+    read -r -a urls <<< "$urls_str"
 
-    local entry name urls sha_list dest tries have u
-    for entry in "${PKG_SOURCES[@]}"; do
-        IFS='|' read -r name urls sha_list <<< "$entry"
-        dest="${SOURCE_CACHE}/${name}"
+    while :; do
+        if [ -f "$dest" ]; then
+            if [ -n "$sha_list_str" ]; then
+                have="$(sha256sum_file "$dest")"
+                local s
+                for s in $sha_list_str; do
+                    if [ "$have" = "$s" ]; then
+                        log_ok "Source extra verificado no cache: $name"
+                        return 0
+                    fi
+                done
+                log_warn "SHA256 de $name não confere; removendo."
+                rm -f "$dest"
+            elif [ -n "$md5_list_str" ]; then
+                have="$(md5sum_file "$dest")"
+                local m
+                for m in $md5_list_str; do
+                    if [ "$have" = "$m" ]; then
+                        log_ok "Source extra verificado no cache: $name"
+                        return 0
+                    fi
+                done
+                log_warn "MD5 de $name não confere; removendo."
+                rm -f "$dest"
+            else
+                log_warn "adm_fetch_file: nenhum checksum definido para $name; usando arquivo em cache sem verificação."
+                return 0
+            fi
+        fi
 
-        if [ -z "$name" ] || [ -z "$urls" ]; then
-            log_error "Entrada inválida em PKG_SOURCES: '$entry'"
+        tries=$((tries + 1))
+        if [ "$tries" -gt 5 ]; then
+            log_error "Falha ao baixar source extra $name após $tries tentativas."
             exit 1
         fi
 
-        tries=0
-        while :; do
-            if [ -f "$dest" ]; then
-                if [ -n "${sha_list:-}" ]; then
-                    have="$(sha256sum_file "$dest")"
-                    for u in $sha_list; do
-                        if [ "$have" = "$u" ]; then
-                            log_ok "Source verificado no cache: $name"
-                            break 2
-                        fi
-                    done
-                    log_warn "Checksum inválido para $name, removendo"
-                    rm -f "$dest"
-                else
-                    log_ok "Source sem checksum no cache: $name"
-                    break
-                fi
-            fi
-
-            tries=$((tries+1))
-            [ "$tries" -gt 5 ] && {
-                log_error "Falha ao baixar $name após $tries tentativas"
-                exit 1
-            }
-
-            for u in $urls; do
-                log_info "Baixando $name de $u"
-                if download_with_cache "$dest" "$u"; then
-                    break
-                fi
-            done
-        done
+        log_info "Baixando source extra $name (tentativa $tries)..."
+        if ! download_with_cache "$dest" "${urls[@]}"; then
+            log_warn "Download de $name falhou, nova tentativa..."
+            continue
+        fi
     done
 }
 
-# ------------- Download de patches (PKG_PATCH_URLS) -------------
+# ---------------------------------------------------------------------------
+# Patches remotos
+# ---------------------------------------------------------------------------
 
 ensure_patches_downloaded() {
-    # Se o pacote não declarou patches remotos, nada a fazer.
     if [ "${#PKG_PATCH_URLS[@]:-0}" -eq 0 ]; then
         return 0
     fi
@@ -508,8 +542,6 @@ ensure_patches_downloaded() {
     done
 }
 
-# ------------- Extração, patches, hooks -------------
-
 apply_patches() {
     local srcdir="$1"
     if [ "${#PKG_PATCHES[@]}" -eq 0 ]; then
@@ -532,7 +564,9 @@ run_hook_if_exists() {
     fi
 }
 
-# ------------- Binário em cache -------------
+# ---------------------------------------------------------------------------
+# Cache de binários
+# ---------------------------------------------------------------------------
 
 binpkg_path() {
     printf "%s/%s-%s-%s.tar.xz" "$BIN_CACHE" "$ADM_PROFILE" "$PKG_NAME" "$PKG_VERSION"
@@ -551,8 +585,6 @@ install_from_binpkg_if_available() {
 
 store_binpkg() {
     local destdir="$1"
-    # Se DESTDIR está vazio, provavelmente o pacote instalou direto em outro lugar (ex: tools/).
-    # Evitamos gerar binário vazio ou inconsistente.
     if [ ! -d "$destdir" ] || ! find "$destdir" -mindepth 1 -type f -o -type l | head -n1 >/dev/null 2>&1; then
         log_warn "DESTDIR vazio para $(pkg_id); não será gerado binário em cache."
         return 0
@@ -564,7 +596,9 @@ store_binpkg() {
     ( cd "$destdir" && tar -cJf "$binpkg" . )
 }
 
-# ------------- Estado de build -------------
+# ---------------------------------------------------------------------------
+# Estado de build
+# ---------------------------------------------------------------------------
 
 set_pkg_state() {
     local state_file
@@ -582,15 +616,9 @@ get_pkg_state() {
     fi
 }
 
-# ------------- Manifesto -------------
-
-generate_manifest() {
-    local before_file="$1"
-    local after_file="$2"
-    diff -u "$before_file" "$after_file" | awk '
-        /^+\// { sub(/^\+/, "", $1); print $1 }
-    '
-}
+# ---------------------------------------------------------------------------
+# Manifesto
+# ---------------------------------------------------------------------------
 
 snapshot_files() {
     local sysroot="$1"
@@ -598,7 +626,20 @@ snapshot_files() {
     ( cd "$sysroot" && find . -type f -o -type l ) | sort > "$out"
 }
 
-# ------------- Dependências (Kahn) -------------
+generate_manifest() {
+    local before_file="$1"
+    local after_file="$2"
+    diff -u "$before_file" "$after_file" | awk '
+        /^\+\.\// {
+            gsub(/^\+/, "", $1);
+            print $1
+        }
+    '
+}
+
+# ---------------------------------------------------------------------------
+# Dependências (Kahn)
+# ---------------------------------------------------------------------------
 
 load_depends_for_pkg() {
     local pkg="$1"
@@ -696,7 +737,9 @@ resolve_dependencies() {
     echo "${needed[@]}"
 }
 
-# ------------- Build de pacote -------------
+# ---------------------------------------------------------------------------
+# Build de pacote
+# ---------------------------------------------------------------------------
 
 build_one_pkg() {
     local pkg="$1"
@@ -739,13 +782,13 @@ build_one_pkg() {
         exit 1
     fi
 
-    # Apenas na primeira extração aplicamos patches
     if [ "$state" = "extracted" ]; then
         ensure_patches_downloaded
         apply_patches "$srcdir"
     fi
 
     pushd "$srcdir" >/dev/null
+
     run_hook_if_exists "pre_build"
 
     if [ "$state" = "extracted" ]; then
@@ -827,7 +870,9 @@ build_with_deps() {
     done
 }
 
-# ------------- Uninstall -------------
+# ---------------------------------------------------------------------------
+# Uninstall
+# ---------------------------------------------------------------------------
 
 reverse_dependency_map() {
     local profile_dir
@@ -854,7 +899,7 @@ collect_uninstall_closure() {
     printf "%s\n" "${initial[@]}" | sort -u > "$tmp_set"
 
     local changed=1
-    while [ "$changed" -eq 1 ]; then
+    while [ "$changed" -eq 1 ]; do
         changed=0
         local pkg
         for pkg in $(awk '{print $1 "\n" $2}' "$tmp_edges" | awk 'NF>0' | sort -u); do
@@ -909,7 +954,6 @@ uninstall_pkg() {
     fi
 
     rm -rf "$(pkg_db_dir)"
-
     run_hook_if_exists "post_uninstall"
 
     log_ok "$(pkg_id) removido de $ADM_SYSROOT"
@@ -949,10 +993,74 @@ uninstall_with_deps() {
     done
 }
 
-# ------------- Sync (git) -------------
+# ---------------------------------------------------------------------------
+# Limpeza de workdirs / estados
+# ---------------------------------------------------------------------------
+
+clean_pkg_workdir() {
+    local pkg="$1"
+
+    load_package_def "$pkg"
+
+    local build_dir="${ADM_ROOT}/build/${ADM_PROFILE}/$(pkg_id)"
+    local state_file
+    state_file="$(pkg_state_file)"
+
+    log_info "Limpando workdir de $(pkg_id) para profile ${ADM_PROFILE}: ${build_dir}"
+    rm -rf --one-file-system "$build_dir"
+
+    if [ -f "$state_file" ]; then
+        log_info "Removendo arquivo de estado: ${state_file}"
+        rm -f "$state_file"
+    fi
+}
+
+clean_all_workdirs_for_profile() {
+    local profile_build_dir="${ADM_ROOT}/build/${ADM_PROFILE}"
+    local state_dir
+    state_dir="$(profile_state_dir)"
+
+    log_info "Limpando TODOS os workdirs do profile ${ADM_PROFILE}: ${profile_build_dir}"
+    rm -rf --one-file-system "$profile_build_dir"
+    mkdir -p "$profile_build_dir"
+
+    log_info "Limpando estados de build do profile ${ADM_PROFILE}: ${state_dir}"
+    rm -rf --one-file-system "$state_dir"
+    mkdir -p "$state_dir"
+}
+
+adm_clean() {
+    local pkgs=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -P|--profile)
+                shift 2 ;; # tratado em cmd_clean
+            -*)
+                log_error "Opção desconhecida para clean: $1"
+                exit 1 ;;
+            *)
+                pkgs+=("$1"); shift ;;
+        esac
+    done
+
+    if [ "${#pkgs[@]}" -eq 0 ]; then
+        clean_all_workdirs_for_profile
+    else
+        local p
+        for p in "${pkgs[@]}"; do
+            clean_pkg_workdir "$p"
+        done
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Sync (git)
+# ---------------------------------------------------------------------------
 
 sync_packages() {
     local repo="${ADM_REPO_URL:-}"
+    require_cmd git
     if [ -d "$PKG_ROOT/.git" ]; then
         log_info "Atualizando repositório de scripts em $PKG_ROOT"
         git -C "$PKG_ROOT" pull --ff-only
@@ -965,19 +1073,21 @@ sync_packages() {
     fi
 }
 
-# ------------- CLI -------------
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 usage() {
     cat <<EOF
-adm - sistema de build source-based para LFS/DIY
+adm - sistema de build source-based
 
 Uso:
   adm build     [-P profile] pacote1 [pacote2 ...]
   adm uninstall [-P profile] pacote1 [pacote2 ...]
+  adm clean     [-P profile] [pacote1 ...]
   adm sync
   adm list      [-P profile]
-  adm clean     [-P profile] [pacote1 ...]
-  adm info      pacote
+  adm info      [-P profile] pacote
   adm help
 
 Profiles:
@@ -1089,9 +1199,17 @@ cmd_clean() {
 
 cmd_list() {
     local profile="glibc"
-    if [ "${1:-}" = "-P" ] || [ "${1:-}" = "--profile" ]; then
-        profile="$2"
-    fi
+    local pkg_arg=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -P|--profile)
+                profile="$2"; shift 2 ;;
+            *)
+                pkg_arg+=("$1"); shift ;;
+        esac
+    done
+
     load_profile "$profile"
     local dir
     dir="$(profile_db_dir)"
@@ -1110,12 +1228,29 @@ cmd_list() {
 }
 
 cmd_info() {
-    local pkg="${1:-}"
+    local profile="glibc"
+    local pkg=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -P|--profile)
+                profile="$2"; shift 2 ;;
+            -*)
+                log_error "Opção desconhecida: $1"
+                exit 1 ;;
+            *)
+                pkg="$1"; shift ;;
+        esac
+    done
+
     if [ -z "$pkg" ]; then
-        log_error "Uso: adm info pacote"
+        log_error "Uso: adm info [-P profile] pacote"
         exit 1
     fi
+
+    load_profile "$profile"
     load_package_def "$pkg"
+
     echo "Pacote:   $PKG_NAME"
     echo "Versão:   $PKG_VERSION"
     echo "Categoria:${PKG_CATEGORY:-}"
@@ -1143,10 +1278,10 @@ main() {
     case "$cmd" in
         build)     cmd_build "$@" ;;
         uninstall) cmd_uninstall "$@" ;;
+        clean)     cmd_clean "$@" ;;
         sync)      sync_packages ;;
         list)      cmd_list "$@" ;;
         info)      cmd_info "$@" ;;
-        clean)     cmd_clean "$@" ;;   
         -h|--help|help) usage ;;
         *)
             log_error "Comando desconhecido: $cmd"
