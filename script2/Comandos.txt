@@ -20,9 +20,43 @@ adm info bash
 adm uninstall -P musl bash
 
 #################################################################################
-# Construir em chroot
+# Construir em chroot usando o adm
 #
 #################################################################################
+
+Shell interativo no chroot do profile
+
+sudo adm chroot -P glibc --shell
+# ou
+sudo adm chroot -P musl --shell
+
+Construir pacotes dentro do chroot, usando o próprio adm
+
+# glibc
+sudo adm chroot -P glibc -- build coreutils-9.9
+sudo adm chroot -P glibc -- build bash-5.3
+
+# musl
+sudo adm chroot -P musl -- build busybox-1.36.1
+
+A linha:
+
+adm chroot -P glibc -- build coreutils-9.9
+
+fica assim na prática:
+
+1. adm.sh vê cmd = "chroot", chama cmd_chroot -P glibc -- build coreutils-9.9.
+
+
+2. cmd_chroot faz exec /opt/adm/adm-chroot.sh -P glibc -- build coreutils-9.9.
+
+
+#################################################################################
+#
+# Construir em chroot somente com o wrapper adm-chroot.sh
+#
+#################################################################################
+
 Como usar na prática ;
 
 install -m 0755 adm-chroot.sh /opt/adm/adm-chroot.sh
