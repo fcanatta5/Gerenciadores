@@ -18,3 +18,39 @@ adm info bash
 
 # desinstalar um pacote + dependentes órfãos (perfil musl)
 adm uninstall -P musl bash
+
+#################################################################################
+# Construir em chroot
+#
+#################################################################################
+Como usar na prática ;
+
+install -m 0755 adm-chroot.sh /opt/adm/adm-chroot.sh
+
+3. Exemplo: entrar em shell dentro do chroot glibc:
+
+sudo /opt/adm/adm-chroot.sh -P glibc --shell
+# dentro do chroot:
+#   / é o root do glibc-rootfs
+#   /opt/adm aponta para o mesmo /opt/adm do host
+#   ADM_IN_CHROOT=1 faz o adm usar SYSROOT="/"
+
+4. Exemplo: deixar o adm construir pacotes já dentro do chroot:
+
+# constrói coreutils-9.9 dentro do chroot glibc-rootfs
+sudo /opt/adm/adm-chroot.sh -P glibc build coreutils-9.9
+
+# constrói bash dentro do chroot musl-rootfs
+sudo /opt/adm/adm-chroot.sh -P musl build bash-5.3
+
+# O wrapper garante:
+
+chroot com /dev, /dev/pts, /dev/shm, /proc, /sys, /run montados;
+
+resolv.conf copiado para funcionar DNS dentro do chroot;
+
+/opt/adm bind-montado, então o adm e todos caches (/opt/adm/cache, /opt/adm/db, etc.) são compartilhados entre host e chroot;
+
+ADM_IN_CHROOT=1 faz o adm instalar direto em / dentro do chroot, ou seja, no rootfs desse profile;
+
+tudo desmontado automaticamente na saída (trap cleanup).
