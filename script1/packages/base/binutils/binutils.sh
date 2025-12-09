@@ -1,90 +1,98 @@
 #!/usr/bin/env bash
-# toolchain/binutils/binutils.sh
-# GNU Binutils-2.45.1 - toolchain "final" para o ADM (instala em /usr)
+# Receita ADM para GNU Binutils 2.45.1 (final, instalado em /usr)
+
+###############################################################################
+# Metadados básicos do pacote
+###############################################################################
 
 PKG_NAME="binutils"
 PKG_VERSION="2.45.1"
-PKG_CATEGORY="toolchain"
 
-# Tarball oficial
-PKG_URL="https://ftp.gnu.org/gnu/binutils/binutils-2.45.1.tar.xz"
-# SHA256 do binutils-2.45.1.tar.xz
-PKG_SHA256="5fe101e6fe9d18fdec95962d81ed670fdee5f37e3f48f0bef87bddf862513aa5"
+# Tarball oficial (ajuste o mirror se quiser)
+PKG_URLS=(
+  "https://ftp.gnu.org/gnu/binutils/binutils-${PKG_VERSION}.tar.xz"
+)
 
-# Dependências lógicas: precisa de um GCC já funcional para o triplet destino.
-# Ajuste o nome abaixo para o seu "gcc final" (por exemplo, toolchain/gcc-pass2
-# ou o pacote de GCC que você estiver usando).
+# Opcional: SHA256 do tarball (recomendável preencher com o valor real)
+# PKG_SHA256S=(
+#   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# )
+
+# Dependências lógicas dentro do ADM:
+#   - Toolchain funcional (gcc + glibc) já disponível
+# Ajuste conforme a sua árvore de pacotes:
 PKG_DEPENDS=(
   "toolchain/gcc-pass1"
+  "system/glibc-pass1"
 )
 
 ###############################################################################
-# Detecção de perfil / arquitetura e definição do triplet
+# Triplet alvo do sistema
 ###############################################################################
+# Mantemos o mesmo padrão dos outros pacotes:
+#   ${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu
+# Se você já exportar PKG_TARGET_TRIPLET, ele prevalece.
 
-_adm_profile="${ADM_PROFILE:-glibc}"
-_adm_arch="${ADM_TARGET_ARCH:-x86_64}"
-
-case "${_adm_profile}" in
-  glibc|aggressive|musl)
-    ;;
-  *)
-    echo "binutils: ADM_PROFILE='${_adm_profile}' inválido (esperado: glibc, musl ou aggressive)." >&2
-    exit 1
-    ;;
-esac
-
-# Mapeamento alinhado com o que você já vem usando (glibc vs musl)
-case "${_adm_arch}-${_adm_profile}" in
-  x86_64-glibc|x86_64-aggressive)
-    BINUTILS_TARGET_TRIPLET="x86_64-linux-gnu"
-    ;;
-  x86_64-musl)
-    BINUTILS_TARGET_TRIPLET="x86_64-linux-musl"
-    ;;
-  aarch64-glibc|aarch64-aggressive)
-    BINUTILS_TARGET_TRIPLET="aarch64-linux-gnu"
-    ;;
-  aarch64-musl)
-    BINUTILS_TARGET_TRIPLET="aarch64-linux-musl"
-    ;;
-  *)
-    # fallback genérico, caso você adicione novos perfis/arch no futuro
-    BINUTILS_TARGET_TRIPLET="${_adm_arch}-linux-${_adm_profile}"
-    ;;
-esac
-
-# Diz para o adm que este pacote deve ser construído para este triplet.
-# build_and_install_pkg vai:
-#   - definir TARGET_TRIPLET="${PKG_TARGET_TRIPLET}"
-#   - chamar setup_profiles, que ajusta CC/CFLAGS/PATH/PKG_CONFIG, etc.
-PKG_TARGET_TRIPLET="${BINUTILS_TARGET_TRIPLET}"
+PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
 
 ###############################################################################
-# Opções de configuração
+# Opções de configure
+###############################################################################
+# O adm.sh monta algo como:
 #
-# Estamos construindo um binutils cruzado (host = sua máquina, target = rootfs),
-# instalado em /usr dentro do ${ADM_ROOTFS}, usando o sysroot do ADM.
-###############################################################################
+#   ./configure \
+#     --host=${TARGET_TRIPLET} \
+#     --build=${TARGET_TRIPLET} \
+#     --prefix=/usr \
+#     --sysconfdir=/etc \
+#     --localstatedir=/var \
+#     "${PKG_CONFIGURE_OPTS[@]}"
+#
+# Aqui usamos /usr mesmo (binutils “definitivo”), com sysroot apontando
+# para o ROOTFS, e ativando recursos modernos (plugins, gold, etc.).
 
 PKG_CONFIGURE_OPTS=(
-  "--prefix=/usr"
-  "--target=${BINUTILS_TARGET_TRIPLET}"
-  "--with-sysroot=${ADM_ROOTFS}"
-  "--disable-nls"
+  # Preferimos deixar o prefix padrão do ADM (/usr); não precisamos repetir
+  # explicitamente "--prefix=/usr" aqui, mas não há problema se você quiser.
+
+  # Usa o rootfs atual como sysroot (útil em chroot/envs isolados)
+  "--with-sysroot=${ADM_ROOTFS:-/opt/adm/rootfs}"
+
+  # Caminhos e recursos adicionais
+  "--with-system-zlib"
   "--enable-gold"
   "--enable-ld=default"
   "--enable-plugins"
   "--enable-shared"
   "--enable-64-bit-bfd"
-  "--with-system-zlib"
-  "--enable-new-dtags"
-  "--enable-default-hash-style=gnu"
+  "--enable-deterministic-archives"
+
+  # Comportamento mais “amistoso”
+  "--disable-werror"
 )
 
-# O ADM já injeta CFLAGS/LDFLAGS globais por perfil; aqui só complementamos se quiser.
-PKG_CFLAGS_EXTRA="-O2 -pipe"
-PKG_LDFLAGS_EXTRA=""
+###############################################################################
+# Opções de build (make)
+###############################################################################
+# O adm.sh chamará:
+#   make -j"${ADM_JOBS:-$(nproc)}" "${PKG_MAKE_OPTS[@]}"
+#
+# Para o binutils final, deixar vazio faz com que todas as ferramentas sejam
+# construídas normalmente.
 
-PKG_MAKE_OPTS=()
-PKG_MAKE_INSTALL_OPTS=()
+# PKG_MAKE_OPTS=(
+#   # opções extras de make, se você quiser
+# )
+
+###############################################################################
+# Opções de instalação (make install)
+###############################################################################
+# O adm.sh chamará:
+#   make DESTDIR="${destdir}" install "${PKG_MAKE_INSTALL_OPTS[@]}"
+#
+# Em geral, um "make install" puro é suficiente. Se quiser ajustar algo
+# (ex.: não instalar info, ou mover ld.old, etc.), pode acrescentar aqui.
+
+# PKG_MAKE_INSTALL_OPTS=(
+#   # opções extras de make para a instalação
+# )
