@@ -615,11 +615,13 @@ build_one_pkg() {
     local pkg="$1"
     load_package_def "$pkg"
 
+    # Se já está instalado para este profile, não reconstrói.
     if is_installed; then
         log_ok "$(pkg_id) já instalado, pulando (sem rebuild desnecessário)."
         return 0
     fi
 
+    # Se existir binário no cache, usa ele em vez de rebuild.
     if install_from_binpkg_if_available; then
         log_ok "$(pkg_id) instalado a partir do cache de binários."
         return 0
@@ -652,7 +654,15 @@ build_one_pkg() {
         exit 1
     fi
 
-    apply_patches "$srcdir"
+    # Se acabamos de extrair (primeiro build), baixar/aplicar patches agora.
+    if [ "$state" = "extracted" ]; then
+        # Baixa patches remotos declarados em PKG_PATCH_URLS/PKG_PATCH_SHA256/MD5
+        # e adiciona ao array PKG_PATCHES.
+        ensure_patches_downloaded
+
+        # Aplica todos os patches listados em PKG_PATCHES.
+        apply_patches "$srcdir"
+    fi
 
     pushd "$srcdir" >/dev/null
     run_hook_if_exists "pre_build"
@@ -662,8 +672,13 @@ build_one_pkg() {
             log_info "Executando função build() de $(pkg_id)"
             build
         elif [ -x "./configure" ]; then
-            log_info "Usando padrão ./configure && make && make install para $(pkg_id)"
-            ./configure --host="$ADM_TARGET" --prefix=/usr --sysconfdir=/etc --disable-static --enable-shared
+            log_info "Usando padrão ./configure && make && make install (DESTDIR) para $(pkg_id)"
+            ./configure \
+                --host="$ADM_TARGET" \
+                --prefix=/usr \
+                --sysconfdir=/etc \
+                --disable-static \
+                --enable-shared
             make
             make DESTDIR="$DESTDIR" install
         else
@@ -678,7 +693,8 @@ build_one_pkg() {
 
     if [ "$state" != "installed" ]; then
         run_hook_if_exists "pre_install"
-        # snapshot before
+
+        # Snapshot antes/depois para gerar manifest de arquivos instalados
         local before after
         before="$(mktemp)"
         after="$(mktemp)"
@@ -688,7 +704,7 @@ build_one_pkg() {
             log_info "Executando função install_pkg() de $(pkg_id)"
             install_pkg
         else
-            log_info "Instalando DESTDIR em SYSROOT $(pkg_id)"
+            log_info "Instalando DESTDIR em SYSROOT com rsync para $(pkg_id)"
             rsync -a "$DESTDIR"/ "$ADM_SYSROOT"/
         fi
 
@@ -698,7 +714,7 @@ build_one_pkg() {
         generate_manifest "$before" "$after" > "$manifest_file"
         rm -f "$before" "$after"
 
-        # salvar metadados
+        # Metadados do pacote
         local meta
         meta="$(pkg_meta_file)"
         {
@@ -713,6 +729,7 @@ build_one_pkg() {
 
         set_pkg_state "installed"
 
+        # Gera pacote binário em cache a partir do DESTDIR
         store_binpkg "$DESTDIR"
 
         log_ok "$(pkg_id) instalado com sucesso em $ADM_SYSROOT"
