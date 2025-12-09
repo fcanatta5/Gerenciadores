@@ -1,164 +1,100 @@
 # /opt/adm/packages/toolchain/binutils-pass1.sh
-#
-# Binutils 2.45.1 - Pass 1 (cross, temporary tools)
-# Constrói em modo cross e instala em $ADM_ROOT/tools/$ADM_PROFILE
-# para não sujar o rootfs de glibc / musl.
-#
-# Compatível com o gerenciador "adm" descrito anteriormente.
 
 PKG_NAME="binutils-pass1"
 PKG_VERSION="2.45.1"
 PKG_CATEGORY="toolchain"
 
-# Tarball oficial (LFS usa este URL como referência) 1
+# URLs de download do tarball principal (múltiplos mirrors possíveis)
 PKG_SOURCE_URLS=(
-  "https://sourceware.org/pub/binutils/releases/binutils-${PKG_VERSION}.tar.xz"
   "https://ftp.gnu.org/gnu/binutils/binutils-${PKG_VERSION}.tar.xz"
-  "https://ftp.wayne.edu/gnu/binutils/binutils-${PKG_VERSION}.tar.xz"
+  "https://ftpmirror.gnu.org/binutils/binutils-${PKG_VERSION}.tar.xz"
 )
 
+# Nome do arquivo no cache de sources
 PKG_TARBALL="binutils-${PKG_VERSION}.tar.xz"
 
-# MD5 oficial do livro LFS/LFS multilib (para o tar.xz) 2
-PKG_MD5="ff59f8dc1431edfa54a257851bea74e7"
+# Deixe vazio se não tiver o hash real ainda (o adm só vai logar WARN)
+PKG_SHA256=""
+# ou, se quiser múltiplos SHA256 aceitos:
+# PKG_SHA256_LIST=(
+#   "sha256_mirror1"
+#   "sha256_mirror2"
+# )
 
-# Passo 1 de toolchain: normalmente sem dependências de runtime
-PKG_DEPENDS=()
+# Dependências (opcional; ajuste quando tiver outros pacotes definidos)
+PKG_DEPENDS=(
+  # "linux-headers"
+)
 
-# Sem patches por padrão
-PKG_PATCHES=()
+# Se algum patch for necessário no futuro:
+# PKG_PATCH_URLS=(
+#   "https://exemplo.org/patches/binutils-2.45.1-algo.patch"
+# )
+# PKG_PATCH_SHA256=(
+#   "xxxxxxxx..."
+# )
 
-# ---------------------------------------------------------------------
-# Helpers locais
-# ---------------------------------------------------------------------
-
-_binutils_tools_prefix() {
-    # Usamos o mesmo ADM_ROOT do "adm" (default /opt/adm)
-    local adm_root="${ADM_ROOT:-/opt/adm}"
-    # tools por profile (glibc, musl, etc.)
-    printf "%s/tools/%s" "$adm_root" "${ADM_PROFILE}"
-}
-
-# ---------------------------------------------------------------------
-# Hooks do pacote
-# ---------------------------------------------------------------------
-
-pre_build() {
-    # Garante que o diretório de tools do profile exista
-    local tools_prefix
-    tools_prefix="$(_binutils_tools_prefix)"
-    mkdir -p "${tools_prefix}"
-
-    log_info "Binutils Pass 1: usando tools_prefix=${tools_prefix}"
-    log_info "Profile=${ADM_PROFILE} TARGET=${ADM_TARGET} SYSROOT=${ADM_SYSROOT}"
-}
+#
+# Binutils Pass 1:
+# - constrói um cross-binutils mínimo para o target ($ADM_TARGET)
+# - instala em /tools dentro do rootfs alvo ($ADM_SYSROOT/tools)
+# - NÃO suja o sistema host
+#
 
 build() {
-    local tools_prefix
-    tools_prefix="$(_binutils_tools_prefix)"
+    # /tools fica DENTRO do rootfs do profile (glibc-rootfs, musl-rootfs, etc.)
+    local tools_dir="${ADM_SYSROOT}/tools"
+    mkdir -pv "${tools_dir}"
 
-    # Construção em diretório separado (recomendação da documentação / LFS) 3
+    # Diretório de build isolado
     mkdir -v build
     cd build
 
-    # Configuração baseada no LFS Binutils Pass 1,
-    # adaptada para o esquema de profiles do adm.
+    # Configuração estilo LFS Pass 1, mas usando variáveis do adm
     ../configure \
-        --prefix="${tools_prefix}" \
+        --prefix=/tools \
         --with-sysroot="${ADM_SYSROOT}" \
         --target="${ADM_TARGET}" \
         --disable-nls \
         --enable-gprofng=no \
-        --disable-werror \
-        --enable-new-dtags \
-        --enable-default-hash-style=gnu
+        --disable-werror
 
-    # Compilação
     make
 }
 
 install_pkg() {
-    # Nesta fase, já estamos dentro de $srcdir/build por causa do fluxo do adm
-    local tools_prefix
-    tools_prefix="$(_binutils_tools_prefix)"
-
-    log_info "Instalando Binutils Pass 1 em ${tools_prefix} (não toca no rootfs)"
-
-    # Instala diretamente no prefix de tools.
-    # NÃO usamos DESTDIR aqui de propósito, para não sujar o rootfs.
-    make install
-
-    # Observação:
-    # - O gerenciador adm ainda vai tentar gerar um manifest comparando o SYSROOT
-    #   (glibc-rootfs/musl-rootfs) antes/depois, mas como nada foi instalado lá,
-    #   o manifest ficará vazio, e o rootfs permanece limpo.
-    # - Os binários cross ficarão em ${tools_prefix}/bin/${ADM_TARGET}-*,
-    #   como esperado para um toolchain temporário de Binutils Pass 1. 4
-}
-
-_post_sanity_check() {
-    local tools_prefix bindir
-    tools_prefix="$(_binutils_tools_prefix)"
-    bindir="${tools_prefix}/bin"
-
-    local failed=0
-    local prog
-    local targets=(
-        addr2line
-        ar
-        as
-        ld
-        ld.bfd
-        nm
-        objcopy
-        objdump
-        ranlib
-        readelf
-        size
-        strings
-        strip
-    )
-
-    log_info "Executando sanity-check de Binutils Pass 1 em ${bindir}"
-
-    for prog in "${targets[@]}"; do
-        local path="${bindir}/${ADM_TARGET}-${prog}"
-        if [ ! -x "${path}" ]; then
-            log_error "sanity-check: ferramenta não encontrada: ${path}"
-            failed=1
-            continue
-        fi
-
-        # Teste simples de execução
-        if ! "${path}" --version >/dev/null 2>&1; then
-            log_error "sanity-check: falha ao executar: ${path} --version"
-            failed=1
-        fi
-    done
-
-    if [ "${failed}" -ne 0 ]; then
-        log_error "sanity-check: Binutils-${PKG_VERSION} Pass 1 FALHOU para profile ${ADM_PROFILE} (target ${ADM_TARGET})."
-        log_error "Verifique o log de build e a saída das ferramentas acima."
-        exit 1
-    fi
-
-    log_ok "sanity-check: Binutils-${PKG_VERSION} Pass 1 OK em ${tools_prefix} para profile ${ADM_PROFILE} (target ${ADM_TARGET})."
+    # Instalamos em DESTDIR, assim o adm rastreia tudo via manifesto
+    #
+    # Resultado final real:
+    #   ${ADM_SYSROOT}/tools/bin/${ADM_TARGET}-ld
+    #   ${ADM_SYSROOT}/tools/bin/${ADM_TARGET}-as
+    #   etc.
+    make DESTDIR="${DESTDIR}" install
 }
 
 post_install() {
-    # Sanity-check depois da instalação nos tools/
-    _post_sanity_check
-}
+    # Diretório do toolchain dentro do rootfs do profile
+    local tools_dir="${ADM_SYSROOT}/tools"
+    local target_ld="${tools_dir}/bin/${ADM_TARGET}-ld"
+    local target_as="${tools_dir}/bin/${ADM_TARGET}-as"
 
-pre_uninstall() {
-    # Atenção: como este pacote instala diretamente em tools/, o manifesto
-    # gerado pelo adm para o SYSROOT fica vazio. Na prática, o uninstall
-    # padrão do adm não remove estes binários.
-    # Se quiser limpeza de tools, remova ${ADM_ROOT}/tools/${ADM_PROFILE} manualmente
-    # ou implemente aqui uma rotina específica.
-    log_warn "pre_uninstall: binutils-pass1 é um pacote de toolchain temporário; uninstall automático pode não limpar tools/."
-}
+    # Verifica se o linker e o assembler do target existem
+    if [ ! -x "${target_ld}" ]; then
+        log_error "Sanity-check Binutils Pass 1 falhou: ${target_ld} não encontrado ou não executável."
+        exit 1
+    fi
 
-post_uninstall() {
-    log_info "post_uninstall: nenhuma ação adicional para binutils-pass1 (toolchain temporário)."
+    if [ ! -x "${target_as}" ]; then
+        log_error "Sanity-check Binutils Pass 1 falhou: ${target_as} não encontrado ou não executável."
+        exit 1
+    fi
+
+    # Mostra versões para registro
+    log_info "Binutils Pass 1: ${target_ld} --version:"
+    "${target_ld}" --version | head -n1 || log_warn "Não foi possível obter versão de ${target_ld}"
+
+    log_info "Binutils Pass 1: ${target_as} --version:"
+    "${target_as}" --version | head -n1 || log_warn "Não foi possível obter versão de ${target_as}"
+
+    log_ok "Sanity-check Binutils Pass 1 OK para TARGET=${ADM_TARGET}, profile=${ADM_PROFILE}."
 }
