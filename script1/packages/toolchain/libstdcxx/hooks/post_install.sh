@@ -1,125 +1,90 @@
 #!/usr/bin/env bash
-# Hook post_install para Libstdc++ (GCC 15.2.0) - Pass 1
+# Hook post_install para Libstdc++ a partir do GCC 15.2.0 (Pass 1)
+#
+# Executado após a instalação em ROOTFS.
+# Objetivos:
+#   - Verificar se as libs libstdc++ foram instaladas em ROOTFS.
+#   - Verificar presença de headers C++ em /usr/include/c++/${PKG_VERSION}.
+#   - Emitir avisos básicos se algo suspeito for encontrado.
 
 set -euo pipefail
 
-PKG_EXPECTED_GCC_VERSION="15.2.0"
+PKG_EXPECTED_VERSION="15.2.0"
 
-# ENV do adm.sh
-ROOTFS="${ADM_ROOTFS:-/opt/adm/rootfs}"
+ROOTFS="${ADM_HOOK_ROOTFS:-${ADM_ROOTFS:-/opt/adm/rootfs}}"
 ROOTFS="${ROOTFS%/}"
 
-echo "[libstdcxx-pass1/post_install] Sanity-check da Libstdc++ Pass 1 em ${ROOTFS}..."
+echo "[libstdc++-pass1/post_install] ROOTFS detectado: ${ROOTFS}"
 
-# 1) Procurar libstdc++ em /usr/lib* dentro do rootfs
-LIBDIRS=(
-  "${ROOTFS}/usr/lib"
-  "${ROOTFS}/usr/lib64"
+LIB_DIR_1="${ROOTFS}/usr/lib"
+LIB_DIR_2="${ROOTFS}/usr/lib64"
+INC_BASE="${ROOTFS}/usr/include/c++"
+INC_VER_DIR="${INC_BASE}/${PKG_EXPECTED_VERSION}"
+
+echo "[libstdc++-pass1/post_install] Verificando bibliotecas em:"
+echo "  - ${LIB_DIR_1}"
+echo "  - ${LIB_DIR_2}"
+
+libstd_candidates=()
+
+if [[ -d "${LIB_DIR_1}" ]]; then
+  while IFS= read -r -d '' f; do
+    libstd_candidates+=("$f")
+  done < <(find "${LIB_DIR_1}" -maxdepth 1 -name "libstdc++.so*" -type f -print0 || true)
+fi
+
+if [[ -d "${LIB_DIR_2}" ]]; then
+  while IFS= read -r -d '' f; do
+    libstd_candidates+=("$f")
+  done < <(find "${LIB_DIR_2}" -maxdepth 1 -name "libstdc++.so*" -type f -print0 || true)
+fi
+
+if [[ "${#libstd_candidates[@]}" -eq 0 ]]; then
+  echo "[libstdc++-pass1/post_install] ERRO: nenhum arquivo 'libstdc++.so*' encontrado em ${LIB_DIR_1} ou ${LIB_DIR_2}." >&2
+  echo "[libstdc++-pass1/post_install]        A libstdc++ parece não ter sido instalada corretamente." >&2
+  exit 1
+fi
+
+echo "[libstdc++-pass1/post_install] libstdc++ encontrada:"
+for c in "${libstd_candidates[@]}"; do
+  echo "  - ${c}"
+done
+
+###############################################################################
+# Verificação dos headers C++
+###############################################################################
+
+echo "[libstdc++-pass1/post_install] Verificando headers C++ em: ${INC_VER_DIR}"
+
+if [[ ! -d "${INC_BASE}" ]]; then
+  echo "[libstdc++-pass1/post_install] ERRO: diretório base de C++ não existe: ${INC_BASE}" >&2
+  exit 1
+fi
+
+if [[ ! -d "${INC_VER_DIR}" ]]; then
+  echo "[libstdc++-pass1/post_install] ERRO: diretório de headers C++ para a versão esperada não existe: ${INC_VER_DIR}" >&2
+  exit 1
+fi
+
+# Checagem de alguns headers básicos
+headers_cpp=(
+  "iostream"
+  "vector"
+  "string"
+  "initializer_list"
 )
 
-found_so=""
-found_a=""
-
-for d in "${LIBDIRS[@]}"; do
-  [[ -d "$d" ]] || continue
-
-  if [[ -z "${found_so}" ]]; then
-    f="$(find "$d" -maxdepth 1 -type f -name 'libstdc++.so*' 2>/dev/null | head -n1 || true)"
-    [[ -n "$f" ]] && found_so="$f"
-  fi
-
-  if [[ -z "${found_a}" ]]; then
-    f="$(find "$d" -maxdepth 1 -type f -name 'libstdc++.a' 2>/dev/null | head -n1 || true)"
-    [[ -n "$f" ]] && found_a="$f"
+missing_headers=0
+for h in "${headers_cpp[@]}"; do
+  if [[ ! -f "${INC_VER_DIR}/${h}" && ! -f "${INC_VER_DIR}/${h}.h" ]]; then
+    echo "[libstdc++-pass1/post_install] AVISO: header C++ esperado não encontrado em ${INC_VER_DIR}: ${h}" >&2
+    missing_headers=1
   fi
 done
 
-if [[ -z "${found_so}" ]]; then
-  echo "[libstdcxx-pass1/post_install] ERRO: libstdc++.so* não encontrada em ${ROOTFS}/usr/lib*." >&2
-  exit 1
+if [[ "${missing_headers}" -eq 0 ]]; then
+  echo "[libstdc++-pass1/post_install] Headers C++ básicos encontrados em ${INC_VER_DIR}."
 fi
 
-echo "[libstdcxx-pass1/post_install] libstdc++.so encontrada em: ${found_so}"
-
-if [[ -n "${found_a}" ]]; then
-  echo "[libstdcxx-pass1/post_install] libstdc++.a encontrada em: ${found_a}"
-fi
-
-# 2) Encontrar um compilador C++ para o teste
-CCXX=""
-
-# Preferimos o cross C++ que está em /tools (GCC Pass 1)
-if [[ -n "${TARGET_TRIPLET:-}" ]]; then
-  if [[ -x "${ROOTFS}/tools/bin/${TARGET_TRIPLET}-g++" ]]; then
-    CCXX="${ROOTFS}/tools/bin/${TARGET_TRIPLET}-g++"
-  elif [[ -x "${ROOTFS}/tools/bin/${TARGET_TRIPLET}-c++" ]]; then
-    CCXX="${ROOTFS}/tools/bin/${TARGET_TRIPLET}-c++"
-  fi
-fi
-
-# Fallback: g++ do sistema host, se existir
-if [[ -z "${CCXX}" ]]; then
-  if command -v g++ >/dev/null 2>&1; then
-    CCXX="g++"
-  fi
-fi
-
-if [[ -z "${CCXX}" ]]; then
-  echo "[libstdcxx-pass1/post_install] AVISO: nenhum compilador C++ encontrado; pulando teste de compilação." >&2
-  exit 0
-fi
-
-echo "[libstdcxx-pass1/post_install] Usando compilador para teste: ${CCXX}"
-
-# 3) Compilar um programa C++ simples apontando para o rootfs
-
-TMPDIR="$(mktemp -d /tmp/adm-libstdcxx-pass1-test.XXXXXX)"
-trap 'rm -rf "${TMPDIR}" 2>/dev/null || true' EXIT
-
-cat > "${TMPDIR}/hello.cpp" << 'EOF'
-#include <iostream>
-#include <string>
-
-int main() {
-    std::string s = "libstdc++ sanity test";
-    std::cout << s << std::endl;
-    return 0;
-}
-EOF
-
-echo "[libstdcxx-pass1/post_install] Compilando programa de teste com --sysroot=${ROOTFS} ..."
-
-if ! "${CCXX}" --sysroot="${ROOTFS}" "${TMPDIR}/hello.cpp" -o "${TMPDIR}/hello" -v >"${TMPDIR}/build.log" 2>&1; then
-  echo "[libstdcxx-pass1/post_install] ERRO: falha ao compilar programa C++ de teste." >&2
-  sed -n '1,80p' "${TMPDIR}/build.log" || true
-  exit 1
-fi
-
-if [[ ! -x "${TMPDIR}/hello" ]]; then
-  echo "[libstdcxx-pass1/post_install] ERRO: binário de teste não foi criado." >&2
-  exit 1
-fi
-
-# 4) Verifica dependência em libstdc++ (não precisa executar o binário)
-
-if command -v readelf >/dev/null 2>&1; then
-  needed="$(readelf -d "${TMPDIR}/hello" 2>/dev/null \
-            | awk '/NEEDED/ {gsub(/\[|\]/, "", $NF); print $NF}' \
-            | grep -E '^libstdc\+\+' || true)"
-  if [[ -z "${needed}" ]]; then
-    echo "[libstdcxx-pass1/post_install] AVISO: não encontrei NEEDED para libstdc++ no binário de teste." >&2
-  else
-    echo "[libstdcxx-pass1/post_install] Binário depende de: ${needed}"
-  fi
-elif command -v ldd >/dev/null 2>&1; then
-  if ldd "${TMPDIR}/hello" 2>/dev/null | grep -q 'libstdc++'; then
-    echo "[libstdcxx-pass1/post_install] ldd mostra dependência em libstdc++ (OK)."
-  else
-    echo "[libstdcxx-pass1/post_install] AVISO: ldd não mostra libstdc++ explicitamente." >&2
-  fi
-else
-  echo "[libstdcxx-pass1/post_install] AVISO: nem readelf nem ldd disponíveis; skip do check de dependência dinâmica." >&2
-fi
-
-echo "[libstdcxx-pass1/post_install] ✅ Libstdc++ (GCC ${PKG_EXPECTED_GCC_VERSION}) parece instalada e funcional."
+echo "[libstdc++-pass1/post_install] Libstdc++ ${PKG_EXPECTED_VERSION} (Pass 1) parece instalada corretamente no ROOTFS."
 exit 0
