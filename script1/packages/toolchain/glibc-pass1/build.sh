@@ -35,8 +35,8 @@ PKG_DEPENDS=(
 ###############################################################################
 # Mantemos o mesmo esquema dos outros pacotes:
 #   ${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu
-
-PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
+# PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
+PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_TRIPLET}}"
 
 ###############################################################################
 # Configure / Build / Install customizados
