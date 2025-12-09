@@ -134,7 +134,11 @@ load_profile() {
     case "$profile" in
         glibc)
             ADM_PROFILE="glibc"
-            ADM_SYSROOT="$ROOTFS_GLIBC"
+            if [ "${ADM_IN_CHROOT:-0}" = "1" ]; then
+                ADM_SYSROOT="/"
+            else
+                ADM_SYSROOT="$ROOTFS_GLIBC"
+            fi
             ADM_TARGET="${arch}-pc-linux-gnu"
             ADM_CFLAGS="-O2 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=2"
             ADM_CXXFLAGS="$ADM_CFLAGS"
@@ -142,7 +146,11 @@ load_profile() {
             ;;
         musl)
             ADM_PROFILE="musl"
-            ADM_SYSROOT="$ROOTFS_MUSL"
+            if [ "${ADM_IN_CHROOT:-0}" = "1" ]; then
+                ADM_SYSROOT="/"
+            else
+                ADM_SYSROOT="$ROOTFS_MUSL"
+            fi
             ADM_TARGET="${arch}-pc-linux-musl"
             ADM_CFLAGS="-O2 -pipe -fstack-protector-strong"
             ADM_CXXFLAGS="$ADM_CFLAGS"
@@ -150,7 +158,11 @@ load_profile() {
             ;;
         glibc-opt)
             ADM_PROFILE="glibc-opt"
-            ADM_SYSROOT="$ROOTFS_GLIBC"
+            if [ "${ADM_IN_CHROOT:-0}" = "1" ]; then
+                ADM_SYSROOT="/"
+            else
+                ADM_SYSROOT="$ROOTFS_GLIBC"
+            fi
             ADM_TARGET="${arch}-pc-linux-gnu"
             ADM_CFLAGS="-O3 -pipe -march=native -fstack-protector-strong -D_FORTIFY_SOURCE=2"
             ADM_CXXFLAGS="$ADM_CFLAGS"
@@ -158,7 +170,11 @@ load_profile() {
             ;;
         musl-opt)
             ADM_PROFILE="musl-opt"
-            ADM_SYSROOT="$ROOTFS_MUSL"
+            if [ "${ADM_IN_CHROOT:-0}" = "1" ]; then
+                ADM_SYSROOT="/"
+            else
+                ADM_SYSROOT="$ROOTFS_MUSL"
+            fi
             ADM_TARGET="${arch}-pc-linux-musl"
             ADM_CFLAGS="-O3 -pipe -march=native -fstack-protector-strong"
             ADM_CXXFLAGS="$ADM_CFLAGS"
