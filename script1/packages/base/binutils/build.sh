@@ -32,8 +32,8 @@ PKG_DEPENDS=(
 # Mantemos o mesmo padrão dos outros pacotes:
 #   ${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu
 # Se você já exportar PKG_TARGET_TRIPLET, ele prevalece.
-
-PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
+# PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-lfs-linux-gnu}"
+PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_TRIPLET}}"
 
 ###############################################################################
 # Opções de configure
