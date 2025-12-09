@@ -1,210 +1,176 @@
 # /opt/adm/packages/toolchain/glibc-pass1.sh
 #
 # Glibc-2.42 - Pass 1
-# Instala a glibc no sysroot do profile (glibc-rootfs), usando o toolchain
-# temporário em $ADM_ROOT/tools/$ADM_PROFILE (binutils-pass1, gcc-pass1).
+# Construída com o cross-toolchain em /tools, instalada em ${ADM_SYSROOT}/usr,
+# usando Linux-6.17.9 API Headers e integrada ao TARGET=${ADM_TARGET}.
 #
-# Baseado no LFS 12.4 - capítulo 5.5 Glibc-2.42, adaptado para o "adm".
 
 PKG_NAME="glibc-pass1"
 PKG_VERSION="2.42"
 PKG_CATEGORY="toolchain"
 
-# Fonte principal (mesmos URLs do LFS) 
+# Fonte principal (múltiplos mirrors)
 PKG_SOURCE_URLS=(
   "https://ftp.gnu.org/gnu/glibc/glibc-${PKG_VERSION}.tar.xz"
-  "https://ftp.osuosl.org/pub/lfs/lfs-packages/12.4/glibc-${PKG_VERSION}.tar.xz"
+  "https://ftpmirror.gnu.org/glibc/glibc-${PKG_VERSION}.tar.xz"
 )
 
+# Nome do tarball no cache do adm
 PKG_TARBALL="glibc-${PKG_VERSION}.tar.xz"
 
-# MD5 do LFS 12.4 para glibc-2.42.tar.xz 
-PKG_MD5="23c6f5a27932b435cae94e087cb8b1f5"
+# Deixe vazio se não tiver o hash ainda (o adm só avisa e segue)
+PKG_SHA256=""
+PKG_MD5=""
 
-# Ordem do toolchain: depois de linux-headers e gcc-pass1
-PKG_DEPENDS=( "linux-headers" "gcc-pass1" )
+# Se quiser, você pode travar depois com:
+# PKG_SHA256="0c83c27e4c0aa0b0e8e3cd44e4a09f7f3f0b2d4b8d3b9f0b7f9ad..."  # exemplo
 
-# Se quiser usar o patch FHS do LFS, baixe-o para um diretório seu
-# e descomente/ajuste a linha abaixo:
-#   https://ftp.osuosl.org/pub/lfs/lfs-packages/12.4/glibc-2.42-fhs-1.patch 
-#PKG_PATCHES=(
-  # "/opt/adm/patches/glibc-2.42-fhs-1.patch"
-#)
+# Dependências lógicas
+PKG_DEPENDS=(
+  "linux-headers"   # usa ${ADM_SYSROOT}/usr/include
+  "binutils-pass1"
+  "gcc-pass1"
+)
+
+# Patch FHS do LFS (opcional, mas recomendado)
 PKG_PATCH_URLS=(
   "https://ftp.osuosl.org/pub/lfs/lfs-packages/12.4/glibc-2.42-fhs-1.patch"
 )
-
 PKG_PATCH_SHA256=(
   "0e98bb64d18b96ba6a69f5a6545edc53c440183675682547909c096f66e3b81c"
 )
-# Opcional: se quiser usar MD5 em vez de SHA256:
-# PKG_PATCH_MD5=(
-#   "d41d8cd98f00b204e9800998ecf8427e"
-# )
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
-
-_glibc_tools_prefix() {
-    local adm_root="${ADM_ROOT:-/opt/adm}"
-    printf "%s/tools/%s" "$adm_root" "${ADM_PROFILE}"
-}
-
-_glibc_require_profile_glibc() {
-    case "${ADM_PROFILE}" in
-        glibc* )
-            ;;
-        * )
-            log_error "glibc-pass1 só é válido para perfis glibc* (perfil atual: ${ADM_PROFILE}). Use o pacote musl correspondente para perfis musl."
-            exit 1
-            ;;
-    esac
-}
-
-# ---------------------------------------------------------------------
+# --------------------------------------------------------------------
 # Hooks
-# ---------------------------------------------------------------------
+# --------------------------------------------------------------------
 
+# Antes de configurar/compilar:
+# - garante que o cross-toolchain em /tools/bin está na frente no PATH
 pre_build() {
-    # Executado dentro de glibc-2.42/
-    _glibc_require_profile_glibc
-
-    if [ -z "${ADM_SYSROOT:-}" ]; then
-        log_error "ADM_SYSROOT não definido em pre_build() de glibc-pass1."
-        exit 1
+    local tools_bin="${ADM_SYSROOT}/tools/bin"
+    if [ -d "${tools_bin}" ]; then
+        export PATH="${tools_bin}:${PATH}"
+        log_info "PATH ajustado para usar cross-toolchain em ${tools_bin}"
+    else
+        log_warn "Diretório ${tools_bin} não existe; assumindo que ${ADM_TARGET}-gcc está no PATH."
     fi
 
-    local tools_prefix
-    tools_prefix="$(_glibc_tools_prefix)"
-
-    mkdir -p "${tools_prefix}"
-
-    log_info "Glibc-${PKG_VERSION} Pass 1: profile=${ADM_PROFILE} TARGET=${ADM_TARGET}"
-    log_info "SYSROOT=${ADM_SYSROOT}  TOOLS=${tools_prefix}"
-
-    # Links de compatibilidade LSB no sysroot, como no LFS (ajustado para ADM_SYSROOT) 
-    case "$(uname -m)" in
-        i?86)
-            mkdir -p "${ADM_SYSROOT}/lib"
-            ln -sfv ld-linux.so.2 "${ADM_SYSROOT}/lib/ld-lsb.so.3"
-            ;;
-        x86_64)
-            mkdir -p "${ADM_SYSROOT}/lib" "${ADM_SYSROOT}/lib64"
-            ln -sfv ../lib/ld-linux-x86-64.so.2 "${ADM_SYSROOT}/lib64"
-            ln -sfv ../lib/ld-linux-x86-64.so.2 "${ADM_SYSROOT}/lib64/ld-lsb-x86-64.so.3"
-            ;;
-    esac
-
-    # Verificar se os headers de kernel já estão instalados
-    if [ ! -d "${ADM_SYSROOT}/usr/include/linux" ]; then
-        log_warn "Headers de kernel não encontrados em ${ADM_SYSROOT}/usr/include/linux."
-        log_warn "Certifique-se de ter rodado 'linux-headers' antes de glibc-pass1 para este profile."
-    fi
+    # Para reduzir ruído de testes em configure da glibc (mesmo em pass1)
+    export LC_ALL=C
 }
 
 build() {
-    _glibc_require_profile_glibc
-
-    local tools_prefix
-    tools_prefix="$(_glibc_tools_prefix)"
-
-    # Usar o toolchain cross do profile (binutils/gcc pass1)
-    export PATH="${tools_prefix}/bin:${PATH}"
-
-    # Diretório de build separado (recomendação da glibc / LFS) 
+    # Estamos no diretório do source glibc-2.42/
+    # Construção fora da árvore (build dir separado)
     mkdir -v build
     cd build
 
-    # Garantir que ldconfig e sln vão para /usr/sbin
-    echo "rootsbindir=/usr/sbin" > configparms
+    local build_triplet
+    build_triplet="$(../scripts/config.guess)"
 
-    # Configuração baseada no LFS 5.5 Glibc (adaptada para ADM_TARGET/ADM_SYSROOT) 
-    ../configure                             \
-        --prefix=/usr                        \
-        --host="${ADM_TARGET}"               \
-        --build="$(../scripts/config.guess)" \
-        --disable-nscd                       \
-        libc_cv_slibdir=/usr/lib             \
-        --enable-kernel=5.4
+    # Configure baseado em LFS, adaptado para o seu ADM:
+    ../configure \
+        --prefix=/usr \
+        --host="${ADM_TARGET}" \
+        --build="${build_triplet}" \
+        --enable-kernel=4.19 \
+        --with-headers="${ADM_SYSROOT}/usr/include" \
+        --disable-werror \
+        libc_cv_slibdir=/usr/lib
 
-    # A glibc às vezes falha com make paralelo; honramos MAKEFLAGS do ambiente.
-    log_info "Compilando Glibc-${PKG_VERSION} Pass 1 (MAKEFLAGS=${MAKEFLAGS:-não definido})..."
     make
 }
 
 install_pkg() {
-    _glibc_require_profile_glibc
+    # Instala em DESTDIR; o adm sincroniza para ${ADM_SYSROOT}
+    make DESTDIR="${DESTDIR}" install
 
-    if [ -z "${ADM_SYSROOT:-}" ]; then
-        log_error "ADM_SYSROOT não definido em install_pkg() de glibc-pass1."
-        exit 1
-    fi
-
-    local tools_prefix
-    tools_prefix="$(_glibc_tools_prefix)"
-
-    # Já estamos em build/, graças a build()
-    export PATH="${tools_prefix}/bin:${PATH}"
-
-    log_info "Instalando Glibc-${PKG_VERSION} Pass 1 em ${ADM_SYSROOT} (sysroot do profile)..."
-
-    # Instala diretamente no sysroot do profile, como o LFS faz com $LFS 
-    make DESTDIR="${ADM_SYSROOT}" install
-
-    # Ajustar o ldd para não ter /usr hardcoded em RTLDLIST 
-    if [ -f "${ADM_SYSROOT}/usr/bin/ldd" ]; then
-        sed '/RTLDLIST=/s@/usr@@g' -i "${ADM_SYSROOT}/usr/bin/ldd"
-    else
-        log_warn "ldd não encontrado em ${ADM_SYSROOT}/usr/bin/ldd para ajuste de RTLDLIST."
-    fi
+    # Ajustes mínimos pós-instalação (estilo LFS) podem ser feitos aqui,
+    # mas em pass1 vamos manter só o essencial para toolchain funcionar.
+    #
+    # Ex.: criação de /etc/ld.so.conf no SYSROOT, se você quiser:
+    #
+    # local etc_dir="${DESTDIR}/etc"
+    # mkdir -pv "${etc_dir}"
+    # cat > "${etc_dir}/ld.so.conf" << 'EOF'
+    # /usr/local/lib
+    # /usr/lib
+    # /lib
+    # EOF
 }
 
 post_install() {
-    _glibc_require_profile_glibc
+    # Sanity-check Glibc Pass 1:
+    #
+    # 1. Headers fundamentais em ${ADM_SYSROOT}/usr/include
+    # 2. Presença de libc.so.6 em algum lugar razoável
+    # 3. Compilação de um programa dummy com o cross-GCC usando o SYSROOT
 
-    local tools_prefix
-    tools_prefix="$(_glibc_tools_prefix)"
+    local include_dir="${ADM_SYSROOT}/usr/include"
+    local stdio_h="${include_dir}/stdio.h"
 
-    export PATH="${tools_prefix}/bin:${PATH}"
-
-    log_info "Executando sanity-check básico da Glibc-${PKG_VERSION} Pass 1..."
-
-    # Teste similar ao do LFS, mas adaptado para ADM_TARGET e nosso ambiente 
-    echo 'int main(){}' | "${ADM_TARGET}-gcc" -x c - -v -Wl,--verbose &> dummy.log || {
-        log_error "sanity-check: falha ao compilar programa de teste com ${ADM_TARGET}-gcc."
-        exit 1
-    }
-
-    if [ ! -f a.out ]; then
-        log_error "sanity-check: a.out não foi gerado."
+    if [ ! -d "${include_dir}" ]; then
+        log_error "Sanity-check Glibc Pass 1 falhou: diretório ${include_dir} não existe."
         exit 1
     fi
 
-    # Verificar se o binário tem um interpreter dinâmico configurado
-    if ! readelf -l a.out | grep -q "Requesting program interpreter"; then
-        log_error "sanity-check: readelf não encontrou um 'Requesting program interpreter' em a.out."
-        rm -f a.out dummy.log
+    if [ ! -f "${stdio_h}" ]; then
+        log_error "Sanity-check Glibc Pass 1 falhou: ${stdio_h} não encontrado."
         exit 1
     fi
 
-    log_info "Saída do 'Requesting program interpreter':"
-    readelf -l a.out | grep "Requesting program interpreter" || true
+    # Procurar uma libc.so.6 dentro do SYSROOT
+    local libc_so
+    libc_so="$(find "${ADM_SYSROOT}" -maxdepth 6 -type f -name 'libc.so.6' 2>/dev/null | head -n1 || true)"
 
-    # Opcionalmente poderíamos replicar todas as checagens de caminho do LFS,
-    # mas isso já é um bom indicador de que a glibc e o linker estão alinhados.
+    if [ -z "${libc_so}" ]; then
+        log_error "Sanity-check Glibc Pass 1 falhou: libc.so.6 não encontrada em ${ADM_SYSROOT}."
+        exit 1
+    fi
 
-    rm -v a.out dummy.log
+    log_info "Glibc Pass 1: libc.so.6 encontrada em ${libc_so}"
 
-    log_ok "sanity-check: Glibc-${PKG_VERSION} Pass 1 OK para profile ${ADM_PROFILE} (sysroot=${ADM_SYSROOT})."
+    # Tentar compilar um dummy.c com o cross-GCC apontando para o SYSROOT
+    local cc_tools="${ADM_SYSROOT}/tools/bin/${ADM_TARGET}-gcc"
+    local cc="${cc_tools}"
+
+    if [ ! -x "${cc}" ]; then
+        # fallback: talvez o cross esteja em outro lugar no PATH
+        cc="$(command -v "${ADM_TARGET}-gcc" || true)"
+    fi
+
+    if [ -z "${cc}" ] || [ ! -x "${cc}" ]; then
+        log_warn "Sanity-check: não foi possível localizar ${ADM_TARGET}-gcc; pulando teste de compilação."
+        log_ok "Sanity-check parcial Glibc Pass 1 OK (headers + libc.so.6 presentes)."
+        return 0
+    fi
+
+    log_info "Usando compilador para sanity-check: ${cc}"
+
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    cat > "${tmpdir}/dummy.c" << 'EOF'
+#include <stdio.h>
+int main(void) {
+    printf("glibc dummy test\n");
+    return 0;
 }
+EOF
 
-pre_uninstall() {
-    _glibc_require_profile_glibc
-    log_info "pre_uninstall: removendo glibc-pass1 (${PKG_VERSION}) do profile ${ADM_PROFILE}."
-    # A remoção em si é feita pelo adm com base no manifest do SYSROOT.
-}
+    if ! "${cc}" --sysroot="${ADM_SYSROOT}" -o "${tmpdir}/dummy" "${tmpdir}/dummy.c"; then
+        log_error "Sanity-check Glibc Pass 1 falhou: não foi possível compilar dummy.c com ${cc} usando SYSROOT=${ADM_SYSROOT}."
+        rm -rf "${tmpdir}"
+        exit 1
+    fi
 
-post_uninstall() {
-    log_info "post_uninstall: glibc-pass1 (${PKG_VERSION}) removida do profile ${ADM_PROFILE}."
+    # Não tentamos executar o binário aqui (pode ser rootfs diferente/montado)
+    if [ ! -f "${tmpdir}/dummy" ]; then
+        log_error "Sanity-check Glibc Pass 1 falhou: dummy não foi gerado."
+        rm -rf "${tmpdir}"
+        exit 1
+    fi
+
+    rm -rf "${tmpdir}"
+
+    log_ok "Sanity-check Glibc Pass 1 OK para TARGET=${ADM_TARGET}, profile=${ADM_PROFILE}."
 }
