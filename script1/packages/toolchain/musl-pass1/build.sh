@@ -42,7 +42,8 @@ PKG_DEPENDS=(
 # Padrão comum: x86_64-linux-musl, aarch64-linux-musl, etc.
 # Se você exportar PKG_TARGET_TRIPLET antes de rodar o ADM, ele prevalece.
 
-PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-linux-musl}"
+# PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_ARCH:-x86_64}-linux-musl}"
+PKG_TARGET_TRIPLET="${PKG_TARGET_TRIPLET:-${ADM_TARGET_TRIPLET}}"
 
 ###############################################################################
 # Configure / Build / Install customizados
