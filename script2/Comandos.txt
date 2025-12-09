@@ -1,0 +1,20 @@
+# Uso básico Assumindo o script em /opt/adm/bin/adm e no PATH:
+
+# sincronizar scripts de build (repo git)
+export ADM_REPO_URL="git@github.com:seuuser/seurepo-adm-packages.git"
+adm sync
+
+# build para rootfs glibc
+adm build -P glibc bash coreutils gcc
+
+# build para rootfs musl
+adm build -P musl busybox musl-libc
+
+# listar pacotes instalados (perfil glibc)
+adm list -P glibc
+
+# informações de um pacote
+adm info bash
+
+# desinstalar um pacote + dependentes órfãos (perfil musl)
+adm uninstall -P musl bash
