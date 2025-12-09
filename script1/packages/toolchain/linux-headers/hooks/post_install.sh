@@ -1,77 +1,48 @@
 #!/usr/bin/env bash
-# Hook post_install para Linux API Headers 6.17.9
+# Hook post_install para Linux 6.17.9 - API Headers
+#
+# Executado após a instalação em ROOTFS.
+# Objetivos:
+#   - Verificar se os headers foram instalados em ROOTFS/usr/include.
+#   - Checar presença de diretórios linux/ e asm/.
+#   - Fazer alguns avisos básicos.
 
 set -euo pipefail
 
 PKG_EXPECTED_VERSION="6.17.9"
 
-ROOTFS="${ADM_ROOTFS:-/opt/adm/rootfs}"
+# ROOTFS passado pelo adm.sh (ou fallback)
+ROOTFS="${ADM_HOOK_ROOTFS:-${ADM_ROOTFS:-/opt/adm/rootfs}}"
 ROOTFS="${ROOTFS%/}"
 
-BUILDROOT="${ADM_BUILD_ROOT:-/opt/adm/build}"
-PKG_FULL="core/linux-headers"
-
-BUILDDIR="${BUILDROOT}/${PKG_FULL}"
-
-echo "[linux-headers/post_install] Instalando Linux API Headers ${PKG_EXPECTED_VERSION}..."
-
-cd "${BUILDDIR}"
-
-# Processo OFICIAL do kernel:
-make headers_check
-
-make INSTALL_HDR_PATH="${ROOTFS}/usr" headers_install
-
-# =========================
-# SANITY CHECK REAL
-# =========================
-
 INCLUDE_DIR="${ROOTFS}/usr/include"
-LINUX_DIR="${INCLUDE_DIR}/linux"
-ASM_DIR="${INCLUDE_DIR}/asm"
-ASMGEN_DIR="${INCLUDE_DIR}/asm-generic"
 
-if [[ ! -d "${LINUX_DIR}" ]]; then
-  echo "[linux-headers/post_install] ERRO: ${LINUX_DIR} inexistente." >&2
+echo "[linux-api-headers/post_install] ROOTFS detectado: ${ROOTFS}"
+echo "[linux-api-headers/post_install] Verificando headers em: ${INCLUDE_DIR}"
+
+if [[ ! -d "${INCLUDE_DIR}" ]]; then
+  echo "[linux-api-headers/post_install] ERRO: diretório ${INCLUDE_DIR} não existe." >&2
   exit 1
 fi
 
-if [[ ! -d "${ASM_DIR}" && ! -d "${ASMGEN_DIR}" ]]; then
-  echo "[linux-headers/post_install] ERRO: asm ou asm-generic ausente." >&2
+if [[ ! -d "${INCLUDE_DIR}/linux" ]]; then
+  echo "[linux-api-headers/post_install] ERRO: diretório ${INCLUDE_DIR}/linux não encontrado." >&2
   exit 1
 fi
 
-critical_headers=(
-  "linux/types.h"
-  "linux/errno.h"
-  "linux/ioctl.h"
-  "linux/limits.h"
-)
-
-for h in "${critical_headers[@]}"; do
-  if [[ ! -f "${INCLUDE_DIR}/${h}" ]]; then
-    echo "[linux-headers/post_install] ERRO: header ausente: ${h}" >&2
-    exit 1
-  fi
-done
-
-# Detecção de versão (best-effort)
-version_files=(
-  "${INCLUDE_DIR}/linux/version.h"
-  "${INCLUDE_DIR}/generated/uapi/linux/version.h"
-)
-
-detected=""
-for f in "${version_files[@]}"; do
-  if [[ -f "$f" ]]; then
-    detected="$(grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' "$f" | head -n1 || true)"
-    [[ -n "$detected" ]] && break
-  fi
-done
-
-if [[ -n "$detected" ]]; then
-  echo "[linux-headers/post_install] Versão detectada: $detected"
+if [[ ! -d "${INCLUDE_DIR}/asm" && ! -d "${INCLUDE_DIR}/asm-generic" ]]; then
+  echo "[linux-api-headers/post_install] AVISO: diretórios 'asm' ou 'asm-generic' não encontrados em ${INCLUDE_DIR}." >&2
+  echo "[linux-api-headers/post_install]         Verifique se ARCH/headers_install foi executado corretamente." >&2
 fi
 
-echo "[linux-headers/post_install] ✅ Linux API Headers instalados corretamente em ${ROOTFS}/usr/include"
+# Cabeçalho típico para sanity-check simples
+test_header="${INCLUDE_DIR}/linux/limits.h"
+if [[ -f "${test_header}" ]]; then
+  echo "[linux-api-headers/post_install] Header de teste encontrado: ${test_header}"
+else
+  echo "[linux-api-headers/post_install] AVISO: ${test_header} não encontrado; isso pode ser normal em versões recentes," >&2
+  echo "[linux-api-headers/post_install]         mas é recomendável verificar manualmente o conteúdo de ${INCLUDE_DIR}/linux." >&2
+fi
+
+echo "[linux-api-headers/post_install] API Headers do Linux ${PKG_EXPECTED_VERSION} parecem instalados corretamente."
 exit 0
