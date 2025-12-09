@@ -11,11 +11,19 @@ ADM_ROOT="${ADM_ROOT:-$ADM_ROOT_DEFAULT}"
 ROOTFS_GLIBC="${ADM_ROOT}/glibc-rootfs"
 ROOTFS_MUSL="${ADM_ROOT}/musl-rootfs"
 
-# Lista de mounts para desmontar na saída
 MOUNTS=()
+BIND_RO=()
+BIND_RW=()
+DEBUG=0
 
 log() {
     printf '[adm-chroot] %s\n' "$*" >&2
+}
+
+log_debug() {
+    if [ "$DEBUG" -eq 1 ]; then
+        log "DEBUG: $*"
+    fi
 }
 
 require_root() {
@@ -27,27 +35,39 @@ require_root() {
     fi
 }
 
+require_cmd() {
+    local cmd="$1"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        log "Comando obrigatório não encontrado no host: $cmd"
+        exit 1
+    fi
+}
+
 add_mount() {
     MOUNTS+=("$1")
+    log_debug "Registrado mount: $1"
 }
 
 cleanup() {
-    # desmonta em ordem reversa
+    log_debug "Iniciando limpeza (umount reverso)..."
     for (( i=${#MOUNTS[@]}-1; i>=0; i-- )); do
         local m="${MOUNTS[i]}"
         if mountpoint -q "$m"; then
-            umount -lf "$m" 2>/dev/null || true
+            log_debug "Umount $m"
+            umount -lf "$m" 2>/dev/null || log "Aviso: falha ao desmontar $m"
         fi
     done
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Preparar rootfs (diretórios básicos, resolv.conf)
+# Preparar rootfs (diretórios básicos, resolv.conf, etc.)
 # ---------------------------------------------------------------------------
 
 prepare_rootfs_layout() {
     local rootfs="$1"
+
+    log_debug "Preparando layout básico em $rootfs"
 
     mkdir -pv \
         "${rootfs}/"{bin,boot,dev,etc,home,lib,lib64,media,mnt,opt,proc,root,run,sbin,sys,tmp,usr,var} \
@@ -56,7 +76,6 @@ prepare_rootfs_layout() {
 
     chmod 1777 "${rootfs}/tmp" "${rootfs}/var/tmp"
 
-    # /etc básico
     mkdir -pv "${rootfs}/etc"
 
     # resolv.conf (DNS) do host para dentro do chroot
@@ -64,18 +83,20 @@ prepare_rootfs_layout() {
         cp -L /etc/resolv.conf "${rootfs}/etc/resolv.conf"
     fi
 
-    # opcional: hosts e localtime (se quiser)
+    # hosts opcional
     if [ -f /etc/hosts ] && [ ! -f "${rootfs}/etc/hosts" ]; then
         cp /etc/hosts "${rootfs}/etc/hosts"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Montagens necessárias para um chroot "vivo"
+# Montagens de pseudo-filesystems e binds
 # ---------------------------------------------------------------------------
 
 mount_pseudo_filesystems() {
     local rootfs="$1"
+
+    log_debug "Montando pseudo-filesystems em $rootfs"
 
     # /dev
     mkdir -pv "${rootfs}/dev"
@@ -89,7 +110,7 @@ mount_pseudo_filesystems() {
 
     # /dev/shm
     mkdir -pv "${rootfs}/dev/shm"
-    mount -t tmpfs tmpfs "${rootfs}/dev/shm" -o mode=1777
+    mount -t tmpfs tmpfs "${rootfs}/dev/shm" -o mode=1777,nosuid,nodev
     add_mount "${rootfs}/dev/shm"
 
     # /proc
@@ -99,24 +120,91 @@ mount_pseudo_filesystems() {
 
     # /sys
     mkdir -pv "${rootfs}/sys"
-    mount -t sysfs sysfs "${rootfs}/sys" -o nosuid,noexec,nodev
+    mount -t sysfs sysfs "${rootfs}/sys" -o nosuid,noexec,nodev,ro
     add_mount "${rootfs}/sys"
 
     # /run
     mkdir -pv "${rootfs}/run"
-    mount -t tmpfs tmpfs "${rootfs}/run" -o mode=755
+    mount -t tmpfs tmpfs "${rootfs}/run" -o mode=755,nosuid,nodev
     add_mount "${rootfs}/run"
 }
 
 mount_adm_tree() {
     local rootfs="$1"
 
-    # garantir /opt/adm dentro do chroot apontando para o mesmo /opt/adm do host
+    log_debug "Montando /opt/adm dentro de $rootfs"
+
     mkdir -pv "${rootfs}/opt"
     if ! mountpoint -q "${rootfs}/opt/adm"; then
         mkdir -pv "${rootfs}/opt/adm"
         mount --bind "${ADM_ROOT}" "${rootfs}/opt/adm"
         add_mount "${rootfs}/opt/adm"
+    fi
+}
+
+mount_extra_binds() {
+    local rootfs="$1"
+
+    local src dst
+
+    # Bind read-only
+    for src in "${BIND_RO[@]}"; do
+        [ -z "$src" ] && continue
+        if [ ! -d "$src" ]; then
+            log "Aviso: diretório para bind-ro não existe: $src (ignorando)"
+            continue
+        fi
+        dst="${rootfs}${src}"
+        mkdir -pv "$dst"
+        log_debug "Bind RO: $src -> $dst"
+        mount --bind "$src" "$dst"
+        add_mount "$dst"
+        mount -o remount,bind,ro "$dst"
+    done
+
+    # Bind read-write
+    for src in "${BIND_RW[@]}"; do
+        [ -z "$src" ] && continue
+        if [ ! -d "$src" ]; then
+            log "Aviso: diretório para bind-rw não existe: $src (ignorando)"
+            continue
+        fi
+        dst="${rootfs}${src}"
+        mkdir -pv "$dst"
+        log_debug "Bind RW: $src -> $dst"
+        mount --bind "$src" "$dst"
+        add_mount "$dst"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Verificações de sanidade do rootfs
+# ---------------------------------------------------------------------------
+
+check_rootfs_ready() {
+    local rootfs="$1"
+
+    if [ ! -d "$rootfs" ]; then
+        log "Rootfs ${rootfs} não existe. Certifique-se que o adm já instalou algo nele."
+        exit 1
+    fi
+
+    # Bash dentro do rootfs (para shell e adm)
+    if [ ! -x "${rootfs}/bin/bash" ] && [ ! -x "${rootfs}/usr/bin/bash" ]; then
+        log "Aviso: não encontrei /bin/bash nem /usr/bin/bash dentro de ${rootfs}."
+        log "O chroot ainda está muito vazio. O shell pode não funcionar como esperado."
+    fi
+
+    # adm.sh dentro do rootfs? (via bind /opt/adm) – checado apenas depois do mount
+}
+
+check_adm_inside_chroot() {
+    local rootfs="$1"
+
+    if [ ! -x "${rootfs}/opt/adm/adm.sh" ]; then
+        log "Erro: /opt/adm/adm.sh não encontrado dentro do chroot (${rootfs}/opt/adm/adm.sh)."
+        log "Verifique se ADM_ROOT está correto e se o diretório /opt/adm foi montado."
+        exit 1
     fi
 }
 
@@ -145,7 +233,8 @@ run_adm_in_chroot() {
     local adm_args=( "$@" )
 
     if [ "${#adm_args[@]}" -eq 0 ]; then
-        log "Nenhum comando do adm foi passado. Ex: adm-chroot.sh -P glibc build coreutils-9.9"
+        log "Nenhum comando do adm foi passado. Exemplo:"
+        log "  adm-chroot.sh -P glibc build coreutils-9.9"
         exit 1
     fi
 
@@ -167,23 +256,40 @@ run_adm_in_chroot() {
 usage() {
     cat <<EOF
 Uso:
-  adm-chroot.sh [-P glibc|musl] [--shell]
-  adm-chroot.sh [-P glibc|musl] comando_adm [args...]
+  adm-chroot.sh [-P glibc|musl|glibc-opt|musl-opt] [--shell] [opções] [--] [comando_adm args...]
+
+Modos:
+  1) Shell interativo dentro do chroot:
+       adm-chroot.sh -P glibc --shell
+
+  2) Executar o adm dentro do chroot:
+       adm-chroot.sh -P glibc build coreutils-9.9
+       adm-chroot.sh -P musl  build bash-5.3
+
+Opções:
+  -P, --profile   Profile do adm (glibc, musl, glibc-opt, musl-opt). Padrão: glibc
+  --shell         Entrar em shell interativo dentro do chroot do profile
+  --bind-ro DIR   Faz bind read-only de DIR do host para o mesmo caminho dentro do chroot (pode repetir)
+  --bind-rw DIR   Faz bind read-write de DIR do host para o mesmo caminho dentro do chroot (pode repetir)
+  --debug         Verbose de debug do wrapper
+  -h, --help      Mostra esta mensagem
 
 Exemplos:
-  # entrar em shell dentro do chroot glibc-rootfs
-  adm-chroot.sh -P glibc --shell
+  # Entrar em shell no chroot glibc, com /home do host em read-only:
+  adm-chroot.sh -P glibc --bind-ro /home --shell
 
-  # construir pacote dentro do chroot glibc
+  # Construir coreutils dentro do chroot glibc:
   adm-chroot.sh -P glibc build coreutils-9.9
 
-  # construir pacote dentro do chroot musl
-  adm-chroot.sh -P musl build busybox-1.36.1
+  # Construir bash dentro do chroot musl:
+  adm-chroot.sh -P musl build bash-5.3
 EOF
 }
 
 main() {
     require_root
+    require_cmd chroot
+    require_cmd mount
 
     local profile="glibc"
     local mode="adm"   # "adm" ou "shell"
@@ -199,6 +305,18 @@ main() {
                 mode="shell"
                 shift
                 ;;
+            --bind-ro)
+                BIND_RO+=("$2")
+                shift 2
+                ;;
+            --bind-rw)
+                BIND_RW+=("$2")
+                shift 2
+                ;;
+            --debug)
+                DEBUG=1
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -208,6 +326,7 @@ main() {
                 break
                 ;;
             *)
+                # o restante são argumentos para o adm (no modo "adm")
                 break
                 ;;
         esac
@@ -227,15 +346,12 @@ main() {
             ;;
     esac
 
-    if [ ! -d "$rootfs" ]; then
-        log "Rootfs do profile ${profile} não existe: ${rootfs}"
-        log "Certifique-se que o adm já instalou alguma coisa em ${rootfs}."
-        exit 1
-    fi
-
+    check_rootfs_ready "$rootfs"
     prepare_rootfs_layout "$rootfs"
     mount_pseudo_filesystems "$rootfs"
     mount_adm_tree "$rootfs"
+    mount_extra_binds "$rootfs"
+    check_adm_inside_chroot "$rootfs"
 
     if [ "$mode" = "shell" ]; then
         run_shell_in_chroot "$rootfs"
