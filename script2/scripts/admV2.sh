@@ -1186,6 +1186,36 @@ cmd_uninstall() {
     uninstall_with_deps "${pkgs[@]}"
 }
 
+# ----------------------------------------------------------------------
+# Subcomando: chroot
+# Wrapper para /opt/adm/adm-chroot.sh
+# Uso:
+#   adm chroot -P glibc -- build coreutils-9.9
+#   adm chroot -P musl  -- shell
+# ----------------------------------------------------------------------
+cmd_chroot() {
+    # Todos os argumentos depois de "chroot" vêm aqui intactos
+    # Exemplo:
+    #   adm chroot -P glibc -- build coreutils-9.9
+    # vira:
+    #   cmd_chroot -P glibc -- build coreutils-9.9
+
+    local wrapper
+
+    # Local padrão do wrapper
+    wrapper="${ADM_ROOT:-/opt/adm}/adm-chroot.sh"
+
+    if [ ! -x "${wrapper}" ]; then
+        log_error "Wrapper de chroot não encontrado ou não executável: ${wrapper}"
+        log_error "Verifique se você instalou /opt/adm/adm-chroot.sh e deu chmod +x."
+        exit 1
+    fi
+
+    # Aqui simplesmente repassamos tudo para o wrapper.
+    # Não interpretamos -P nem --, isso é responsabilidade do adm-chroot.sh.
+    exec "${wrapper}" "$@"
+}
+
 cmd_clean() {
     check_environment
 
@@ -1285,22 +1315,31 @@ cmd_info() {
 }
 
 main() {
-    if [ $# -eq 0 ]; then
+    if [ $# -lt 1 ]; then
         usage
-        exit 0
+        exit 1
     fi
 
     local cmd="$1"; shift || true
+
     case "$cmd" in
-        build)     cmd_build "$@" ;;
-        uninstall) cmd_uninstall "$@" ;;
-        clean)     cmd_clean "$@" ;;
-        sync)      sync_packages ;;
-        list)      cmd_list "$@" ;;
-        info)      cmd_info "$@" ;;
-        -h|--help|help) usage ;;
+        build)
+            cmd_build "$@"
+            ;;
+        install)
+            cmd_install "$@"
+            ;;
+        list)
+            cmd_list "$@"
+            ;;
+        # ------------------------------------------------------------------
+        # Novo subcomando: chroot
+        # ------------------------------------------------------------------
+        chroot)
+            cmd_chroot "$@"
+            ;;
+        # ------------------------------------------------------------------
         *)
-            log_error "Comando desconhecido: $cmd"
             usage
             exit 1
             ;;
