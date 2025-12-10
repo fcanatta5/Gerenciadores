@@ -1,0 +1,6 @@
+# Comandos para construir
+# glibc (padrão)
+adm build toolchain/binutils-pass1
+
+# musl
+adm build -P musl toolchain/binutils-pass1
