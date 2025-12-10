@@ -22,6 +22,9 @@ ADM_LOG_DIR="${ADM_LOG_DIR:-${ADM_BASE_DIR}/logs}"
 ADM_REPO_URL="${ADM_REPO_URL:-}"
 ADM_REPO_BRANCH="${ADM_REPO_BRANCH:-main}"
 
+# Diretório padrão de patches (pode ser sobrescrito via env)
+ADM_PATCH_DIR="${ADM_PATCH_DIR:-${ADM_SRC_CACHE}/patches}"
+
 mkdir -p \
   "${ADM_PKG_DIR}" "${ADM_ROOTFS_DIR}" "${ADM_SRC_CACHE}" \
   "${ADM_BIN_CACHE}" "${ADM_DB_PKG_DIR}" "${ADM_STATE_DIR}" \
@@ -30,7 +33,8 @@ mkdir -p \
 ADM_DRY_RUN=0
 ADM_VERBOSE=0
 ADM_PROFILE="glibc"
-ADM_ROOTFS=""
+ADM_ROOTFS=""   # pode ser override via --rootfs
+ADM_DESTDIR=""  # será setado por build/install
 
 ###############################################################################
 # CORES / LOG
@@ -65,6 +69,7 @@ die() {
 }
 
 run_cmd() {
+  # Recebe o comando como string única (mantido para compatibilidade)
   if (( ADM_DRY_RUN )); then
     printf "%b[DRY]%b %s\n" "${C_HI}" "${C_RESET}" "$*" >&2
     return 0
@@ -94,7 +99,8 @@ set_profile() {
 }
 
 rootfs_for_profile() {
-  if [ -n "${ADM_ROOTFS:-}" ]; then
+  # Se ADM_ROOTFS foi explicitamente definido (via --rootfs), respeita
+  if [ -n "${ADM_ROOTFS}" ]; then
     printf '%s\n' "${ADM_ROOTFS}"
     return 0
   fi
@@ -243,10 +249,21 @@ fetch_sources_for_pkg() {
 apply_patches_for_pkg() {
   local pkg="$1" srcdir="$2"
   load_package_script "${pkg}"
-  local pattern="${PKG_NAME}-${PKG_VERSION}"*.patch
+
+  local base="${ADM_PATCH_DIR}"
+  local pattern_dir="${base}/${PKG_NAME}-${PKG_VERSION}"
+
+  if [ -d "${pattern_dir}" ]; then
+    base="${pattern_dir}"
+  fi
+
+  if [ ! -d "${base}" ]; then
+    return 0
+  fi
+
   shopt -s nullglob
   local p
-  for p in "${ADM_SRC_CACHE}"/${pattern}; do
+  for p in "${base}"/*.patch; do
     [ -f "${p}" ] || continue
     log_info "Aplicando patch ${p}"
     run_cmd "patch -p1 -d '${srcdir}' < '${p}'"
@@ -266,6 +283,11 @@ collect_deps_recursive() {
     return 0
   fi
   ADM_VISITED["${pkg}"]=1
+
+  # Verifica existência do script e carrega deps
+  local path
+  path="$(pkg_script_path "${pkg}")"
+  [ -f "${path}" ] || die "Dependência referenciada mas script não encontrado: ${pkg}"
 
   load_package_script "${pkg}"
   local -a deps=("${PKG_DEPENDS[@]:-}")
@@ -413,10 +435,8 @@ pkg_register_meta_and_manifest() {
 }
 
 package_rootfs_diff() {
-  local pkg="$1" profile="$2"
+  local pkg="$1" profile="$2" rootfs="$3"
   load_package_script "${pkg}"
-  local rootfs
-  rootfs="$(rootfs_for_profile)"
   local zst xz manifest tmp_list
   zst="$(pkg_bin_zst_path "${pkg}" "${PKG_VERSION}" "${profile}")"
   xz="$(pkg_bin_xz_path "${pkg}" "${PKG_VERSION}" "${profile}")"
@@ -464,6 +484,11 @@ build_one_pkg() {
   local rootfs
   rootfs="$(rootfs_for_profile)"
 
+  # Atualiza ADM_ROOTFS/DESTDIR globais para que o pacote veja o rootfs correto
+  ADM_ROOTFS="${rootfs}"
+  ADM_DESTDIR="${rootfs}"
+  export ADM_PROFILE ADM_ROOTFS ADM_DESTDIR
+
   local state
   state="$(pkg_state_path "${pkg}" "${profile}")"
   mkdir -p "$(dirname "${state}")"
@@ -481,7 +506,7 @@ build_one_pkg() {
   log_info "=== Build ${pkg} (${PKG_NAME}-${PKG_VERSION}) perfil ${profile}"
 
   if (( ADM_DRY_RUN )); then
-    log_info " [DRY] construiria ${pkg} em $(rootfs_for_profile) para perfil ${profile}"
+    log_info " [DRY] construiria ${pkg} em ${rootfs} para perfil ${profile}"
     return 0
   fi
 
@@ -515,6 +540,10 @@ build_one_pkg() {
     srcdir="$(find "${builddir}" -mindepth 1 -maxdepth 1 -type d)"
   fi
 
+  # Expor diretório base de build para o script
+  export ADM_BUILD_DIR="${srcdir}"
+  export ADM_PATCH_DIR
+
   if [ "${patched}" -eq 0 ]; then
     apply_patches_for_pkg "${pkg}" "${srcdir}" >> "${log_file}" 2>&1 || die "Falha em patch"
     echo "patched=1" >> "${state}"
@@ -530,9 +559,8 @@ build_one_pkg() {
     triplet="${PKG_TRIPLET}"
   fi
 
-  export ADM_PROFILE ADM_ROOTFS ADM_TRIPLET
-  export ADM_DESTDIR="${rootfs}"
-  export PATH="${rootfs}/usr/bin:${rootfs}/bin:${PATH}"
+  export ADM_TRIPLET="${triplet}"
+  export PATH="${rootfs}/tools/bin:${rootfs}/usr/bin:${rootfs}/bin:${PATH}"
 
   if [ "${built}" -eq 0 ]; then
     if declare -f pkg_prepare >/dev/null 2>&1; then
@@ -540,6 +568,8 @@ build_one_pkg() {
     fi
     if declare -f pkg_build >/dev/null 2>&1; then
       (cd "${srcdir}" && run_cmd "pkg_build") >> "${log_file}" 2>&1
+    else
+      die "pkg_build não definido em ${pkg}"
     fi
     echo "built=1" >> "${state}"
   fi
@@ -564,7 +594,7 @@ build_one_pkg() {
   fi
 
   if [ "${packaged}" -eq 0 ]; then
-    package_rootfs_diff "${pkg}" "${profile}"
+    package_rootfs_diff "${pkg}" "${profile}" "${rootfs}"
     echo "packaged=1" >> "${state}"
   fi
 
@@ -578,6 +608,11 @@ build_with_deps() {
   local -a targets=("$@")
   local rootfs
   rootfs="$(rootfs_for_profile)"
+
+  # Atualiza globais
+  ADM_ROOTFS="${rootfs}"
+  ADM_DESTDIR="${rootfs}"
+  export ADM_PROFILE ADM_ROOTFS ADM_DESTDIR
 
   log_info "Resolvendo dependências para: ${targets[*]}"
   local order
@@ -645,9 +680,6 @@ uninstall_one_pkg() {
     log_warn "Pacote não instalado: ${pkg} (${profile})"
     return 0
   fi
-
-  local rootfs
-  rootfs="$(rootfs_for_profile)"
 
   run_pkg_uninstall_hooks "${pkg}" pre
 
@@ -825,7 +857,13 @@ pkg_info() {
   echo "Nome:     ${PKG_NAME}"
   echo "Versão:   ${PKG_VERSION}"
   echo "Perfil:   ${profile}"
-  echo "Rootfs:   $(rootfs_for_profile)"
+
+  if [ -f "${meta}" ]; then
+    echo "Rootfs(inst): $(grep '^ROOTFS=' "${meta}" | head -n1 | cut -d= -f2-)"
+  else
+    echo "Rootfs(inst): (não instalado)"
+  fi
+
   echo "Sources:"
   local s
   for s in "${PKG_SOURCES[@]:-}"; do
@@ -836,6 +874,7 @@ pkg_info() {
   for d in "${PKG_DEPENDS[@]:-}"; do
     echo "  - ${d}"
   done
+
   if [ -f "${meta}" ]; then
     echo
     echo "Meta instalado:"
