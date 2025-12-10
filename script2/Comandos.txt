@@ -1,3 +1,14 @@
+# Fora do chroot (adm instala no rootfs do profile)
+adm build -P glibc gettext-0.26
+adm build -P musl  gettext-0.26
+
+# Dentro do chroot glibc (via wrapper que você já tem)
+sudo adm chroot -P glibc -- build gettext-0.26
+
+# Dentro do chroot musl
+sudo adm chroot -P musl -- build gettext-0.26
+
+
 # Uso básico Assumindo o script em /opt/adm/bin/adm e no PATH:
 
 # sincronizar scripts de build (repo git)
