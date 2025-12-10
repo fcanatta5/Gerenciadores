@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Gerenciador de build para rootfs Linux From Scratch independente (glibc/musl)
-# Não segue o livro LFS, é um framework próprio.
 
 set -euo pipefail
 
@@ -54,7 +53,7 @@ log_warn()  { echo -e "${CLR_WARN}[WARN]${CLR_RESET} $*"; }
 log_err()   { echo -e "${CLR_ERR}[ERROR]${CLR_RESET} $*"; }
 log_ok()    { echo -e "${CLR_OK}[OK]${CLR_RESET} $*"; }
 
-# Tratamento de erros não capturados (evita erros silenciosos)
+# Tratamento de erros não capturados (evita erro silencioso)
 trap 'log_err "Falha na linha ${LINENO}, comando: ${BASH_COMMAND}"' ERR
 
 ##############################################################################
@@ -62,7 +61,6 @@ trap 'log_err "Falha na linha ${LINENO}, comando: ${BASH_COMMAND}"' ERR
 ##############################################################################
 
 ensure_dirs() {
-    # Não evitamos mkdir em dry-run para /opt/adm infra básica; logs etc. são internos do próprio adm.
     mkdir -p \
         "${ADM_BIN}" \
         "${ADM_PACKAGES_DIR}" \
@@ -156,51 +154,37 @@ set_profile() {
 
 ##############################################################################
 # Hooks por pacote (simples)
-# Esperado por pacote:
+# Estrutura esperada por pacote:
 #   /opt/adm/packages/<categoria>/<pacote>/hooks/pre_build.sh
 #   /opt/adm/packages/<categoria>/<pacote>/hooks/post_build.sh
 #   /opt/adm/packages/<categoria>/<pacote>/hooks/pre_install.sh
 #   /opt/adm/packages/<categoria>/<pacote>/hooks/post_install.sh
 #   /opt/adm/packages/<categoria>/<pacote>/hooks/pre_uninstall.sh
 #   /opt/adm/packages/<categoria>/<pacote>/hooks/post_uninstall.sh
-#
-# Nome do "stage" passado para a função deve ser exatamente um destes:
-#   pre_build  | post_build
-#   pre_install| post_install
-#   pre_uninstall | post_uninstall
 ##############################################################################
 
 run_hook() {
     local stage="$1"   # pre_build, post_build, pre_install, post_install, pre_uninstall, post_uninstall
-    local pkg="$2"     # nome do pacote no formato categoria/pacote (ex: core/hello)
+    local pkg="$2"     # categoria/pacote
 
-    # Caminho do hook:
-    #   ${ADM_PACKAGES_DIR}/${pkg}/hooks/${stage}.sh
     local hook="${ADM_PACKAGES_DIR}/${pkg}/hooks/${stage}.sh"
 
-    # Se não existe, não é erro – apenas não há hook para este estágio
     if [[ ! -f "$hook" ]]; then
         return 0
     fi
 
-    # Se existe mas não é executável, avisamos
     if [[ ! -x "$hook" ]]; then
         log_warn "Hook encontrado mas não executável: ${hook} (pkg=${pkg}, stage=${stage})"
         return 0
     fi
 
-    log_info "Executando hook ${stage} para pacote '${pkg}': ${hook}"
+    log_info "Executando hook ${stage} para '${pkg}': ${hook}"
 
     if [[ "${ADM_DRY_RUN:-0}" -eq 1 ]]; then
         log_info "[DRY-RUN] ${hook}"
         return 0
     fi
 
-    # Variáveis úteis disponíveis dentro do hook:
-    #   ADM_HOOK_STAGE  -> nome do stage (pre_build, post_build, etc.)
-    #   ADM_HOOK_PKG    -> pacote (categoria/pacote)
-    #   ADM_PROFILE     -> glibc | musl (perfil atual)
-    #   ADM_ROOTFS      -> rootfs do perfil atual
     ADM_HOOK_STAGE="$stage" \
     ADM_HOOK_PKG="$pkg" \
     ADM_PROFILE="$ADM_PROFILE" \
@@ -247,10 +231,6 @@ pkg_load_metadata() {
 
 ##############################################################################
 # Download, cache e verificação de checksums
-# - Suporta:
-#   * https/http (arquivos)
-#   * git (git://, git+https://, https://...git, github, gitlab)
-# Para git, valida commit/tag se especificado no fragmento (#commit=HASH etc.)
 ##############################################################################
 
 is_git_source() {
@@ -389,15 +369,12 @@ download_with_check_file() {
 pkg_fetch_sources() {
     local pkg="$1"
 
-    run_hooks "pre-fetch" "$pkg"
-
     local -n _SRC=PKG_SOURCES
     local -n _SHA=PKG_SHA256
     local -n _MD5=PKG_MD5
 
     if [[ "${#_SRC[@]}" -eq 0 ]]; then
         log_warn "Pacote '${pkg}' não possui fontes definidas (PKG_SOURCES vazio)"
-        run_hooks "post-fetch" "$pkg"
         return 0
     fi
 
@@ -424,8 +401,6 @@ pkg_fetch_sources() {
         fi
         ((i++))
     done
-
-    run_hooks "post-fetch" "$pkg"
 }
 
 ##############################################################################
@@ -512,12 +487,10 @@ pkg_register_installation() {
 
     mkdir -p "$dbd"
 
-    # meta: MANUAL é definido na lógica de build
     local manual=0
     if [[ " ${ADM_TARGETS[*]:-} " == *" ${pkg} "* ]]; then
         manual=1
     fi
-    # Se já existia e era manual, mantém manual=1
     if [[ -f "$meta" ]]; then
         # shellcheck disable=SC1090
         . "$meta"
@@ -536,8 +509,6 @@ pkg_register_installation() {
         echo "MANUAL=${manual}"
     } > "$meta"
 
-    # O manifest já deve ter sido criado antes e copiado para $manifest
-    # (pkg_make_binary_tarball_relative cuida disso).
     log_ok "Registro de instalação criado para ${pkg} (perfil=${ADM_PROFILE})"
 }
 
@@ -550,7 +521,7 @@ pkg_read_meta_field() {
     # shellcheck disable=SC1090
     . "$meta"
     case "$field" in
-        NAME)   echo "${NAME:-}" ;;
+        NAME)    echo "${NAME:-}" ;;
         VERSION) echo "${VERSION:-}" ;;
         RELEASE) echo "${RELEASE:-}" ;;
         DEPS)    echo "${DEPS:-}" ;;
@@ -559,9 +530,7 @@ pkg_read_meta_field() {
 }
 
 ##############################################################################
-# Empacotamento binário por pacote (.tar.zst, .tar.xz ou .tar)
-# - Tarball é relativo à raiz do pacote (a partir de DESTDIR)
-# - Manifesto baseado no conteúdo do tar
+# Empacotamento binário por pacote
 ##############################################################################
 
 pkg_tar_base_name() {
@@ -584,9 +553,7 @@ pkg_make_binary_tarball_relative() {
     local zst="${ADM_CACHE_PKG}/${base}.tar.zst"
     local xz="${ADM_CACHE_PKG}/${base}.tar.xz"
     local tar_plain="${ADM_CACHE_PKG}/${base}.tar"
-    local tar_tmp
-
-    tar_tmp="${ADM_CACHE_PKG}/${base}.tar.tmp"
+    local tar_tmp="${ADM_CACHE_PKG}/${base}.tar.tmp"
 
     if [[ "$ADM_DRY_RUN" -eq 1 ]]; then
         log_info "[DRY-RUN] iria empacotar ${pkg} (DESTDIR=${destdir}) em ${ADM_CACHE_PKG}/${base}.tar.*"
@@ -597,13 +564,11 @@ pkg_make_binary_tarball_relative() {
     rm -f "$tar_tmp"
     tar -C "$destdir" -cpf "$tar_tmp" .
 
-    # Gerar manifesto relativo
     local manifest_rel
     manifest_rel="$(pkg_manifest_file "$pkg").rel"
     mkdir -p "$(dirname "$manifest_rel")"
     tar -tf "$tar_tmp" | sed 's|^\./||' > "$manifest_rel"
 
-    # Comprimir
     if command -v zstd >/dev/null 2>&1; then
         log_info "Comprimindo tar para ${zst}"
         rm -f "$zst"
@@ -637,13 +602,16 @@ pkg_find_binary_tarball() {
 
     if [[ -f "$zst" ]]; then
         echo "$zst"
+        return 0
     elif [[ -f "$xz" ]]; then
         echo "$xz"
+        return 0
     elif [[ -f "$tar_plain" ]]; then
         echo "$tar_plain"
-    else
-        echo ""
+        return 0
     fi
+
+    return 1
 }
 
 pkg_install_from_tarball() {
@@ -652,8 +620,9 @@ pkg_install_from_tarball() {
     local release="$3"
 
     local tarball
-    tarball="$(pkg_find_binary_tarball "$pkg" "$version" "$release")"
-    [[ -n "$tarball" ]] || return 1
+    if ! tarball="$(pkg_find_binary_tarball "$pkg" "$version" "$release")"; then
+        return 1
+    fi
 
     log_info "Instalando ${pkg} a partir de cache binário: ${tarball}"
 
@@ -680,7 +649,6 @@ pkg_install_from_tarball() {
             ;;
     esac
 
-    # Se não havia manifesto relativo, cria agora
     local manifest_rel
     manifest_rel="$(pkg_manifest_file "$pkg").rel"
     if [[ ! -f "$manifest_rel" ]]; then
@@ -697,15 +665,16 @@ pkg_install_from_tarball() {
         esac
     fi
 
-    # Converte manifesto relativo em manifesto absoluto no rootfs
     local manifest_abs
     manifest_abs="$(pkg_manifest_file "$pkg")"
     mkdir -p "$(dirname "$manifest_abs")"
     : > "$manifest_abs"
-    while IFS= read -r rel; do
-        [[ -z "$rel" ]] && continue
-        echo "${ADM_ROOTFS}/${rel}" >> "$manifest_abs"
-    done < "$manifest_rel"
+    if [[ -f "$manifest_rel" ]]; then
+        while IFS= read -r rel; do
+            [[ -z "$rel" ]] && continue
+            echo "${ADM_ROOTFS}/${rel}" >> "$manifest_abs"
+        done < "$manifest_rel"
+    fi
 
     log_ok "Pacote '${pkg}' instalado a partir de cache binário"
     return 0
@@ -751,7 +720,6 @@ pkg_apply_patches() {
 # Construção de pacote individual
 ##############################################################################
 
-# Lista de targets (top-level) atuais, usada para marcar MANUAL no DB
 ADM_TARGETS=()
 
 pkg_build_one() {
@@ -784,23 +752,20 @@ pkg_build_one() {
         fi
     fi
 
-    # Tenta instalar a partir de cache binário
-    if pkg_is_installed "$pkg" && pkg_find_binary_tarball "$PKG_NAME" "$PKG_VERSION" "$PKG_RELEASE" >/dev/null; then
-        log_info "Pacote '${pkg}' já está instalado e tem cache binário; nada a fazer."
+    if pkg_is_installed "$pkg"; then
+        log_info "Pacote '${pkg}' já está instalado para perfil ${ADM_PROFILE}; nada a fazer."
         return 0
     fi
 
-    if pkg_install_from_tarball "$PKG_NAME" "$PKG_VERSION" "$PKG_RELEASE"; then
+    if pkg_install_from_tarball "$pkg" "$PKG_VERSION" "$PKG_RELEASE"; then
         pkg_mark_state "$pkg" "done"
         return 0
     fi
 
     pkg_mark_state "$pkg" "building"
 
-    # Baixa fontes
-    pkg_fetch_sources("$pkg") || pkg_fetch_sources "$pkg"  # proteção caso expansão
+    pkg_fetch_sources "$pkg"
 
-    # Diretório de build por pacote/perfil
     local builddir="${ADM_BUILD_DIR}/${ADM_PROFILE}/${pkg}"
     local destdir="${ADM_ROOT}/dest/${ADM_PROFILE}/${pkg}"
     log_info "Preparando builddir=${builddir} destdir=${destdir}"
@@ -812,7 +777,6 @@ pkg_build_one() {
         mkdir -p "$builddir" "$destdir"
     fi
 
-    # Copia/extração de fontes para builddir
     local -n _SRC=PKG_SOURCES
     for url in "${_SRC[@]:-}"; do
         if is_git_source "$url"; then
@@ -858,10 +822,9 @@ pkg_build_one() {
         fi
     done
 
-    # Aplica patches
     pkg_apply_patches "$pkg" "$builddir"
 
-    run_hooks pre_build "$pkg"
+    run_hook pre_build "$pkg"
 
     log_info "Construindo pacote '${pkg}' (perfil=${ADM_PROFILE})"
 
@@ -875,24 +838,21 @@ pkg_build_one() {
             "$script" build
     fi
 
-    run_hooks post_build "$pkg"
+    run_hook post_build "$pkg"
 
-    run_hooks pre_install "$pkg"
+    run_hook pre_install "$pkg"
 
     if [[ "$ADM_DRY_RUN" -eq 1 ]]; then
         log_info "[DRY-RUN] iria instalar ${pkg} copiando ${destdir} para ${ADM_ROOTFS}"
     else
         mkdir -p "$ADM_ROOTFS"
-        # Usa tar para mesclar destdir -> rootfs
         (cd "$destdir" && tar -cpf - .) | (cd "$ADM_ROOTFS" && tar -xpf -)
     fi
 
-    run_hooks post_install "$pkg"
+    run_hook post_install "$pkg"
 
-    # Gera tarball e manifesto relativo
     pkg_make_binary_tarball_relative "$pkg" "$PKG_VERSION" "$PKG_RELEASE" "$destdir"
 
-    # Converte manifesto relativo em absoluto
     local manifest_rel
     manifest_rel="$(pkg_manifest_file "$pkg").rel"
     local manifest_abs
@@ -910,7 +870,6 @@ pkg_build_one() {
         fi
     fi
 
-    # Registro no DB
     local -n _DEPS=PKG_DEPENDS
     pkg_register_installation "$pkg" "$PKG_VERSION" "$PKG_RELEASE" "${_DEPS[@]:-}"
 
@@ -1070,6 +1029,7 @@ build_graph_parallel() {
             if [[ "$ADM_DRY_RUN" -eq 1 ]]; then
                 log_info "[DRY-RUN] iria construir pacote ${pkg}"
                 ((built_count++))
+                local succ
                 for succ in ${GRAPH_REVERSE["$pkg"]:-}; do
                     (( indegree["$succ"]-- ))
                     if (( indegree["$succ"] == 0 )); then
@@ -1295,7 +1255,7 @@ pkg_uninstall_one() {
         return 0
     fi
 
-    run_hooks pre_uninstall "$pkg"
+    run_hook pre_uninstall "$pkg"
 
     local manifest
     manifest="$(pkg_manifest_file "$pkg")"
@@ -1305,8 +1265,10 @@ pkg_uninstall_one() {
     else
         log_info "Desinstalando pacote '${pkg}'"
         if [[ -f "$manifest" ]]; then
-            # Remove arquivos
-            tac "$manifest" | while IFS= read -r path; do
+            mapfile -t _paths < "$manifest"
+            local idx path
+            for ((idx=${#_paths[@]}-1; idx>=0; idx--)); do
+                path="${_paths[idx]}"
                 [[ -z "$path" ]] && continue
                 if [[ -d "$path" ]]; then
                     rmdir "$path" 2>/dev/null || true
@@ -1315,11 +1277,10 @@ pkg_uninstall_one() {
                 fi
             done
         fi
-        # Remove DB
         rm -rf "$(pkg_db_dir "$pkg")"
     fi
 
-    run_hooks post_uninstall "$pkg"
+    run_hook post_uninstall "$pkg"
 
     log_ok "Pacote '${pkg}' desinstalado (perfil=${ADM_PROFILE})"
 }
@@ -1327,12 +1288,80 @@ pkg_uninstall_one() {
 list_installed_pkgs_for_profile() {
     local base="${ADM_DB_DIR}/${ADM_PROFILE}"
     [[ -d "$base" ]] || return 0
-    # Cada pacote está em base/categoria/pacote
     find "$base" -mindepth 2 -type f -name meta | while read -r mf; do
         local rel
         rel="${mf#$base/}"
         rel="${rel%/meta}"
         echo "$rel"
+    done
+}
+
+cmd_autoremove_orphans() {
+    log_info "Procurando pacotes órfãos para perfil ${ADM_PROFILE}"
+
+    local base="${ADM_DB_DIR}/${ADM_PROFILE}"
+    [[ -d "$base" ]] || { log_info "Nenhum pacote instalado."; return 0; }
+
+    declare -A installed
+    declare -A deps_map
+    declare -A manual_map
+
+    while IFS= read -r pkg; do
+        installed["$pkg"]=1
+        local meta
+        meta="$(pkg_meta_file "$pkg")"
+        # shellcheck disable=SC1090
+        . "$meta"
+        manual_map["$pkg"]="${MANUAL:-0}"
+        deps_map["$pkg"]="${DEPS:-}"
+    done < <(list_installed_pkgs_for_profile)
+
+    declare -A reachable
+    local -a queue=()
+
+    local p
+    for p in "${!installed[@]}"; do
+        if [[ "${manual_map[$p]:-0}" -eq 1 ]]; then
+            reachable["$p"]=1
+            queue+=("$p")
+        fi
+    done
+
+    while ((${#queue[@]})); do
+        local cur="${queue[0]}"
+        queue=("${queue[@]:1}")
+
+        for d in ${deps_map["$cur"]:-}; do
+            if [[ -n "${installed["$d"]:-}" && -z "${reachable["$d"]:-}" ]]; then
+                reachable["$d"]=1
+                queue+=("$d")
+            fi
+        done
+    done
+
+    local -a orphans=()
+    for p in "${!installed[@]}"; do
+        if [[ -z "${reachable["$p"]:-}" ]]; then
+            orphans+=("$p")
+        fi
+    done
+
+    if ((${#orphans[@]} == 0)); then
+        log_info "Nenhum órfão encontrado."
+        return 0
+    fi
+
+    log_warn "Pacotes órfãos detectados: ${orphans[*]}"
+
+    local op="REMOVENDO"
+    if [[ "$ADM_DRY_RUN" -eq 1 ]]; then
+        op="(DRY-RUN) Removeria"
+    fi
+    log_warn "${op} órfãos: ${orphans[*]}"
+
+    local o
+    for o in "${orphans[@]}"; do
+        pkg_uninstall_one "$o"
     done
 }
 
@@ -1387,79 +1416,6 @@ EOF
     fi
 }
 
-cmd_autoremove_orphans() {
-    log_info "Procurando pacotes órfãos para perfil ${ADM_PROFILE}"
-
-    local base="${ADM_DB_DIR}/${ADM_PROFILE}"
-    [[ -d "$base" ]] || { log_info "Nenhum pacote instalado."; return 0; }
-
-    # Monta listas de pkgs, deps, manual
-    declare -A installed
-    declare -A deps_map
-    declare -A manual_map
-
-    while IFS= read -r pkg; do
-        installed["$pkg"]=1
-        local meta
-        meta="$(pkg_meta_file "$pkg")"
-        # shellcheck disable=SC1090
-        . "$meta"
-        manual_map["$pkg"]="${MANUAL:-0}"
-        deps_map["$pkg"]="${DEPS:-}"
-    done < <(list_installed_pkgs_for_profile)
-
-    # Marca alcançáveis a partir dos MANUAL=1
-    declare -A reachable
-    local -a queue=()
-
-    local p
-    for p in "${!installed[@]}"; do
-        if [[ "${manual_map[$p]:-0}" -eq 1 ]]; then
-            reachable["$p"]=1
-            queue+=("$p")
-        fi
-    done
-
-    # BFS de dependências
-    while ((${#queue[@]})); do
-        local cur="${queue[0]}"
-        queue=("${queue[@]:1}")
-
-        for d in ${deps_map["$cur"]:-}; do
-            if [[ -n "${installed["$d"]:-}" && -z "${reachable["$d"]:-}" ]]; then
-                reachable["$d"]=1
-                queue+=("$d")
-            fi
-        done
-    done
-
-    # Órfãos: instalados que não são alcançáveis
-    local -a orphans=()
-    for p in "${!installed[@]}"; do
-        if [[ -z "${reachable["$p"]:-}" ]]; then
-            orphans+=("$p")
-        fi
-    done
-
-    if ((${#orphans[@]} == 0)); then
-        log_info "Nenhum órfão encontrado."
-        return 0
-    fi
-
-    log_warn "Pacotes órfãos detectados: ${orphans[*]}"
-
-    local op="REMOVENDO"
-    if [[ "$ADM_DRY_RUN" -eq 1 ]]; then
-        op="(DRY-RUN) Removeria"
-    fi
-    log_warn "${op} órfãos: ${orphans[*]}"
-
-    local o
-    for o in "${orphans[@]}"; do
-        pkg_uninstall_one "$o"
-    done
-}
-
 ##############################################################################
 # Search / Info
 ##############################################################################
@@ -1478,7 +1434,7 @@ cmd_search() {
     local found=0
     while IFS= read -r dir; do
         local rel
-        rel="${dir#$ADM_PACKAGES_DIR/}"   # categoria/pacote
+        rel="${dir#$ADM_PACKAGES_DIR/}"
         local script="${dir}/build.sh"
         local pkg_name=""
         local pkg_version=""
@@ -1525,11 +1481,9 @@ cmd_info() {
         echo "  - ${s}"
     done
 
-    # Status de instalação por perfil
     local profile
     for profile in glibc musl; do
         ADM_PROFILE="$profile"
-        local base="${ADM_DB_DIR}/${ADM_PROFILE}"
         ADM_ROOTFS="${ADM_ROOT}/rootfs-${ADM_PROFILE}"
         if pkg_is_installed "$pkg"; then
             local version release
@@ -1620,7 +1574,6 @@ main() {
     setup_logging
     check_required_tools
 
-    # Opções globais
     while (($#)); do
         case "$1" in
             --dry-run)
