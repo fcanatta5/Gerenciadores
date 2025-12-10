@@ -155,31 +155,57 @@ set_profile() {
 }
 
 ##############################################################################
-# Hooks por pacote
+# Hooks por pacote (simples)
+# Esperado por pacote:
+#   /opt/adm/packages/<categoria>/<pacote>/hooks/pre_build.sh
+#   /opt/adm/packages/<categoria>/<pacote>/hooks/post_build.sh
+#   /opt/adm/packages/<categoria>/<pacote>/hooks/pre_install.sh
+#   /opt/adm/packages/<categoria>/<pacote>/hooks/post_install.sh
+#   /opt/adm/packages/<categoria>/<pacote>/hooks/pre_uninstall.sh
+#   /opt/adm/packages/<categoria>/<pacote>/hooks/post_uninstall.sh
+#
+# Nome do "stage" passado para a função deve ser exatamente um destes:
+#   pre_build  | post_build
+#   pre_install| post_install
+#   pre_uninstall | post_uninstall
 ##############################################################################
-# Estrutura esperada:
-#   /opt/adm/packages/categoria/pacote/hooks/<stage>.d/*.sh
-# Stages:
-#   pre-fetch, post-fetch
-#   pre-build, post-build
-#   pre-install, post-install
-#   pre-uninstall, post-uninstall
-##############################################################################
 
-run_hooks() {
-    local stage="$1"   # pre-fetch, post-fetch, ...
-    local pkg="$2"
+run_hook() {
+    local stage="$1"   # pre_build, post_build, pre_install, post_install, pre_uninstall, post_uninstall
+    local pkg="$2"     # nome do pacote no formato categoria/pacote (ex: core/hello)
 
-    local dir="${ADM_PACKAGES_DIR}/${pkg}/hooks/${stage}.d"
-    [[ -d "$dir" ]] || return 0
+    # Caminho do hook:
+    #   ${ADM_PACKAGES_DIR}/${pkg}/hooks/${stage}.sh
+    local hook="${ADM_PACKAGES_DIR}/${pkg}/hooks/${stage}.sh"
 
-    for hook in "$dir"/*; do
-        [[ -x "$hook" ]] || continue
-        log_info "Executando hook ${stage}: $(basename "$hook") (pkg=${pkg})"
-        ADM_HOOK_STAGE="$stage" ADM_HOOK_PKG="$pkg" \
-            ADM_PROFILE="$ADM_PROFILE" ADM_ROOTFS="$ADM_ROOTFS" \
-            "$hook"
-    done
+    # Se não existe, não é erro – apenas não há hook para este estágio
+    if [[ ! -f "$hook" ]]; then
+        return 0
+    fi
+
+    # Se existe mas não é executável, avisamos
+    if [[ ! -x "$hook" ]]; then
+        log_warn "Hook encontrado mas não executável: ${hook} (pkg=${pkg}, stage=${stage})"
+        return 0
+    fi
+
+    log_info "Executando hook ${stage} para pacote '${pkg}': ${hook}"
+
+    if [[ "${ADM_DRY_RUN:-0}" -eq 1 ]]; then
+        log_info "[DRY-RUN] ${hook}"
+        return 0
+    fi
+
+    # Variáveis úteis disponíveis dentro do hook:
+    #   ADM_HOOK_STAGE  -> nome do stage (pre_build, post_build, etc.)
+    #   ADM_HOOK_PKG    -> pacote (categoria/pacote)
+    #   ADM_PROFILE     -> glibc | musl (perfil atual)
+    #   ADM_ROOTFS      -> rootfs do perfil atual
+    ADM_HOOK_STAGE="$stage" \
+    ADM_HOOK_PKG="$pkg" \
+    ADM_PROFILE="$ADM_PROFILE" \
+    ADM_ROOTFS="$ADM_ROOTFS" \
+        "$hook"
 }
 
 ##############################################################################
@@ -835,7 +861,7 @@ pkg_build_one() {
     # Aplica patches
     pkg_apply_patches "$pkg" "$builddir"
 
-    run_hooks "pre-build" "$pkg"
+    run_hooks pre_build "$pkg"
 
     log_info "Construindo pacote '${pkg}' (perfil=${ADM_PROFILE})"
 
@@ -849,9 +875,9 @@ pkg_build_one() {
             "$script" build
     fi
 
-    run_hooks "post-build" "$pkg"
+    run_hooks post_build "$pkg"
 
-    run_hooks "pre-install" "$pkg"
+    run_hooks pre_install "$pkg"
 
     if [[ "$ADM_DRY_RUN" -eq 1 ]]; then
         log_info "[DRY-RUN] iria instalar ${pkg} copiando ${destdir} para ${ADM_ROOTFS}"
@@ -861,7 +887,7 @@ pkg_build_one() {
         (cd "$destdir" && tar -cpf - .) | (cd "$ADM_ROOTFS" && tar -xpf -)
     fi
 
-    run_hooks "post-install" "$pkg"
+    run_hooks post_install "$pkg"
 
     # Gera tarball e manifesto relativo
     pkg_make_binary_tarball_relative "$pkg" "$PKG_VERSION" "$PKG_RELEASE" "$destdir"
@@ -1269,7 +1295,7 @@ pkg_uninstall_one() {
         return 0
     fi
 
-    run_hooks "pre-uninstall" "$pkg"
+    run_hooks pre_uninstall "$pkg"
 
     local manifest
     manifest="$(pkg_manifest_file "$pkg")"
@@ -1293,7 +1319,7 @@ pkg_uninstall_one() {
         rm -rf "$(pkg_db_dir "$pkg")"
     fi
 
-    run_hooks "post-uninstall" "$pkg"
+    run_hooks post_uninstall "$pkg"
 
     log_ok "Pacote '${pkg}' desinstalado (perfil=${ADM_PROFILE})"
 }
