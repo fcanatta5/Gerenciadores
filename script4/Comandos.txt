@@ -4,36 +4,7 @@ export ADM_REPO_URL="git@gitlab.com:usuario/seu-repo-lfs.git"
 export ADM_REPO_BRANCH="main"
 /opt/adm/bin/adm.sh sync
 
-# Construir múltiplos pacotes (downloads e build de prog1 e prog2 com deps):
+# Comando para construir
+/opt/adm/bin/adm.sh --profile glibc build toolchain/linux-api-headers
 
-/opt/adm/bin/adm.sh build categoria/prog1 categoria/prog2
-
-# Apenas baixar fontes (múltiplos pacotes, com deps), sem compilar:
-
-/opt/adm/bin/adm.sh fetch categoria/prog1 categoria/prog2
-
-# Dry-run (nada é alterado, só mostra o plano):
-
-/opt/adm/bin/adm.sh --dry-run build categoria/prog1 categoria/prog2
-
-# Listar instalados em perfil musl:
-
-/opt/adm/bin/adm.sh --profile musl list
-
-# Remover pacotes em ordem reversa segura (com hooks do script de pacote):
-
-/opt/adm/bin/adm.sh remove categoria/prog1 categoria/prog2
-
-# Remover órfãos:
-
-/opt/adm/bin/adm.sh remove-orphans
-
-# Construindo o programa
-
-# Seleciona profile glibc
-/opt/adm/adm.sh -p glibc sync
-
-# Constrói e instala Binutils Pass 1 no rootfs atual dentro de /tools
-/opt/adm/adm.sh -p glibc build  toolchain/binutils-pass1
-/opt/adm/adm.sh -p glibc install toolchain/binutils-pass1
-
+/opt/adm/bin/adm.sh --profile musl build toolchain/linux-api-headers
