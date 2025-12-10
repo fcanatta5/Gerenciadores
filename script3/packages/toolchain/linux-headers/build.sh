@@ -6,10 +6,10 @@ set -euo pipefail
 
 adm_metadata() {
     # Identidade do pacote no ADM
-    PKG_NAME="core/linux-headers"
+    PKG_NAME="toolchain/linux-headers"
     PKG_VERSION="6.17.9"
     PKG_RELEASE=1
-    PKG_CATEGORY="core"
+    PKG_CATEGORY="toolchain"
 
     # Fonte oficial do kernel (ajuste se quiser espelho próprio)
     PKG_SOURCES=(
