@@ -8,3 +8,6 @@ export ADM_REPO_BRANCH="main"
 /opt/adm/bin/adm.sh --profile glibc build toolchain/linux-api-headers
 
 /opt/adm/bin/adm.sh --profile musl build toolchain/linux-api-headers
+
+# Para remover
+/opt/adm/bin/adm.sh --profile glibc remove toolchain/binutils-pass1
