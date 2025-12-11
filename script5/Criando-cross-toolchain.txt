@@ -10,3 +10,36 @@
 # Construir o gcc-pass1 
 ./adm.sh profile set bootstrap
 ./adm.sh install toolchain/gcc-bootstrap@15.2.0
+
+# Usando os profiles
+
+# Depois de instalar o adm.sh corrigido:
+sudo chmod +x /opt/adm/setup_profiles.sh
+sudo /opt/adm/setup_profiles.sh
+
+# Em seguida:
+./adm.sh init               # garante estrutura ADM_ROOT/db etc.
+./adm.sh profile list       # deve mostrar * bootstrap, glibc, musl
+./adm.sh rootfs             # mostra o rootfs do profile atual
+
+# Profile bootstrap
+./adm.sh profile set bootstrap
+./adm.sh install toolchain/linux-headers@6.17.9
+./adm.sh install toolchain/binutils-bootstrap@2.45.1
+./adm.sh install toolchain/gcc-bootstrap@15.2.0
+
+# Profile glibc
+./adm.sh profile set glibc
+./adm.sh rootfs     # /opt/adm/profiles/glibc/rootfs
+
+# Exemplo de instalação (assumindo receitas prontas):
+./adm.sh install toolchain/glibc@2.40
+./adm.sh install core/bash@5.2.26
+
+# Profile musl
+./adm.sh profile set musl
+./adm.sh rootfs     # /opt/adm/profiles/musl/rootfs
+
+# Exemplo (assumindo receitas):
+./adm.sh install toolchain/musl@1.2.5
+
