@@ -1,3 +1,8 @@
+# certifique que o binutils-pass1 foi construído
+./adm.sh profile set bootstrap
+./adm.sh install toolchain/binutils-bootstrap@2.45.1
+./adm.sh install core/linux-headers@6.6       # ou o nome/versão que você definiu
+
 # Construir o binutils-pass1 
 ./adm.sh profile set bootstrap
 ./adm.sh install toolchain/binutils-bootstrap@2.45.1
