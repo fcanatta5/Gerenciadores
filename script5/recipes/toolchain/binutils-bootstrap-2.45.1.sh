@@ -1,21 +1,37 @@
 # /opt/adm/packages/toolchain/binutils-bootstrap-2.45.1.sh
+#
+# Binutils - Pass 1 (toolchain bootstrap)
+# Compatível com adm.sh (categorias + profiles) e profile "bootstrap".
+#
+# Arquivo deve estar em:
+#   $ADM_ROOT/packages/toolchain/binutils-bootstrap-2.45.1.sh
+#
+# PKG_NAME      = binutils-bootstrap
+# PKG_VERSION   = 2.45.1
+# PKG_CATEGORY  = toolchain
+# PKG_DEPENDS   = linux-headers  (espera receita linux-headers-<versao>.sh)
+#
+# Esta receita instala o Binutils Pass 1 em /tools dentro do rootfs
+# do profile atual, usando DESTDIR=$PKG_BUILD_ROOT (adm empacota e
+# depois extrai tudo em $PKG_ROOTFS).
 
 PKG_NAME="binutils-bootstrap"
 PKG_VERSION="2.45.1"
 PKG_DESC="Binutils - Pass 1 (bootstrap toolchain)"
 PKG_DEPENDS="linux-headers"
 PKG_CATEGORY="toolchain"
-PKG_LIBC=""   # usa o profile atual (ex.: bootstrap)
+PKG_LIBC=""   # segue o profile atual (ex.: bootstrap)
 
-# Build do Binutils pass 1 (somente para toolchain inicial)
 build() {
+    # URL oficial do Binutils
     local url="https://ftp.gnu.org/gnu/binutils/binutils-${PKG_VERSION}.tar.xz"
     local tar="binutils-${PKG_VERSION}.tar.xz"
     local src
 
-    # Usa cache de source do adm
+    # Baixa (ou usa o cache) via adm.sh
     src="$(fetch_source "$url" "$tar")"
 
+    # Diretório de trabalho isolado para este pacote/versão
     mkdir -p "$PKG_BUILD_WORK"
     cd "$PKG_BUILD_WORK"
     rm -rf "binutils-${PKG_VERSION}" build
@@ -23,100 +39,113 @@ build() {
     mkdir -p build
     cd build
 
-    # Target padrão estilo LFS (ajuste se quiser algo fixo, ex.: x86_64-lfs-linux-gnu)
-    local target
-    target="$(uname -m)-lfs-linux-gnu"
+    # Target LFS para o toolchain de bootstrap
+    # O profile "bootstrap" define LFS_TGT em env.sh, mas deixamos um default seguro.
+    local target="${LFS_TGT:-"$(uname -m)-lfs-linux-gnu"}"
 
-    # sysroot = rootfs do profile (ex.: /opt/adm/profiles/bootstrap/rootfs)
+    # sysroot = rootfs do profile atual (ex.: /opt/adm/profiles/bootstrap/rootfs)
     local sysroot="$PKG_ROOTFS"
 
-    # Garante que o toolchain do profile (se existir) está no PATH
-    export PATH="$sysroot/tools/bin:${PATH:-}"
+    # Garante que o toolchain do profile (se já existir algo em /tools) está no PATH
+    export PATH="${sysroot}/tools/bin:${PATH:-}"
 
+    # Configuração Pass 1 (bem próxima do LFS atual)
     ../binutils-${PKG_VERSION}/configure \
         --prefix=/tools \
         --with-sysroot="$sysroot" \
         --target="$target" \
         --disable-nls \
+        --enable-gprofng=no \
         --disable-werror \
         --disable-multilib
 
+    # Compila Binutils
     make
-    # Não instalamos ainda, sanity-check roda antes do install
-    make configure-host
+
+    # IMPORTANTE:
+    #   a instalação precisa ir para $PKG_BUILD_ROOT,
+    #   porque o adm.sh empacota a partir desse rootfs temporário.
+    make install DESTDIR="$PKG_BUILD_ROOT"
 }
 
-# Hook pós-build: sanity-check do ld (igual LFS pass 1)
+# Hook pós-build opcional (aqui só loga, sanity principal é pós-instalação)
 post_build() {
-    echo "==> [binutils-bootstrap] Sanity-check do ld (Pass 1)"
+    echo "==> [binutils-bootstrap-${PKG_VERSION}] Build concluído (Pass 1)."
+}
 
-    local target
-    target="$(uname -m)-lfs-linux-gnu"
-    local sysroot="$PKG_ROOTFS"
+# Hook pré-install (antes de extrair o tarball no rootfs do profile)
+pre_install() {
+    echo "==> [binutils-bootstrap-${PKG_VERSION}] Instalando em /tools dentro do rootfs do profile."
+}
 
-    # Vamos usar o ld recém compilado de ./build/binutils
-    # mas garantindo que o target binary esteja acessível
-    cd "$PKG_BUILD_WORK/build"
+# Hook de sanity-check após instalação no rootfs.
+# Aqui já temos:
+#   - Binutils em $PKG_ROOTFS/tools/bin
+#   - PATH prefixado pelo adm.sh com $ADM_CURRENT_ROOTFS/tools/bin
+post_install() {
+    echo "==> [binutils-bootstrap-${PKG_VERSION}] Sanity-check do Binutils Pass 1"
 
-    # Compila um objeto de teste com o gcc do host (ou do profile)
-    # e linka com o ld novo via driver do target:
-    # LFS clássico usa: ${LFS_TGT}-gcc; aqui tentamos inferir
-    local test_c="dummy.c"
-    local test_o="dummy.o"
-    local test_prog="dummy"
+    local sysroot="${PKG_ROOTFS:-$ADM_CURRENT_ROOTFS}"
+    local tools_bin="${sysroot}/tools/bin"
 
-    cat > "$test_c" <<'EOF'
-int main(void) { return 0; }
-EOF
+    # target padrão, usando LFS_TGT se definido pelo profile bootstrap/env.sh
+    local target="${LFS_TGT:-"$(uname -m)-lfs-linux-gnu"}"
 
-    # Se você já tiver um ${target}-gcc no PATH, ótimo.
-    # Caso contrário, usa apenas 'gcc' para gerar um .o simples
-    if command -v "${target}-gcc" >/dev/null 2>&1; then
-        "${target}-gcc" -c "$test_c" -o "$test_o"
-        "${target}-gcc" "$test_o" -o "$test_prog"
-    else
-        echo "Aviso: ${target}-gcc não encontrado; usando gcc do host apenas para sanity-check básico."
-        gcc -c "$test_c" -o "$test_o"
-        gcc "$test_o" -o "$test_prog"
+    # Caminhos esperados dos binários de target
+    local target_ld="${tools_bin}/${target}-ld"
+    local target_as="${tools_bin}/${target}-as"
+
+    # 1) Verifica existência
+    if [ ! -x "$target_ld" ]; then
+        echo "ERRO: ${target_ld} não encontrado ou não é executável."
+        exit 1
     fi
-
-    # Agora checamos se o binário resultante está usando o ld correto
-    # via strings + grep, semelhante ao que o LFS faz com 'readelf -l a.out | grep interpreter'
-    if command -v readelf >/dev/null 2>&1; then
-        readelf -l "$test_prog" > sanity-readelf.log 2>&1 || true
-        echo "---- readelf -l $test_prog ----"
-        cat sanity-readelf.log
-        echo "--------------------------------"
-    fi
-
-    # sanity simples: verifica se o programa executa
-    if ./"$test_prog"; then
-        echo "Sanity-check: programa de teste executou com sucesso."
-    else
-        echo "Sanity-check: programa de teste FALHOU."
+    if [ ! -x "$target_as" ]; then
+        echo "ERRO: ${target_as} não encontrado ou não é executável."
         exit 1
     fi
 
-    # Limpa lixo do teste
-    rm -f "$test_c" "$test_o" "$test_prog" sanity-readelf.log
-}
+    # 2) Verifica se estão no PATH (deve estar, pois adm.sh já ajustou PATH)
+    if ! command -v "${target}-ld" >/dev/null 2>&1; then
+        echo "ERRO: ${target}-ld não está no PATH após instalação."
+        echo "PATH atual: $PATH"
+        exit 1
+    fi
+    if ! command -v "${target}-as" >/dev/null 2>&1; then
+        echo "ERRO: ${target}-as não está no PATH após instalação."
+        echo "PATH atual: $PATH"
+        exit 1
+    fi
 
-# Hook pré-install (opcional, aqui só logamos)
-pre_install() {
-    echo "==> [binutils-bootstrap] Instalando em /tools (Pass 1)"
-}
+    # 3) 'as --version' e 'ld --version' como sanity mínimo
+    echo "---- ${target}-as --version ----"
+    if ! "${target}-as" --version >/dev/null 2>&1; then
+        echo "ERRO: ${target}-as --version falhou."
+        exit 1
+    fi
 
-# Instala o binutils pass 1 em /tools dentro do rootfs do profile,
-# mas sempre via DESTDIR=$PKG_BUILD_ROOT (adm empacota e depois extrai).
-post_install() {
-    echo "==> [binutils-bootstrap] Pós-instalação concluída."
-}
+    echo "---- ${target}-ld --version ----"
+    if ! "${target}-ld" --version >/dev/null 2>&1; then
+        echo "ERRO: ${target}-ld --version falhou."
+        exit 1
+    fi
 
-# A função build() acima apenas compila.
-# O adm.sh vai chamar create_binary_pkg() e instalar o tarball
-# no rootfs do profile atual (ex.: /opt/adm/profiles/bootstrap/rootfs).
-make_install() {
-    # Função auxiliar opcional, caso você queira chamar manualmente
-    cd "$PKG_BUILD_WORK/build"
-    make install DESTDIR="$PKG_BUILD_ROOT"
+    # 4) Opcional: cria um pequeno assembly e monta com o as do target
+    local test_s="dummy-binutils-pass1.s"
+    local test_o="dummy-binutils-pass1.o"
+
+    cat > "$test_s" <<'EOF'
+    .global _start
+_start:
+    .byte 0
+EOF
+
+    if ! "${target}-as" "$test_s" -o "$test_o"; then
+        echo "ERRO: ${target}-as falhou ao montar dummy-binutils-pass1.s"
+        rm -f "$test_s" "$test_o"
+        exit 1
+    fi
+
+    echo "Sanity-check Binutils Pass 1 (${PKG_VERSION}) OK."
+    rm -f "$test_s" "$test_o"
 }
