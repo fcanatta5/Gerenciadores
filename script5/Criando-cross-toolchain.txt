@@ -17,3 +17,32 @@ sudo ./adm.sh init                 # inicializa estrutura em /opt/adm
 sudo mkdir -p /opt/adm/recipes
 sudo chown -R "$(id -u)":"$(id -g)" /opt/adm/recipes
 
+#############################################################################################
+
+Profile bootstrap:
+
+./adm.sh profile set bootstrap
+
+Instala linux-headers, binutils-bootstrap, gcc-bootstrap em /opt/adm/profiles/bootstrap/rootfs.
+
+Toolchain fica em /opt/adm/profiles/bootstrap/rootfs/tools.
+
+
+Profile glibc:
+
+./adm.sh profile set glibc
+
+glibc.sh usa PATH=/opt/adm/profiles/bootstrap/rootfs/tools/bin:$PATH.
+
+Instala glibc em /opt/adm/profiles/glibc/rootfs.
+
+
+Profile musl:
+
+./adm.sh profile set musl
+
+musl.sh usa o mesmo toolchain bootstrap.
+
+Instala musl em /opt/adm/profiles/musl/rootfs.
+
+
