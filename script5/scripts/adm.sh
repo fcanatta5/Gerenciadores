@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# adm.sh - Source-based package manager for style systems
+# adm.sh - Source-based package manager for LFS-like systems
 #
-# Features:
-# - Source and binary cache
-# - Build scripts with hooks (pre/post build/install)
-# - Separate rootfs per profile (e.g. glibc, musl, bootstrap)
-# - Category-based recipes: $ADM_ROOT/packages/<category>/<name>-<version>.sh
-# - Dependency management, reverse deps, cycle detection
-# - Logging and basic sanity checks
+# Contract (important):
+# - Recipes live in:  $ADM_ROOT/packages/<category>/<name>-<version>.sh
+# - Recipes must define: PKG_NAME, PKG_VERSION (and usually PKG_DESC/PKG_DEPENDS/PKG_CATEGORY)
+# - Recipes must install into: DESTDIR="$PKG_BUILD_ROOT"
+# - adm packs PKG_BUILD_ROOT -> binary tar.xz -> extracts into $PKG_ROOTFS (profile rootfs)
+# - Profiles:
+#     $ADM_ROOT/profiles/<profile>/rootfs
+#     $ADM_ROOT/profiles/<profile>/env.sh (optional; auto-sourced)
+#
 set -euo pipefail
+set -o errtrace
 
+IFS=$' \t\n'
+
+# -----------------------------------------------------------------------------
 # Global defaults (can be overridden in /etc/adm.conf or $HOME/.adm.conf)
+# -----------------------------------------------------------------------------
+
 ADM_ROOT_DEFAULT="/opt/adm"
 
 ADM_ROOT="${ADM_ROOT:-$ADM_ROOT_DEFAULT}"
@@ -20,15 +28,20 @@ ADM_BIN_CACHE="${ADM_ROOT}/binaries"
 ADM_BUILD_DIR="${ADM_ROOT}/build"
 ADM_LOG_DIR="${ADM_ROOT}/log"
 
-# Receitas por categoria:
-#   $ADM_ROOT/packages/<categoria>/<nome>-<versao>.sh
 ADM_PKG_DIR="${ADM_ROOT}/packages"
-
 ADM_PROFILE_DIR="${ADM_ROOT}/profiles"
+
 ADM_CONFIG_SYS="/etc/adm.conf"
 ADM_CONFIG_USER="${HOME:-/root}/.adm.conf"
 
 ADM_CURRENT_PROFILE_FILE="${ADM_ROOT}/current_profile"
+
+# lock file (prevents concurrent installs/builds into same cache/rootfs)
+ADM_LOCK_FILE="${ADM_ROOT}/adm.lock"
+
+# behavior toggles
+ADM_ALLOW_EMPTY_PKG="${ADM_ALLOW_EMPTY_PKG:-0}"  # set 1 to allow packaging empty PKG_BUILD_ROOT
+ADM_TAR_EXTRACT_SAFETY="${ADM_TAR_EXTRACT_SAFETY:-1}" # 1: --no-same-owner/permissions on extract
 
 umask 022
 
@@ -75,10 +88,25 @@ die() {
   exit "$code"
 }
 
+warn() {
+  log "WARN" "$*"
+}
+
+info() {
+  log "INFO" "$*"
+}
+
 ensure_dir() {
   local d
   for d in "$@"; do
     [ -d "$d" ] || mkdir -p "$d"
+  done
+}
+
+require_cmd() {
+  local c
+  for c in "$@"; do
+    command -v "$c" >/dev/null 2>&1 || die 1 "Required command not found: $c"
   done
 }
 
@@ -111,20 +139,38 @@ get_rootfs_dir() {
   printf '%s\n' "${ADM_PROFILE_DIR}/${profile}/rootfs"
 }
 
-# Aplica ambiente do profile atual (PATH, ROOTFS, env extra de env.sh)
+# Acquire a filesystem lock (best-effort portability)
+acquire_lock() {
+  ensure_dir "$ADM_ROOT"
+  exec 9>"$ADM_LOCK_FILE"
+  if command -v flock >/dev/null 2>&1; then
+    flock -n 9 || die 1 "Another adm instance is running (lock: $ADM_LOCK_FILE)"
+  else
+    # Fallback: mkdir lockdir (atomic on POSIX)
+    local lockdir="${ADM_LOCK_FILE}.d"
+    if ! mkdir "$lockdir" 2>/dev/null; then
+      die 1 "Another adm instance is running (lockdir: $lockdir)"
+    fi
+    # Ensure cleanup on exit
+    trap 'rmdir "'"$lockdir"'" 2>/dev/null || true' EXIT
+  fi
+}
+
+# Apply profile environment (PATH, ROOTFS, env extra from env.sh)
 apply_profile_env() {
-  local profile rootfs path_prefix env_file
+  local profile rootfs env_file
   profile="$(get_current_profile)"
   rootfs="$(get_rootfs_dir "$profile")"
 
   export ADM_CURRENT_PROFILE="$profile"
   export ADM_CURRENT_ROOTFS="$rootfs"
 
-  path_prefix="${rootfs}/tools/bin:${rootfs}/usr/bin:${rootfs}/bin"
+  # Prefix PATH idempotently
+  local prefix="${rootfs}/tools/bin:${rootfs}/usr/bin:${rootfs}/bin"
   case ":${PATH:-}:" in
-    *":${rootfs}/tools/bin:"*) ;;
+    *":${rootfs}/tools/bin:"*) : ;;
     *)
-      export PATH="${path_prefix}:${PATH:-}"
+      export PATH="${prefix}:${PATH:-}"
       ;;
   esac
 
@@ -144,7 +190,8 @@ sanitize_var_key() {
 on_error() {
   local exit_code=$?
   local last_cmd="${BASH_COMMAND:-unknown}"
-  log "ERROR" "Unexpected error (code=$exit_code) in command: $last_cmd"
+  local line="${BASH_LINENO[0]:-?}"
+  log "ERROR" "Unexpected error (code=$exit_code) at line $line: $last_cmd"
   exit "$exit_code"
 }
 trap on_error ERR
@@ -172,6 +219,8 @@ pkg_field() {
   [ -f "$meta" ] || return 1
   # shellcheck disable=SC1090
   . "$meta"
+  # field name is controlled by adm; still guard against empty
+  [ -n "$field" ] || return 1
   eval "printf '%s' \"\${$field-}\""
 }
 
@@ -180,12 +229,14 @@ pkg_list_installed() {
   local d="${ADM_DB_DIR}/${profile}"
   [ -d "$d" ] || return 0
   local meta pkg
+  shopt -s nullglob
   for meta in "$d"/*.meta; do
     [ -e "$meta" ] || continue
     pkg="${meta##*/}"
     pkg="${pkg%.meta}"
-    echo "$pkg"
+    printf '%s\n' "$pkg"
   done
+  shopt -u nullglob
 }
 
 pkg_reverse_deps() {
@@ -193,6 +244,7 @@ pkg_reverse_deps() {
   local d="${ADM_DB_DIR}/${profile}"
   [ -d "$d" ] || return 0
   local meta deps dname p
+  shopt -s nullglob
   for meta in "$d"/*.meta; do
     [ -e "$meta" ] || continue
     # shellcheck disable=SC1090
@@ -202,18 +254,19 @@ pkg_reverse_deps() {
       if [ "$dname" = "$target" ]; then
         p="${meta##*/}"
         p="${p%.meta}"
-        echo "$p"
+        printf '%s\n' "$p"
         break
       fi
     done
   done
+  shopt -u nullglob
 }
 
 # -----------------------------------------------------------------------------
 # Recipe path helpers (categorias / packages)
 # -----------------------------------------------------------------------------
 
-# Converte spec textual em (categoria, nome, versao)
+# spec -> (category, name, version)
 parse_pkg_spec() {
   local spec="$1"
   local category="" name version=""
@@ -234,47 +287,38 @@ parse_pkg_spec() {
   printf '%s %s %s\n' "$category" "$name" "$version"
 }
 
-# Dado um path $ADM_ROOT/packages/<cat>/<nome>-<versao>.sh
-# extrai (categoria, nome, versao) permitindo vários hífens no nome:
-# a primeira ocorrência de "-" seguida de dígito marca o início da versão.
+# path: $ADM_ROOT/packages/<cat>/<name>-<version>.sh
+# robust split: first '-' where next char is a digit -> start of version
 recipe_parse_path() {
   local path="$1"
-  local category base parsed name ver
+  local category base name ver i ch next
   category="$(basename "$(dirname "$path")")"
   base="${path##*/}"
   base="${base%.sh}"
 
-  parsed="$(printf '%s\n' "$base" | awk '
-    {
-      name=$0; ver="";
-      for (i=1; i<=length($0); i++) {
-        if (substr($0,i,1)=="-" && i<length($0) && substr($0,i+1,1) ~ /[0-9]/) {
-          name=substr($0,1,i-1);
-          ver=substr($0,i+1);
-          break;
-        }
-      }
-      printf "%s %s", name, ver;
-    }
-  ')"
+  name="$base"
+  ver=""
 
-  name="${parsed%% *}"
-  ver="${parsed#* }"
+  for ((i=0; i<${#base}; i++)); do
+    ch="${base:i:1}"
+    next="${base:i+1:1}"
+    if [ "$ch" = "-" ] && [[ "$next" =~ [0-9] ]]; then
+      name="${base:0:i}"
+      ver="${base:i+1}"
+      break
+    fi
+  done
 
   printf '%s %s %s\n' "$category" "$name" "$ver"
 }
 
-# Localiza a melhor receita para um spec:
-#   nome
-#   categoria/nome
-#   nome@versao
-#   categoria/nome@versao
+# find best recipe for spec
 find_recipe() {
   local spec="$1"
   local category name version
   read -r category name version < <(parse_pkg_spec "$spec")
 
-  local best_path="" best_ver="" best_cat=""
+  local best_path="" best_ver=""
   local f c n v
 
   if [ -n "$category" ]; then
@@ -288,11 +332,11 @@ find_recipe() {
         continue
       fi
       if [ -z "$best_path" ]; then
-        best_path="$f"; best_ver="$v"; best_cat="$c"
+        best_path="$f"; best_ver="$v"
       else
         if [ -n "$v" ] && [ "$(printf '%s\n' "$best_ver" "$v" | sort -V | tail -n1)" = "$v" ] \
            && [ "$v" != "$best_ver" ]; then
-          best_path="$f"; best_ver="$v"; best_cat="$c"
+          best_path="$f"; best_ver="$v"
         fi
       fi
     done
@@ -306,11 +350,11 @@ find_recipe() {
         continue
       fi
       if [ -z "$best_path" ]; then
-        best_path="$f"; best_ver="$v"; best_cat="$c"
+        best_path="$f"; best_ver="$v"
       else
         if [ -n "$v" ] && [ "$(printf '%s\n' "$best_ver" "$v" | sort -V | tail -n1)" = "$v" ] \
            && [ "$v" != "$best_ver" ]; then
-          best_path="$f"; best_ver="$v"; best_cat="$c"
+          best_path="$f"; best_ver="$v"
         fi
       fi
     done
@@ -333,46 +377,46 @@ find_recipe() {
 }
 
 # -----------------------------------------------------------------------------
-# Dependency resolution and cycle detection
+# Dependency resolution and cycle detection (no eval; robust)
 # -----------------------------------------------------------------------------
 
-resolve_deps_dfs() {
-  local profile="$1" spec="$2"
+# We track visited/stack by PKG_NAME (logical name), not by spec.
+declare -A ADM_VISITED=()
+declare -A ADM_STACK=()
 
-  # Carrega receita para obter PKG_NAME e PKG_DEPENDS
+resolve_deps_dfs() {
+  local _profile="$1" spec="$2"   # _profile kept for future compatibility
   load_recipe "$spec"
 
   local key
   key="$(sanitize_var_key "$PKG_NAME")"
-  local visited_var="VISITED_${key}"
-  local stack_var="STACK_${key}"
 
-  eval "local visited_flag=\${$visited_var:-0}"
-  if [ "$visited_flag" -eq 1 ]; then
+  if [ "${ADM_VISITED[$key]:-0}" = "1" ]; then
     return 0
   fi
-
-  eval "local in_stack_flag=\${$stack_var:-0}"
-  if [ "$in_stack_flag" -eq 1 ]; then
+  if [ "${ADM_STACK[$key]:-0}" = "1" ]; then
     die 1 "Cycle detected in dependencies at package '$PKG_NAME'"
   fi
 
-  eval "$stack_var=1"
+  ADM_STACK["$key"]="1"
 
-  local deps="${PKG_DEPENDS:-}"
-  local dep
+  local deps dep
+  deps="${PKG_DEPENDS:-}"
   for dep in $deps; do
-    resolve_deps_dfs "$profile" "$dep"
+    resolve_deps_dfs "$_profile" "$dep"
   done
 
-  eval "$stack_var=0"
-  eval "$visited_var=1"
+  ADM_STACK["$key"]="0"
+  ADM_VISITED["$key"]="1"
 
-  echo "$PKG_NAME"
+  printf '%s\n' "$PKG_NAME"
 }
 
 resolve_dep_chain() {
   local profile="$1" spec="$2"
+  # reset maps per resolution
+  ADM_VISITED=()
+  ADM_STACK=()
   resolve_deps_dfs "$profile" "$spec" | awk 'NF'
 }
 
@@ -400,39 +444,71 @@ load_recipe() {
   fi
 }
 
+# fetch_source(url, filename, [sha256])
 fetch_source() {
   local url="$1"
   local fname="$2"
+  local sha256="${3:-}"
+
   ensure_dir "$ADM_SRC_CACHE"
   local dst="${ADM_SRC_CACHE}/${fname}"
+
   if [ -f "$dst" ]; then
-    log "INFO" "Using cached source: $dst"
+    info "Using cached source: $dst"
   else
-    if ! command -v curl >/dev/null 2>&1; then
-      die 1 "curl not found, required to download sources"
-    fi
-    log "INFO" "Downloading source: $url -> $dst"
+    require_cmd curl
+    info "Downloading source: $url -> $dst"
     curl -fL "$url" -o "$dst"
   fi
-  echo "$dst"
+
+  if [ -n "$sha256" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      local got
+      got="$(sha256sum "$dst" | awk '{print $1}')"
+      [ "$got" = "$sha256" ] || die 1 "SHA256 mismatch for $dst (got=$got expected=$sha256)"
+    else
+      warn "sha256sum not available; cannot verify checksum for $dst"
+    fi
+  fi
+
+  printf '%s\n' "$dst"
 }
 
 create_binary_pkg() {
   local pkg="$1" version="$2" build_root="$3"
   ensure_dir "$ADM_BIN_CACHE"
+
+  if [ ! -d "$build_root" ]; then
+    die 1 "Build root does not exist: $build_root"
+  fi
+
+  # fail on empty packages (common silent error in recipes)
+  if [ "$ADM_ALLOW_EMPTY_PKG" != "1" ]; then
+    if ! find "$build_root" -mindepth 1 -print -quit | grep -q .; then
+      die 1 "Refusing to package empty build root for ${pkg}-${version}. Recipe likely forgot DESTDIR install."
+    fi
+  fi
+
   local out="${ADM_BIN_CACHE}/${pkg}-${version}.tar.xz"
-  log "INFO" "Creating binary package: $out"
+  info "Creating binary package: $out"
   ( cd "$build_root" && tar -cJf "$out" . )
-  echo "$out"
+  printf '%s\n' "$out"
 }
 
 install_binary_pkg() {
-  local profile="$1" pkg="$2" version="$3" tarball="$4"
+  local profile="$1" _pkg="$2" _version="$3" tarball="$4"
   local rootfs
   rootfs="$(get_rootfs_dir "$profile")"
   ensure_dir "$rootfs"
-  log "INFO" "Installing $pkg-$version into rootfs: $rootfs"
-  tar -xJf "$tarball" -C "$rootfs"
+
+  [ -f "$tarball" ] || die 1 "Tarball not found: $tarball"
+
+  info "Installing ${_pkg}-${_version} into rootfs: $rootfs"
+  if [ "$ADM_TAR_EXTRACT_SAFETY" = "1" ]; then
+    tar -xJf "$tarball" -C "$rootfs" --no-same-owner --no-same-permissions
+  else
+    tar -xJf "$tarball" -C "$rootfs"
+  fi
 }
 
 write_pkg_meta() {
@@ -442,8 +518,10 @@ write_pkg_meta() {
   local rootfs
   rootfs="$(get_rootfs_dir "$profile")"
   ensure_dir "${ADM_DB_DIR}/${profile}"
+
   local meta
   meta="$(pkg_meta_path "$profile" "$pkg")"
+
   cat > "$meta" <<EOF
 PKG_NAME="$pkg"
 VERSION="$version"
@@ -459,7 +537,7 @@ EOF
 record_manifest_from_tar() {
   local profile="$1" pkg="$2" tarball="$3"
   local manifest="${ADM_DB_DIR}/${profile}/${pkg}.manifest"
-  log "INFO" "Recording manifest for $pkg from tarball"
+  info "Recording manifest for $pkg from tarball"
   ensure_dir "${ADM_DB_DIR}/${profile}"
   tar -tJf "$tarball" | sed 's|^\./||' > "$manifest"
 }
@@ -469,28 +547,36 @@ remove_pkg_files() {
   local meta
   meta="$(pkg_meta_path "$profile" "$pkg")"
   [ -f "$meta" ] || die 1 "Package '$pkg' not installed for profile '$profile'"
+
   # shellcheck disable=SC1090
   . "$meta"
+
   local rootfs="${ROOTFS:?}"
   local manifest="${ADM_DB_DIR}/${profile}/${pkg}.manifest"
 
   if [ -f "$manifest" ]; then
-    log "INFO" "Removing files from manifest for $pkg"
+    info "Removing files from manifest for $pkg"
     local f d
     while IFS= read -r f; do
       [ -n "$f" ] || continue
+      # normalize possible leading ./ from old manifests
+      f="${f#./}"
       if [ -f "${rootfs}/${f}" ] || [ -L "${rootfs}/${f}" ]; then
         rm -f "${rootfs}/${f}"
       fi
     done < "$manifest"
+
+    # attempt to remove empty dirs (best effort)
     if command -v tac >/dev/null 2>&1; then
       tac "$manifest" 2>/dev/null | while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        f="${f#./}"
         d="${rootfs}/${f%/*}"
         [ -d "$d" ] && rmdir "$d" 2>/dev/null || true
       done
     fi
   else
-    log "WARN" "No manifest available for $pkg; skipping file removal"
+    warn "No manifest available for $pkg; skipping file removal"
   fi
 
   rm -f "$meta" "${ADM_DB_DIR}/${profile}/${pkg}.manifest"
@@ -503,13 +589,15 @@ remove_pkg_files() {
 cmd_init() {
   ensure_dir "$ADM_ROOT" "$ADM_DB_DIR" "$ADM_SRC_CACHE" "$ADM_BIN_CACHE" \
              "$ADM_BUILD_DIR" "$ADM_LOG_DIR" "$ADM_PROFILE_DIR" "$ADM_PKG_DIR"
+
   if [ ! -f "$ADM_CURRENT_PROFILE_FILE" ]; then
     set_current_profile "glibc"
   fi
+
   local profile
   profile="$(get_current_profile)"
   ensure_dir "${ADM_DB_DIR}/${profile}" "$(get_rootfs_dir "$profile")"
-  log "INFO" "Initialized adm root at $ADM_ROOT with profile '$profile'"
+  info "Initialized adm root at $ADM_ROOT with profile '$profile'"
 }
 
 cmd_profile() {
@@ -517,9 +605,12 @@ cmd_profile() {
   case "$action" in
     list)
       ensure_dir "$ADM_PROFILE_DIR"
+      local found=0
       local d p
+      shopt -s nullglob
       for d in "$ADM_PROFILE_DIR"/*; do
         [ -d "$d" ] || continue
+        found=1
         p="${d##*/}"
         if [ "$p" = "$(get_current_profile)" ]; then
           echo "* $p"
@@ -527,13 +618,15 @@ cmd_profile() {
           echo "  $p"
         fi
       done
+      shopt -u nullglob
+      [ "$found" -eq 1 ] || echo "(no profiles found)"
       ;;
     set)
       local p="${2:-}"
       [ -n "$p" ] || die 1 "Usage: adm.sh profile set <name>"
       ensure_dir "${ADM_PROFILE_DIR}/${p}" "${ADM_DB_DIR}/${p}" "$(get_rootfs_dir "$p")"
       set_current_profile "$p"
-      log "INFO" "Current profile set to '$p'"
+      info "Current profile set to '$p'"
       ;;
     show|"")
       echo "$(get_current_profile)"
@@ -547,13 +640,15 @@ cmd_profile() {
 cmd_list() {
   local profile
   profile="$(get_current_profile)"
+
   local pkg ver desc cat
-  for pkg in $(pkg_list_installed "$profile"); do
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
     ver="$(pkg_field "$profile" "$pkg" VERSION || echo '?')"
     desc="$(pkg_field "$profile" "$pkg" DESC || echo '')"
     cat="$(pkg_field "$profile" "$pkg" CATEGORY || echo '')"
     printf '%-20s %-10s %-15s %s\n' "$pkg" "$ver" "$cat" "$desc"
-  done
+  done < <(pkg_list_installed "$profile")
 }
 
 cmd_info() {
@@ -577,6 +672,7 @@ cmd_search() {
   local pattern="${1:-}"
   [ -n "$pattern" ] || die 1 "Usage: adm.sh search <pattern>"
   ensure_dir "$ADM_PKG_DIR"
+
   local f c n v
   shopt -s nullglob
   for f in "$ADM_PKG_DIR"/*/*.sh; do
@@ -594,7 +690,10 @@ cmd_search() {
 
 cmd_build() {
   local spec="${1:-}"
-  [ -n "$spec" ] || die 1 "Usage: adm.sh build <pkg>"
+  [ -n "$spec" ] || die 1 "Usage: adm.sh build <pkg-spec>"
+
+  acquire_lock
+
   local profile
   profile="$(get_current_profile)"
   load_recipe "$spec"
@@ -605,38 +704,41 @@ cmd_build() {
   rm -rf "$build_root" "$build_work"
   ensure_dir "$build_root" "$build_work"
 
-  PKG_BUILD_ROOT="$build_root"
-  PKG_BUILD_WORK="$build_work"
-  PKG_PROFILE="$profile"
+  export PKG_BUILD_ROOT="$build_root"
+  export PKG_BUILD_WORK="$build_work"
+  export PKG_PROFILE="$profile"
+  export PKG_ROOTFS
   PKG_ROOTFS="$(get_rootfs_dir "$profile")"
+  export PKG_ROOTFS
 
-  if type pre_build 2>/dev/null 1>&2; then
-    log "INFO" "Running pre_build hook for $PKG_NAME"
+  if type pre_build >/dev/null 2>&1; then
+    info "Running pre_build hook for $PKG_NAME"
     pre_build
   fi
 
-  if type build 2>/dev/null 1>&2; then
-    log "INFO" "Running build() for $PKG_NAME"
+  if type build >/dev/null 2>&1; then
+    info "Running build() for $PKG_NAME"
     build
   else
     die 1 "Recipe for '$PKG_NAME' does not define build()"
   fi
 
-  if type post_build 2>/dev/null 1>&2; then
-    log "INFO" "Running post_build hook for $PKG_NAME"
+  if type post_build >/dev/null 2>&1; then
+    info "Running post_build hook for $PKG_NAME"
     post_build
   fi
 
   local tarball
   tarball="$(create_binary_pkg "$PKG_NAME" "$PKG_VERSION" "$build_root")"
-  echo "$tarball"
+  printf '%s\n' "$tarball"
 }
 
 cmd_install_one_from_tar() {
   local profile="$1" pkg="$2" version="$3" desc="$4" deps="$5" libc="$6" category="$7" tarball="$8"
 
-  if type pre_install 2>/dev/null 1>&2; then
-    log "INFO" "Running pre_install hook for $pkg"
+  # Hooks belong to the recipe currently loaded
+  if type pre_install >/dev/null 2>&1; then
+    info "Running pre_install hook for $pkg"
     pre_install
   fi
 
@@ -644,27 +746,30 @@ cmd_install_one_from_tar() {
   record_manifest_from_tar "$profile" "$pkg" "$tarball"
   write_pkg_meta "$profile" "$pkg" "$version" "$desc" "$deps" "$libc" "$category"
 
-  if type post_install 2>/dev/null 1>&2; then
-    log "INFO" "Running post_install hook for $pkg"
+  if type post_install >/dev/null 2>&1; then
+    info "Running post_install hook for $pkg"
     post_install
   fi
 }
 
 cmd_install() {
   local spec="${1:-}"
-  [ -n "$spec" ] || die 1 "Usage: adm.sh install <pkg>"
+  [ -n "$spec" ] || die 1 "Usage: adm.sh install <pkg-spec>"
+
+  acquire_lock
+
   local profile
   profile="$(get_current_profile)"
 
-  # Carrega receita do alvo para saber o PKG_NAME lógico
+  # Load target recipe to identify logical PKG_NAME
   load_recipe "$spec"
   local target_name="$PKG_NAME"
 
-  log "INFO" "Resolving dependencies for $spec"
+  info "Resolving dependencies for $spec"
   local ordered dep
   ordered="$(resolve_dep_chain "$profile" "$spec")"
 
-  # Instala dependências (todos menos o alvo)
+  # Install deps (excluding target)
   for dep in $ordered; do
     if [ "$dep" = "$target_name" ]; then
       continue
@@ -672,30 +777,37 @@ cmd_install() {
     if pkg_is_installed "$profile" "$dep"; then
       continue
     fi
-    log "INFO" "Building dependency '$dep'"
+
+    info "Building dependency '$dep'"
     load_recipe "$dep"
-    local dep_libc dep_tar dep_cat
+
+    local dep_libc dep_cat dep_tar
     dep_libc="${PKG_LIBC:-$profile}"
     dep_cat="${PKG_CATEGORY:-uncategorized}"
     dep_tar="$(cmd_build "$dep")"
+
     cmd_install_one_from_tar "$profile" "$PKG_NAME" "$PKG_VERSION" "${PKG_DESC:-}" \
-                              "${PKG_DEPENDS:-}" "$dep_libc" "$dep_cat" "$dep_tar"
+                             "${PKG_DEPENDS:-}" "$dep_libc" "$dep_cat" "$dep_tar"
   done
 
-  # Agora instala o alvo respeitando o spec original (categoria/versão)
-  log "INFO" "Building target package '$spec'"
+  # Install target using original spec (category/version)
+  info "Building target package '$spec'"
   load_recipe "$spec"
+
   local libc cat pkg_tar
   libc="${PKG_LIBC:-$profile}"
   cat="${PKG_CATEGORY:-uncategorized}"
   pkg_tar="$(cmd_build "$spec")"
+
   cmd_install_one_from_tar "$profile" "$PKG_NAME" "$PKG_VERSION" "${PKG_DESC:-}" \
-                            "${PKG_DEPENDS:-}" "$libc" "$cat" "$pkg_tar"
+                           "${PKG_DEPENDS:-}" "$libc" "$cat" "$pkg_tar"
 }
 
 cmd_remove() {
   local pkg="${1:-}"
   [ -n "$pkg" ] || die 1 "Usage: adm.sh remove <pkg>"
+  acquire_lock
+
   local profile
   profile="$(get_current_profile)"
   if ! pkg_is_installed "$profile" "$pkg"; then
@@ -705,60 +817,70 @@ cmd_remove() {
   local rdeps
   rdeps="$(pkg_reverse_deps "$profile" "$pkg" || true)"
   if [ -n "$rdeps" ]; then
-    log "WARN" "Following packages depend on '$pkg':"
+    warn "Following packages depend on '$pkg':"
     echo "$rdeps"
     die 1 "Refusing to remove '$pkg' while reverse dependencies exist"
   fi
 
-  log "INFO" "Removing package '$pkg' from profile '$profile'"
+  info "Removing package '$pkg' from profile '$profile'"
   remove_pkg_files "$profile" "$pkg"
 }
 
 cmd_update() {
   local pkg="${1:-}"
-  [ -z "$pkg" ] && die 1 "Usage: adm.sh update <pkg>"
+  [ -n "$pkg" ] || die 1 "Usage: adm.sh update <pkg>"
+  acquire_lock
+
   local profile
   profile="$(get_current_profile)"
   if ! pkg_is_installed "$profile" "$pkg"; then
     die 1 "Package '$pkg' is not installed for profile '$profile'"
   fi
-  log "INFO" "Updating package '$pkg'"
+
+  info "Updating package '$pkg'"
   cmd_remove "$pkg"
   cmd_install "$pkg"
 }
 
 cmd_clean() {
   local what="${1:-all}"
+
+  # Prevent "rm: cannot remove '/path/*': No such file or directory" under set -e
+  shopt -s nullglob
+
   case "$what" in
     src|sources)
       rm -rf "$ADM_SRC_CACHE"/*
-      log "INFO" "Source cache cleaned"
+      info "Source cache cleaned"
       ;;
     bin|binaries)
       rm -rf "$ADM_BIN_CACHE"/*
-      log "INFO" "Binary cache cleaned"
+      info "Binary cache cleaned"
       ;;
     build)
       rm -rf "$ADM_BUILD_DIR"/*
-      log "INFO" "Build directory cleaned"
+      info "Build directory cleaned"
       ;;
     logs)
       rm -rf "$ADM_LOG_DIR"/*
-      log "INFO" "Logs cleaned"
+      info "Logs cleaned"
       ;;
     all)
       rm -rf "$ADM_SRC_CACHE"/* "$ADM_BIN_CACHE"/* "$ADM_BUILD_DIR"/* "$ADM_LOG_DIR"/*
-      log "INFO" "All caches/build/logs cleaned"
+      info "All caches/build/logs cleaned"
       ;;
     *)
+      shopt -u nullglob
       die 1 "Unknown clean target '$what'"
       ;;
   esac
+
+  shopt -u nullglob
 }
 
 cmd_deps() {
   local spec="${1:-}"
-  [ -n "$spec" ] || die 1 "Usage: adm.sh deps <pkg>"
+  [ -n "$spec" ] || die 1 "Usage: adm.sh deps <pkg-spec>"
   local profile
   profile="$(get_current_profile)"
   resolve_dep_chain "$profile" "$spec"
@@ -810,33 +932,11 @@ Estrutura:
   Rootfs do perfil:  \$ADM_ROOT/profiles/<profile>/rootfs
   Env do perfil:     \$ADM_ROOT/profiles/<profile>/env.sh (opcional)
 
-Cada receita deve definir:
-  PKG_NAME, PKG_VERSION, PKG_DESC, PKG_DEPENDS (opcional),
-  PKG_LIBC (opcional), PKG_CATEGORY (opcional – se omitido é inferido do path)
-
-Exemplo de build():
-  build() {
-      src="\$(fetch_source \"URL\" \"arquivo.tar.xz\")"
-      mkdir -p "\$PKG_BUILD_WORK"
-      cd "\$PKG_BUILD_WORK"
-      tar xf "\$src"
-      cd "fonte-\$PKG_VERSION"
-      ./configure --prefix=/usr ...
-      make
-      make install DESTDIR="\$PKG_BUILD_ROOT"
-  }
-
-Hooks opcionais:
-  pre_build()  / post_build()
-  pre_install()/ post_install()
-
-Ambiente de profile:
-  - PATH é automaticamente prefixado com:
-      \$ADM_ROOT/profiles/<profile>/rootfs/tools/bin
-      \$ADM_ROOT/profiles/<profile>/rootfs/usr/bin
-      \$ADM_ROOT/profiles/<profile>/rootfs/bin
-  - Se existir \$ADM_ROOT/profiles/<profile>/env.sh, ele é carregado
-    automaticamente (útil para toolchain bootstrap, CFLAGS, etc.).
+Contrato das receitas:
+  - Definem: PKG_NAME, PKG_VERSION (PKG_DESC/PKG_DEPENDS/PKG_CATEGORY recomendados)
+  - Devem instalar em: DESTDIR="\$PKG_BUILD_ROOT"
+  - Prefix dentro do pacote é definido pela receita (ex.: --prefix=/tools, /usr, etc.)
+  - Hooks opcionais: pre_build/post_build/pre_install/post_install
 EOF
 }
 
@@ -848,6 +948,7 @@ main() {
   local cmd="${1:-}"
   shift || true
 
+  # Apply profile env (PATH + env.sh). If profile dirs don't exist yet, it's fine.
   apply_profile_env
 
   case "$cmd" in
