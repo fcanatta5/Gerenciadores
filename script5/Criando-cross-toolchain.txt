@@ -12,6 +12,67 @@
 ./adm.sh install toolchain/gcc-bootstrap@15.2.0
 ./adm.sh install toolchain/glibc@2.42
 
+# Uso com o adm_doctor
+./adm.sh profile set bootstrap
+/opt/adm/adm_doctor.sh
+# Se achar problemas
+/opt/adm/adm_doctor.sh --fix
+
+# Depois de cata etapa crítica 
+./adm.sh install toolchain/linux-headers@6.17.9
+/opt/adm/adm_doctor.sh
+
+./adm.sh install toolchain/binutils-bootstrap@2.45.1
+/opt/adm/adm_doctor.sh
+
+./adm.sh install toolchain/gcc-bootstrap@15.2.0
+/opt/adm/adm_doctor.sh
+
+# Antes de trocar de profile ou Construir coisas grandes
+./adm.sh profile set glibc
+/opt/adm/adm_doctor.sh --fix
+
+# Usar o doctor quando o build_dir crescer muito
+/opt/adm/adm_doctor.sh --fix --clean
+
+# Validar antes de install grande 
+/opt/adm/adm_doctor.sh || exit 1
+/opt/adm/adm_doctor.sh --fix
+/opt/adm/adm_doctor.sh || exit 1
+
+# Rodar com log
+/opt/adm/adm_doctor.sh --fix --clean | tee "/opt/adm/log/doctor-$(date +%F-%H%M).log"
+
+# Sempre que um build falhar
+/opt/adm/adm_doctor.sh --verbose
+
+# Sequência completa de build com glibc
+/opt/adm/setup_profiles.sh
+./adm.sh init
+
+./adm.sh profile set bootstrap
+/opt/adm/adm_doctor.sh --fix
+
+./adm.sh install toolchain/linux-headers@6.17.9
+/opt/adm/adm_doctor.sh
+
+./adm.sh install toolchain/binutils-bootstrap@2.45.1
+/opt/adm/adm_doctor.sh
+
+./adm.sh install toolchain/gcc-bootstrap@15.2.0
+/opt/adm/adm_doctor.sh
+
+./adm.sh profile set glibc
+/opt/adm/adm_doctor.sh --fix
+
+# repete toolchain no profile glibc (porque rootfs é separado)
+./adm.sh install toolchain/linux-headers@6.17.9
+./adm.sh install toolchain/binutils-bootstrap@2.45.1
+./adm.sh install toolchain/gcc-bootstrap@15.2.0
+
+./adm.sh install toolchain/glibc@2.42
+/opt/adm/adm_doctor.sh
+
 
 # certifique que o binutils-pass1 foi construído
 ./adm.sh profile set bootstrap
