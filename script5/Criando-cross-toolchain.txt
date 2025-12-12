@@ -73,6 +73,17 @@
 ./adm.sh install toolchain/glibc@2.42
 /opt/adm/adm_doctor.sh
 
+# Como usar o adm_chroot usar o doctor antes de entrar
+/opt/adm/adm_doctor.sh --fix
+/opt/adm/adm_chroot.sh mount glibc
+/opt/adm/adm_chroot.sh enter glibc
+# ... dentro do chroot:
+cd /opt/adm
+./adm.sh profile set glibc
+./adm.sh install base/...
+exit
+/opt/adm/adm_chroot.sh umount glibc
+
 
 # certifique que o binutils-pass1 foi construído
 ./adm.sh profile set bootstrap
