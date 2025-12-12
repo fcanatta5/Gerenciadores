@@ -1,3 +1,11 @@
+# Construindo com musl
+./adm.sh profile set musl
+./adm.sh install toolchain/linux-headers@6.17.9
+./adm.sh install toolchain/binutils-bootstrap@2.45.1
+./adm.sh install toolchain/gcc-bootstrap@15.2.0
+./adm.sh install toolchain/musl@1.2.5
+
+
 # certifique que o binutils-pass1 foi construído
 ./adm.sh profile set bootstrap
 ./adm.sh install toolchain/binutils-bootstrap@2.45.1
