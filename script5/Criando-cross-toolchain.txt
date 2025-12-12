@@ -5,6 +5,13 @@
 ./adm.sh install toolchain/gcc-bootstrap@15.2.0
 ./adm.sh install toolchain/musl@1.2.5
 
+# Construir com glibc
+./adm.sh profile set glibc
+./adm.sh install toolchain/linux-headers@6.17.9
+./adm.sh install toolchain/binutils-bootstrap@2.45.1
+./adm.sh install toolchain/gcc-bootstrap@15.2.0
+./adm.sh install toolchain/glibc@2.42
+
 
 # certifique que o binutils-pass1 foi construído
 ./adm.sh profile set bootstrap
