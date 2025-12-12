@@ -1,0 +1,18 @@
+# Como usar com o ADM
+
+1. Crie um rootfs para LFS (exemplo lfs) e um profile tools:
+
+adm init
+adm rootfs-create lfs
+
+# Exemplo de target "LFS-style". Você pode usar outro triple, desde que consistente no resto do toolchain.
+adm profile-create lfs tools temp \
+  --build x86_64-pc-linux-gnu \
+  --target x86_64-lfs-linux-gnu
+
+2. Selecione o contexto e instale:
+
+adm use lfs tools temp
+adm install binutils-pass1
+
+################################################################################################
