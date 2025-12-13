@@ -1,0 +1,18 @@
+# Inicializar 
+sudo /usr/adm/bin/adm init
+
+# Escolher profile target,build+install
+sudo /usr/adm/bin/adm build   --profile glibc.default --target x86_64-linux-gnu base/busybox-1.36.1
+sudo /usr/adm/bin/adm install --profile glibc.default --target x86_64-linux-gnu base/busybox-1.36.1
+
+# Buscar e ver info
+sudo /usr/adm/bin/adm search busybox
+sudo /usr/adm/bin/adm info base/busybox-1.36.1
+
+# Órfãos 
+sudo /usr/adm/bin/adm orphans --profile glibc.default --target x86_64-linux-gnu
+sudo /usr/adm/bin/adm orphans --profile glibc.default --target x86_64-linux-gnu --remove
+
+# Check,repara,reinstala programas do Word 
+sudo /usr/adm/bin/adm check --profile glibc.default --target x86_64-linux-gnu
+sudo /usr/adm/bin/adm check --profile glibc.default --target x86_64-linux-gnu --fix
