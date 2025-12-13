@@ -37,3 +37,11 @@ sudo adm build \
 # Construir e instalar
 sudo adm build --profile glibc.default --target aarch64-linux-gnu toolchain/gcc-15.2.0-pass1
 sudo adm install --profile glibc.default --target aarch64-linux-gnu toolchain/gcc-15.2.0-pass1
+
+# Construir com glibc
+sudo adm build   --profile glibc.default --target aarch64-linux-gnu base/gcc-15.2.0
+sudo adm install --profile glibc.default --target aarch64-linux-gnu base/gcc-15.2.0
+
+# Construir com musl
+sudo adm build   --profile musl.default --target aarch64-linux-musl base/gcc-15.2.0
+sudo adm install --profile musl.default --target aarch64-linux-musl base/gcc-15.2.0
