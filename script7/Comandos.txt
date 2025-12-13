@@ -33,3 +33,7 @@ sudo adm build \
   --profile glibc.default \
   --target aarch64-linux-gnu \
   toolchain/binutils-2.45.1-pass1
+
+# Construir e instalar
+sudo adm build --profile glibc.default --target aarch64-linux-gnu toolchain/gcc-15.2.0-pass1
+sudo adm install --profile glibc.default --target aarch64-linux-gnu toolchain/gcc-15.2.0-pass1
