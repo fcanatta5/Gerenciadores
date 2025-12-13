@@ -16,3 +16,20 @@ sudo /usr/adm/bin/adm orphans --profile glibc.default --target x86_64-linux-gnu 
 # Check,repara,reinstala programas do Word 
 sudo /usr/adm/bin/adm check --profile glibc.default --target x86_64-linux-gnu
 sudo /usr/adm/bin/adm check --profile glibc.default --target x86_64-linux-gnu --fix
+
+# Construir com x86_64
+sudo adm build \
+  --profile glibc.default \
+  --target x86_64-linux-gnu \
+  toolchain/binutils-2.45.1-pass1
+
+sudo adm install \
+  --profile glibc.default \
+  --target x86_64-linux-gnu \
+  toolchain/binutils-2.45.1-pass1
+
+# Cross-toolchain aarch64
+sudo adm build \
+  --profile glibc.default \
+  --target aarch64-linux-gnu \
+  toolchain/binutils-2.45.1-pass1
