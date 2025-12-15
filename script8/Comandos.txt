@@ -1,5 +1,21 @@
 # Como usar o adm.
 
+# Para construir a toolchain temporária corretamente
+# fora do chroot
+export ADM_MNT=/mnt/adm
+export ADM_TOOLS=/mnt/adm/tools
+export ADM_TGT=x86_64-linux-gnu
+
+adm build toolchain binutils 2.45.1-pass1
+adm build toolchain gcc 15.2.0-pass1
+adm build toolchain linux 6.18.1-headers
+adm build toolchain glibc 2.42-pass1
+
+# Para construir em chroot e final
+adm install base zlib 1.3.1
+
+##########
+
 # 1. (Opcional) configurar sync do repositório de scripts:
 
 export SYNC_REPO_URL="git@seu_servidor:seu_repo/adm-packages.git"
