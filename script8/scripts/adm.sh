@@ -28,6 +28,7 @@ SYNC_REPO_URL="${SYNC_REPO_URL:-}"        # ex: git@seu_repo:adm-packages.git
 SYNC_BRANCH="${SYNC_BRANCH:-main}"
 
 LOCK_FILE="${LOCK_FILE:-/var/lock/admpkg.lock}"
+REV_DB="$STATE_DIR/revdeps"
 
 # ferramentas mínimas
 REQUIRED_TOOLS=(bash tar zstd sha256sum md5sum find sed awk grep sort uniq xargs date mkdir rm cp ln readlink tac)
@@ -67,7 +68,7 @@ fi
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 LOG_FILE="$LOG_DIR/admpkg-$(date '+%Y%m%d').log"
-mkdir -p "$STATE_DIR" "$CACHE_DIR" "$LOG_DIR" "$SRC_CACHE" "$BIN_CACHE" "$SUM_CACHE" "$TMP_DIR" "$INST_DB" "$BUILD_DB"
+mkdir -p "$STATE_DIR" "$CACHE_DIR" "$LOG_DIR" "$SRC_CACHE" "$BIN_CACHE" "$SUM_CACHE" "$TMP_DIR" "$INST_DB" "$BUILD_DB" "$REV_DB"
 
 log() { printf '%s %s\n' "$(ts)" "$*" >>"$LOG_FILE"; }
 info() { printf '%b\n' "${C_CYAN}${C_BOLD}==>${C_RESET} $*"; log "INFO: $*"; }
@@ -177,6 +178,87 @@ is_installed() {
   [[ -d "$(installed_manifest_dir "$name" "$ver")" ]]
 }
 
+# -----------------------------------------------------------------------------
+# Reverse-deps DB (persistente)
+#   - Para cada pacote DEP (id), há um arquivo:
+#       $REV_DB/<dep-id>.rdeps
+#     contendo (um por linha) os pacotes que dependem dele.
+# -----------------------------------------------------------------------------
+
+revdeps_path() {
+  local dep_id="$1"
+  echo "$REV_DB/${dep_id}.rdeps"
+}
+
+revdeps_add() {
+  # uso: revdeps_add <dep_id> <dependent_id>
+  local dep_id="$1" dependent_id="$2"
+  local f; f="$(revdeps_path "$dep_id")"
+  run mkdir -p "$REV_DB"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "revdeps: adicionaria $dependent_id -> $dep_id"
+    return 0
+  fi
+  touch "$f"
+  grep -qxF "$dependent_id" "$f" 2>/dev/null || echo "$dependent_id" >>"$f"
+}
+
+revdeps_remove() {
+  # uso: revdeps_remove <dep_id> <dependent_id>
+  local dep_id="$1" dependent_id="$2"
+  local f; f="$(revdeps_path "$dep_id")"
+  [[ -f "$f" ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "revdeps: removeria $dependent_id -> $dep_id"
+    return 0
+  fi
+  grep -vxF "$dependent_id" "$f" >"$f.tmp" || true
+  mv "$f.tmp" "$f"
+  # limpa arquivo vazio
+  [[ -s "$f" ]] || rm -f "$f"
+}
+
+revdeps_list() {
+  # uso: revdeps_list <pkg_id>  (retorna dependentes)
+  local dep_id="$1"
+  local f; f="$(revdeps_path "$dep_id")"
+  [[ -f "$f" ]] || return 0
+  cat "$f"
+}
+
+revdeps_register_install() {
+  # uso: revdeps_register_install <pkg_id> <dep_ids...>
+  local pkg="$1"; shift || true
+  local dep
+  for dep in "$@"; do
+    [[ -n "$dep" ]] || continue
+    revdeps_add "$dep" "$pkg"
+  done
+}
+
+revdeps_unregister_remove() {
+  # uso: revdeps_unregister_remove <pkg_id> <dep_ids...>
+  local pkg="$1"; shift || true
+  local dep
+  for dep in "$@"; do
+    [[ -n "$dep" ]] || continue
+    revdeps_remove "$dep" "$pkg"
+  done
+}
+
+revdeps_from_manifest() {
+  # uso: revdeps_from_manifest <pkg_id>  -> imprime deps (ids) a partir do manifest.info
+  local pkg_id="$1"
+  local mf="$INST_DB/$pkg_id/manifest.info"
+  [[ -f "$mf" ]] || return 0
+  local deps
+  deps="$(grep -E '^deps=' "$mf" | cut -d= -f2- || true)"
+  # devolve como linhas
+  for d in $deps; do
+    echo "$d"
+  done
+}
+
 ###############################################################################
 # Descoberta de scripts de build
 ###############################################################################
@@ -214,6 +296,74 @@ lock_global() {
     exec 9>"$LOCK_FILE"
     flock -n 9 || die "Outro processo do adm está em execução (lock: $LOCK_FILE)."
   fi
+}
+
+# -----------------------------------------------------------------------------
+# Metadata sandbox: extrai variáveis sem "source" no processo principal.
+# Requer que o script não tenha efeitos colaterais no top-level (use lint para garantir).
+# -----------------------------------------------------------------------------
+
+meta_dump_sandbox() {
+  local script="$1"
+  [[ -f "$script" ]] || die "meta: script não encontrado: $script"
+
+  # Verifica sintaxe antes
+  bash -n "$script" || die "meta: erro de sintaxe em: $script"
+
+  # Rodar em subshell controlado e devolver somente metadata (declare -p)
+  # Importante: não executar build/install aqui.
+  bash -c "
+    set -Eeuo pipefail
+    shopt -s nullglob
+    source '$script'
+
+    # defaults defensivos
+    : \"\${PKG_NAME:=}\"
+    : \"\${PKG_VERSION:=}\"
+    : \"\${PKG_CATEGORY:=}\"
+    declare -p PKG_NAME PKG_VERSION PKG_CATEGORY 2>/dev/null || true
+    declare -p PKG_DEPENDS 2>/dev/null || echo 'declare -a PKG_DEPENDS=()'
+    declare -p PKG_SOURCES 2>/dev/null || echo 'declare -a PKG_SOURCES=()'
+    declare -p PKG_PATCHES 2>/dev/null || echo 'declare -a PKG_PATCHES=()'
+
+    # flags sobre funções (para validação)
+    if declare -F build >/dev/null 2>&1; then echo '__HAS_BUILD=1'; else echo '__HAS_BUILD=0'; fi
+    if declare -F install >/dev/null 2>&1; then echo '__HAS_INSTALL=1'; else echo '__HAS_INSTALL=0'; fi
+  "
+}
+
+meta_load_from_script() {
+  # Carrega metadata no processo atual SEM source do script:
+  # popula: META_PKG_NAME META_PKG_VERSION META_PKG_CATEGORY + arrays META_PKG_DEPENDS etc.
+  local script="$1"
+  local dump
+  dump="$(meta_dump_sandbox "$script")" || die "meta: falha ao extrair metadata: $script"
+
+  # Variáveis temporárias (no processo atual) vindas de declare -p
+  local __HAS_BUILD=0 __HAS_INSTALL=0
+  local PKG_NAME="" PKG_VERSION="" PKG_CATEGORY=""
+  local -a PKG_DEPENDS=() PKG_SOURCES=() PKG_PATCHES=()
+
+  # shellcheck disable=SC1090
+  eval "$dump"
+
+  # Exporta para nomes "META_*" para evitar colisão com ambiente
+  META_PKG_NAME="$PKG_NAME"
+  META_PKG_VERSION="$PKG_VERSION"
+  META_PKG_CATEGORY="$PKG_CATEGORY"
+  META_HAS_BUILD="$__HAS_BUILD"
+  META_HAS_INSTALL="$__HAS_INSTALL"
+  META_PKG_DEPENDS=("${PKG_DEPENDS[@]}")
+  META_PKG_SOURCES=("${PKG_SOURCES[@]}")
+  META_PKG_PATCHES=("${PKG_PATCHES[@]}")
+}
+
+meta_require_build_contract() {
+  # valida contrato mínimo: sources + build/install
+  local script="$1"
+  [[ "${#META_PKG_SOURCES[@]}" -gt 0 ]] || die "meta: PKG_SOURCES vazio/ausente em $script"
+  [[ "$META_HAS_BUILD" == "1" ]] || die "meta: build() ausente em $script"
+  [[ "$META_HAS_INSTALL" == "1" ]] || die "meta: install() ausente em $script"
 }
 
 ###############################################################################
@@ -287,28 +437,31 @@ resolve_deps_dfs() {
   elif [[ "$st" -eq 2 ]]; then
     return 0
   fi
-
   DEP_VISIT["$key"]=1
 
   local script; script="$(find_build_script "$category" "$pkg" "$ver")" || die "Script não encontrado: $category/$pkg-$ver"
 
-  # Carrega APENAS para ler PKG_DEPENDS; lint reduz risco (mas não elimina 100%).
-  # shellcheck disable=SC1090
-  source "$script"
-  local deps=("${PKG_DEPENDS[@]:-}")
+  # metadata via sandbox (sem poluir processo principal)
+  meta_load_from_script "$script"
 
+  local deps=("${META_PKG_DEPENDS[@]:-}")
   local d
   for d in "${deps[@]:-}"; do
     local dn dop dv
     IFS='|' read -r dn dop dv <<<"$(parse_dep "$d")"
+    [[ -n "$dn" ]] || die "Dependência inválida ($script): $d"
 
-    # se só nome (sem versão), aceitamos "qualquer instalada"; mas para build precisamos de script.
+    # Para build determinístico, exigimos versão no dep
     if [[ -z "$dv" ]]; then
-      die "Dependência sem versão não suportada no build (use nome-versao, nome@versao ou nome>=versao): $d (em $script)"
+      die "Dependência sem versão não suportada no build: $d (em $script)"
     fi
 
+    # (>= <= =) — para o grafo, pegamos a versão mínima/alvo do script correspondente.
+    # Implementação atual: exige existir script EXATO dn-dv.
+    # Se você quiser ">=X" buscar a maior disponível >=X, eu te passo uma função adicional.
     local dep_script; dep_script="$(find_any_category_script "$dn" "$dv")" || die "Dependência não encontrada nos scripts: $dn-$dv"
     local dep_cat; dep_cat="$(category_from_script "$dep_script")"
+
     resolve_deps_dfs "$dep_cat" "$dn" "$dv"
   done
 
@@ -617,8 +770,9 @@ install_pkg_from_cache() {
   # Carrega script para deps/metadata
   local script; script="$(find_build_script "$category" "$name" "$ver")" || die "Script não encontrado: $category/$name-$ver"
   # shellcheck disable=SC1090
-  source "$script"
-  local deps=("${PKG_DEPENDS[@]:-}")
+  # metadata via sandbox (sem source no processo principal)
+  meta_load_from_script "$script"
+  local deps=("${META_PKG_DEPENDS[@]:-}")
 
   # instala deps antes
   local d
@@ -695,19 +849,11 @@ remove_pkg() {
   local mdir; mdir="$(installed_manifest_dir "$name" "$ver")"
   [[ -d "$mdir" ]] || die "Não instalado: $id"
 
-  # impede remoção se outro pacote depende dele
-  local rdep=()
-  local mf
-  for mf in "$INST_DB"/*/manifest.info; do
-    [[ -f "$mf" ]] || continue
-    local deps
-    deps="$(grep -E '^deps=' "$mf" | cut -d= -f2- || true)"
-    if grep -qw "$id" <<<"$deps"; then
-      rdep+=("$(basename "$(dirname "$mf")")")
-    fi
-  done
-  if ((${#rdep[@]})); then
-    die "Remoção bloqueada: pacotes dependem de $id: ${rdep[*]}"
+  # bloqueio por reverse-deps DB (mais rápido e consistente)
+  local dependents
+  dependents="$(revdeps_list "$id" | tr '\n' ' ' || true)"
+  if [[ -n "${dependents// }" ]]; then
+    die "Remoção bloqueada: pacotes dependem de $id: $dependents"
   fi
 
   local files="$mdir/files.txt"
@@ -725,10 +871,9 @@ remove_pkg() {
     local abs="/$f"
     [[ "$abs" == "/" ]] && continue
     # proteção básica
-    if [[ "$abs" == "/etc/passwd" || "$abs" == "/etc/shadow" || "$abs" == "/bin/sh" ]]; then
-      warn "Protegido (não removido): $abs"
-      continue
-    fi
+    case "$abs" in
+      /etc/passwd|/etc/shadow|/bin/sh) warn "Protegido (não removido): $abs"; continue ;;
+    esac
     if [[ -e "$abs" || -L "$abs" ]]; then
       run rm -f "$abs" || true
     fi
@@ -740,7 +885,6 @@ remove_pkg() {
       [[ -z "$f" ]] && continue
       local abs="/$f"
       if [[ -d "$abs" ]]; then
-        # evita apagar diretórios "raízes" comuns
         case "$abs" in
           /|/usr|/usr/bin|/usr/lib|/usr/include|/bin|/sbin|/lib|/lib64|/etc|/var|/opt) continue ;;
         esac
@@ -749,8 +893,80 @@ remove_pkg() {
     done
   fi
 
+  # atualizar reverse-deps DB: remover referências (deps -> este pacote)
+  # precisamos dos deps deste pacote (ids) do manifest
+  local dep_ids=()
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] && dep_ids+=("$dep")
+  done < <(revdeps_from_manifest "$id" || true)
+
+  revdeps_unregister_remove "$id" "${dep_ids[@]:-}"
+
   run rm -rf "$mdir"
   info "Removido: $id"
+}
+
+is_orphan_pkgid() {
+  # órfão = instalado e ninguém depende dele (reverse-deps vazio)
+  local id="$1"
+  [[ -d "$INST_DB/$id" ]] || return 1
+  local dependents
+  dependents="$(revdeps_list "$id" || true)"
+  [[ -z "${dependents//[[:space:]]/}" ]]
+}
+
+remove_pkgid() {
+  # remove via name/ver
+  local id="$1"
+  local n="${id%-*}"
+  local v="${id##*-}"
+  remove_pkg "$n" "$v"
+}
+
+remove_deep() {
+  need_root
+  local name="$1" ver="$2"
+  local root_id; root_id="$(pkg_id "$name" "$ver")"
+
+  # fila de possíveis órfãos após remover root:
+  # estratégia: após remover um pacote, os deps dele podem virar órfãos.
+  local queue=()
+  local seen=()
+  declare -A SEEN=()
+
+  # coletar deps do root antes de remover
+  local initial_deps=()
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] && initial_deps+=("$dep")
+  done < <(revdeps_from_manifest "$root_id" || true)
+
+  remove_pkg "$name" "$ver"
+
+  queue=("${initial_deps[@]:-}")
+
+  while ((${#queue[@]})); do
+    local id="${queue[0]}"
+    queue=("${queue[@]:1}")
+
+    [[ -n "$id" ]] || continue
+    [[ -n "${SEEN[$id]:-}" ]] && continue
+    SEEN["$id"]=1
+
+    # só remove se órfão
+    if is_orphan_pkgid "$id"; then
+      # antes de remover, capturar deps dele para continuar cascata
+      local deps=()
+      while IFS= read -r dep; do
+        [[ -n "$dep" ]] && deps+=("$dep")
+      done < <(revdeps_from_manifest "$id" || true)
+
+      info "remove --deep: removendo órfão: $id"
+      remove_pkgid "$id"
+
+      # deps dele podem virar órfãos
+      queue+=("${deps[@]:-}")
+    fi
+  done
 }
 
 ###############################################################################
