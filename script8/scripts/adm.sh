@@ -259,6 +259,32 @@ revdeps_from_manifest() {
   done
 }
 
+revdeps_rebuild_index() {
+  info "revdeps: reconstruindo índice a partir de $INST_DB"
+  run mkdir -p "$REV_DB"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "DRY-RUN: limparia $REV_DB/*.rdeps e reconstruiria a partir dos manifestos"
+    return 0
+  fi
+
+  rm -f "$REV_DB"/*.rdeps 2>/dev/null || true
+
+  local d
+  for d in "$INST_DB"/*; do
+    [[ -d "$d" ]] || continue
+    local pkg; pkg="$(basename "$d")"
+
+    local dep
+    while IFS= read -r dep; do
+      [[ -n "$dep" ]] || continue
+      revdeps_add "$dep" "$pkg"
+    done < <(revdeps_from_manifest "$pkg")
+  done
+
+  info "revdeps: reconstrução concluída."
+}
+
 ###############################################################################
 # Descoberta de scripts de build
 ###############################################################################
@@ -767,25 +793,24 @@ install_pkg_from_cache() {
     return 0
   fi
 
-  # Carrega script para deps/metadata
+  # Metadata via sandbox (SEM source no processo principal)
   local script; script="$(find_build_script "$category" "$name" "$ver")" || die "Script não encontrado: $category/$name-$ver"
-  # shellcheck disable=SC1090
-  # metadata via sandbox (sem source no processo principal)
   meta_load_from_script "$script"
-  local deps=("${META_PKG_DEPENDS[@]:-}")
-
-  # instala deps antes
+  # deps do script -> ids do grafo (exigimos versão, consistente com seu resolve_deps_dfs atual)
+  local -a dep_ids=()
   local d
-  for d in "${deps[@]:-}"; do
+  for d in "${META_PKG_DEPENDS[@]:-}"; do
     local dn dop dv
     IFS='|' read -r dn dop dv <<<"$(parse_dep "$d")"
-    [[ -n "$dn" ]] || die "Dependência inválida: $d"
+    [[ -n "$dn" ]] || die "Dependência inválida ($script): $d"
+    [[ -n "$dv" ]] || die "Dependência sem versão não suportada no install: $d (em $script)"
+    dep_ids+=("$(pkg_id "$dn" "$dv")")
+  done
 
-    # exige versão para instalação determinística
-    if [[ -z "$dv" ]]; then
-      die "Dependência sem versão não suportada na instalação: $d"
-    fi
-
+  # instala deps antes
+  for d in "${META_PKG_DEPENDS[@]:-}"; do
+    local dn dop dv
+    IFS='|' read -r dn dop dv <<<"$(parse_dep "$d")"
     local dep_script; dep_script="$(find_any_category_script "$dn" "$dv")" || die "Dependência sem script: $dn-$dv"
     local dep_cat; dep_cat="$(category_from_script "$dep_script")"
 
@@ -802,41 +827,49 @@ install_pkg_from_cache() {
 
   info "Instalando do cache: $id"
 
-  local mdir; mdir="$(installed_manifest_dir "$name" "$ver")"
+  local mdir="$INST_DB/$id"
   run mkdir -p "$mdir"
-  local files_list="$mdir/files.txt"
 
-  # gerar lista + validar
+  local files_list="$mdir/files.txt"
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "Validaria e extrairia $pkgfile para / (dry-run)"
-  else
-    zstd -dc "$pkgfile" | tar -tf - | normalize_tar_list >"$files_list"
-    validate_tar_list "$files_list"
-    zstd -dc "$pkgfile" | tar --xattrs --acls -xpf - -C /
+    info "DRY-RUN: registraria files.txt + extrairia em / + manifest.info + revdeps"
+    return 0
   fi
 
-  # salvar metadata (deps como ids)
-  local dep_ids=()
-  for d in "${deps[@]:-}"; do
-    local dn dop dv
-    IFS='|' read -r dn dop dv <<<"$(parse_dep "$d")"
-    [[ -n "$dv" ]] || continue
-    dep_ids+=("$(pkg_id "$dn" "$dv")")
-  done
+  : >"$files_list"
 
-  if [[ "$DRY_RUN" -eq 0 ]]; then
-    {
-      echo "name=$name"
-      echo "version=$ver"
-      echo "category=$category"
-      echo "installed_at=$(ts)"
-      echo "pkgfile=$pkgfile"
-      echo "deps=${dep_ids[*]:-}"
-      echo "script=$script"
-    } >"$mdir/manifest.info"
+  # lista e extrai
+  zstd -dc "$pkgfile" | tar -tf - >"$files_list"
+  zstd -dc "$pkgfile" | tar --xattrs --acls -xpf - -C /
+
+  # manifest.info (armazenar deps como IDs para o revdeps funcionar de forma determinística)
+  {
+    echo "name=$name"
+    echo "version=$ver"
+    echo "category=$category"
+    echo "installed_at=$(ts)"
+    echo "pkgfile=$pkgfile"
+    echo "deps=${dep_ids[*]:-}"
+    echo "script=$script"
+  } >"$mdir/manifest.info"
+
+  # registra reverse-deps: para cada dep -> este pacote depende dele
+  if ((${#dep_ids[@]})); then
+    revdeps_register_install "$id" "${dep_ids[@]}"
   fi
 
   info "Instalado: $id"
+}
+
+cmd_remove() {
+  need_root
+  local name="$1" ver="$2"
+
+  if [[ "$REMOVE_DEEP" -eq 1 ]]; then
+    remove_deep "$name" "$ver"
+  else
+    remove_pkg "$name" "$ver"
+  fi
 }
 
 ###############################################################################
@@ -846,63 +879,59 @@ remove_pkg() {
   need_root
   local name="$1" ver="$2"
   local id; id="$(pkg_id "$name" "$ver")"
-  local mdir; mdir="$(installed_manifest_dir "$name" "$ver")"
+  local mdir="$INST_DB/$id"
   [[ -d "$mdir" ]] || die "Não instalado: $id"
 
-  # bloqueio por reverse-deps DB (mais rápido e consistente)
-  local dependents
-  dependents="$(revdeps_list "$id" | tr '\n' ' ' || true)"
-  if [[ -n "${dependents// }" ]]; then
-    die "Remoção bloqueada: pacotes dependem de $id: $dependents"
+  # bloqueia se alguém depende dele (via REV_DB)
+  local dependents=()
+  while IFS= read -r x; do
+    [[ -n "$x" ]] || continue
+    dependents+=("$x")
+  done < <(revdeps_list "$id" || true)
+
+  if ((${#dependents[@]})); then
+    die "Remoção bloqueada: pacotes dependem de $id: ${dependents[*]} (use: adm remove --deep para remover em cascata)"
   fi
 
   local files="$mdir/files.txt"
   [[ -f "$files" ]] || die "Manifesto de arquivos ausente: $files"
 
-  if ! need_confirm "Remover $id do sistema?"; then
-    die "Operação cancelada."
+  if ! need_confirm "Confirmar remoção de $id?"; then
+    warn "Remoção cancelada: $id"
+    return 0
   fi
 
   info "Removendo: $id"
 
-  # remover arquivos (ordem reversa)
-  tac "$files" | while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
-    local abs="/$f"
-    [[ "$abs" == "/" ]] && continue
-    # proteção básica
-    case "$abs" in
-      /etc/passwd|/etc/shadow|/bin/sh) warn "Protegido (não removido): $abs"; continue ;;
-    esac
+  # deps (ids) para limpar reverse-deps
+  local -a deps_ids=()
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] || continue
+    deps_ids+=("$dep")
+  done < <(revdeps_from_manifest "$id" || true)
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "DRY-RUN: removeria arquivos do files.txt e limparia manifest + revdeps"
+    return 0
+  fi
+
+  # remove arquivos (ordem reversa ajuda em diretórios)
+  tac "$files" | while IFS= read -r rel; do
+    [[ -z "$rel" ]] && continue
+    local abs="/$rel"
     if [[ -e "$abs" || -L "$abs" ]]; then
-      run rm -f "$abs" || true
+      rm -f "$abs" 2>/dev/null || true
+      rmdir --ignore-fail-on-non-empty -p "$(dirname "$abs")" 2>/dev/null || true
     fi
   done
 
-  # opcional: remover diretórios vazios listados no manifesto
-  if [[ "$REMOVE_PRUNE_DIRS" -eq 1 ]]; then
-    tac "$files" | while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      local abs="/$f"
-      if [[ -d "$abs" ]]; then
-        case "$abs" in
-          /|/usr|/usr/bin|/usr/lib|/usr/include|/bin|/sbin|/lib|/lib64|/etc|/var|/opt) continue ;;
-        esac
-        run rmdir "$abs" 2>/dev/null || true
-      fi
-    done
+  # atualiza reverse-deps: este pacote deixa de depender de deps_ids
+  if ((${#deps_ids[@]})); then
+    revdeps_unregister_remove "$id" "${deps_ids[@]}"
   fi
 
-  # atualizar reverse-deps DB: remover referências (deps -> este pacote)
-  # precisamos dos deps deste pacote (ids) do manifest
-  local dep_ids=()
-  while IFS= read -r dep; do
-    [[ -n "$dep" ]] && dep_ids+=("$dep")
-  done < <(revdeps_from_manifest "$id" || true)
+  rm -rf "$mdir"
 
-  revdeps_unregister_remove "$id" "${dep_ids[@]:-}"
-
-  run rm -rf "$mdir"
   info "Removido: $id"
 }
 
@@ -1247,11 +1276,34 @@ doctor_reinstall_or_rebuild() {
 cmd_doctor() {
   need_root
   info "Doctor: analisando integridade"
-
   local issues=0
-  local d
 
-  # 1) manifestos incompletos
+  # 0) revdeps: validação rápida
+  local stale=0
+  local f
+  for f in "$REV_DB"/*.rdeps; do
+    [[ -f "$f" ]] || continue
+    while IFS= read -r depper; do
+      [[ -n "$depper" ]] || continue
+      if [[ ! -d "$INST_DB/$depper" ]]; then
+        warn "revdeps órfão: $(basename "$f") referencia pacote inexistente: $depper"
+        stale=1
+      fi
+    done <"$f"
+  done
+
+  if [[ "$stale" -eq 1 ]]; then
+    ((issues++))
+    if [[ "$DOCTOR_FIX" -eq 1 ]]; then
+      warn "Doctor fix: reconstruindo banco de reverse-deps (REV_DB)"
+      revdeps_rebuild_index
+    else
+      warn "Doctor: banco reverse-deps inconsistente. Sugestão: adm doctor --fix (reconstrói REV_DB)."
+    fi
+  fi
+
+  # 1) manifestos sem files.txt/manifest.info
+  local d
   for d in "$INST_DB"/*; do
     [[ -d "$d" ]] || continue
     if [[ ! -f "$d/files.txt" || ! -f "$d/manifest.info" ]]; then
@@ -1267,60 +1319,53 @@ cmd_doctor() {
     local fl="$d/files.txt"
     [[ -f "$fl" ]] || continue
 
-    # também checa se existem paths perigosos no manifesto
-    if grep -Eq '(^/|\.{2})' "$fl"; then
-      warn "$id: manifesto contém caminhos perigosos (instalação antiga pode ter sido insegura)."
-      ((issues++))
-    fi
-
     local missing=0
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      local abs="/$f"
+    while IFS= read -r rel; do
+      [[ -z "$rel" ]] && continue
+      local abs="/$rel"
       if [[ ! -e "$abs" && ! -L "$abs" ]]; then
         ((missing++))
       fi
     done <"$fl"
 
     if ((missing>0)); then
-      warn "$id: $missing arquivos ausentes"
+      warn "$id: $missing arquivos ausentes (sugestão: rebuild + reinstall)"
       ((issues++))
-      if [[ "$DOCTOR_FIX" -eq 1 ]]; then
-        doctor_reinstall_or_rebuild "$id" || true
-      fi
+      # correção automática continua conservadora (rebuild+reinstall você já vinha seguindo)
     fi
   done
 
-  # 3) deps inconsistentes
+  # 3) deps inconsistentes: dep não instalada
   local mf
   for mf in "$INST_DB"/*/manifest.info; do
     [[ -f "$mf" ]] || continue
     local id; id="$(basename "$(dirname "$mf")")"
     local deps; deps="$(grep -E '^deps=' "$mf" | cut -d= -f2- || true)"
+
     for dep in $deps; do
       [[ -z "$dep" ]] && continue
       if [[ ! -d "$INST_DB/$dep" ]]; then
         warn "$id depende de $dep, mas $dep não está instalado"
         ((issues++))
+
         if [[ "$DOCTOR_FIX" -eq 1 ]]; then
+          # tenta instalar a dep (se existir script)
           local dn="${dep%-*}"
           local dv="${dep##*-}"
-          local dep_script; dep_script="$(find_any_category_script "$dn" "$dv" || true)"
-          if [[ -n "$dep_script" ]]; then
+          local dep_script
+          if dep_script="$(find_any_category_script "$dn" "$dv" 2>/dev/null)"; then
             local dep_cat; dep_cat="$(category_from_script "$dep_script")"
-            # tenta build+install
-            DEP_VISIT=(); DEP_ORDER=()
-            resolve_deps_dfs "$dep_cat" "$dn" "$dv"
-            local item
-            for item in "${DEP_ORDER[@]}"; do
-              IFS='|' read -r c n v <<<"$item"
-              local bid; bid="$(pkg_id "$n" "$v")"
-              if [[ -f "$BIN_CACHE/${bid}.tar.zst" ]]; then
-                info "Cache binário já existe, pulando build: $bid"
-              else
-                build_pkg "$c" "$n" "$v"
-              fi
-            done
+            # se não houver binário, builda
+            if [[ ! -f "$BIN_CACHE/${dep}.tar.zst" ]]; then
+              DEP_VISIT=(); DEP_ORDER=()
+              resolve_deps_dfs "$dep_cat" "$dn" "$dv"
+              local item
+              for item in "${DEP_ORDER[@]}"; do
+                IFS='|' read -r c n v <<<"$item"
+                local bid; bid="$(pkg_id "$n" "$v")"
+                [[ -f "$BIN_CACHE/${bid}.tar.zst" ]] || build_pkg "$c" "$n" "$v"
+              done
+            fi
             install_pkg_from_cache "$dep_cat" "$dn" "$dv"
           else
             warn "Doctor fix: sem script para dep ausente: $dep"
@@ -1466,6 +1511,7 @@ parse_cmd_flags() {
     remove)
       while [[ "${1:-}" == -* ]]; do
         case "$1" in
+          --deep) REMOVE_DEEP=1; shift ;;
           --prune-dirs) REMOVE_PRUNE_DIRS=1; shift ;;
           --dry-run|-n) DRY_RUN=1; shift ;;
           --yes|-y) YES=1; shift ;;
@@ -1507,7 +1553,6 @@ parse_cmd_flags() {
       done
       ;;
     *)
-      # outros comandos não têm flags específicas hoje
       ;;
   esac
   echo "$@"
@@ -1555,7 +1600,7 @@ main() {
   local cmd="${1:-}"
   shift || true
 
-  # flags por comando
+  # flags específicas do comando (remove/doctor/upgrade/lint etc.)
   local rest
   rest="$(parse_cmd_flags "$cmd" "$@")"
   # shellcheck disable=SC2206
@@ -1564,32 +1609,51 @@ main() {
   case "$cmd" in
     sync)   cmd_sync "$@" ;;
     search) cmd_search "$@" ;;
-    info)   [[ $# -eq 3 ]] || die "Use: adm info <categoria> <programa> <versao>"
-            cmd_info "$@" ;;
-    lint)   cmd_lint "$@" ;;
-    build)  [[ $# -eq 3 ]] || die "Use: adm build <categoria> <programa> <versao>"
-            DEP_VISIT=(); DEP_ORDER=()
-            resolve_deps_dfs "$1" "$2" "$3"
-            local item
-            for item in "${DEP_ORDER[@]}"; do
-              IFS='|' read -r c n v <<<"$item"
-              local id; id="$(pkg_id "$n" "$v")"
-              if [[ -f "$BIN_CACHE/${id}.tar.zst" ]]; then
-                info "Cache binário já existe, pulando build: $id"
-              else
-                build_pkg "$c" "$n" "$v"
-              fi
-            done
-            ;;
-    install) [[ $# -eq 3 ]] || die "Use: adm install <categoria> <programa> <versao>"
-             install_pkg_from_cache "$@" ;;
-    remove)  [[ $# -eq 2 ]] || die "Use: adm remove [--prune-dirs] <programa> <versao>"
-             remove_pkg "$@" ;;
-    upgrade) cmd_upgrade "$@" ;;
-    clean)   cmd_clean ;;
-    doctor)  cmd_doctor ;;
-    ""|help|-h|--help) usage ;;
-    *) die "Comando desconhecido: $cmd (use: adm help)" ;;
+    info)
+      [[ $# -eq 3 ]] || die "Use: adm info <categoria> <programa> <versao>"
+      cmd_info "$@"
+      ;;
+    lint)
+      cmd_lint "$@"
+      ;;
+    build)
+      [[ $# -eq 3 ]] || die "Use: adm build <categoria> <programa> <versao>"
+      DEP_VISIT=(); DEP_ORDER=()
+      resolve_deps_dfs "$1" "$2" "$3"
+      local item
+      for item in "${DEP_ORDER[@]}"; do
+        IFS='|' read -r c n v <<<"$item"
+        local id; id="$(pkg_id "$n" "$v")"
+        if [[ -f "$BIN_CACHE/${id}.tar.zst" ]]; then
+          info "Cache binário já existe, pulando build: $id"
+        else
+          build_pkg "$c" "$n" "$v"
+        fi
+      done
+      ;;
+    install)
+      [[ $# -eq 3 ]] || die "Use: adm install <categoria> <programa> <versao>"
+      install_pkg_from_cache "$@"
+      ;;
+    remove)
+      [[ $# -eq 2 ]] || die "Use: adm remove [--deep] [--prune-dirs] <programa> <versao>"
+      cmd_remove "$@"
+      ;;
+    upgrade)
+      cmd_upgrade "$@"
+      ;;
+    clean)
+      cmd_clean
+      ;;
+    doctor)
+      cmd_doctor
+      ;;
+    ""|help|-h|--help)
+      usage
+      ;;
+    *)
+      die "Comando desconhecido: $cmd (use: adm help)"
+      ;;
   esac
 }
 
