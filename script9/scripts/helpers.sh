@@ -1,31 +1,17 @@
 #!/bin/sh
 # /usr/share/adm/helpers.sh
 # Helpers POSIX sh para ports do adm.
-# Requer que o adm exporte:
-#   PORTDIR, WORKDIR, SRCDIR, DESTDIR, JOBS
-# E agora também:
-#   SRCDIR_NAME (derivado automaticamente de srcdir_name no build.sh)
-# O adm também exporta PATCHDIR/FILESDIR por padrão.
+# Variáveis fornecidas pelo adm:
+#   PORTDIR, PATCHDIR, FILESDIR, WORKDIR, SRCDIR, DESTDIR, JOBS, SRCDIR_NAME
 
 set -eu
-
-# -------------------- Mensagens / Erros --------------------
 
 adm_msg()  { printf '%s\n' "port: $*" >&2; }
 adm_warn() { printf '%s\n' "port: aviso: $*" >&2; }
 adm_die()  { printf '%s\n' "port: erro: $*" >&2; exit 1; }
 
-# -------------------- Comandos --------------------
-
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-ensure_cmd() {
-  for c in "$@"; do
-    have_cmd "$c" || adm_die "comando ausente: $c"
-  done
-}
-
-# -------------------- Defaults / Ambiente --------------------
+ensure_cmd() { for c in "$@"; do have_cmd "$c" || adm_die "comando ausente: $c"; done; }
 
 adm_defaults() {
   : "${JOBS:=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
@@ -36,7 +22,6 @@ adm_defaults() {
 
   : "${PATCHDIR:=${PORTDIR}/patches}"
   : "${FILESDIR:=${PORTDIR}/files}"
-
   : "${SRCDIR_NAME:=${SRCDIR_NAME:-}}"
 
   : "${CFLAGS:--O2 -pipe}"
@@ -48,21 +33,13 @@ adm_defaults() {
   export JOBS WORKDIR SRCDIR DESTDIR PORTDIR PATCHDIR FILESDIR SRCDIR_NAME \
          CFLAGS CXXFLAGS LDFLAGS CPPFLAGS PKG_CONFIG_PATH
 
-  # Determinismo razoável
-  : "${SOURCE_DATE_EPOCH:=$(date +%s)}"
-  export SOURCE_DATE_EPOCH
+  # Não seta SOURCE_DATE_EPOCH automaticamente (evita não-reprodutibilidade por padrão)
   export LC_ALL="${LC_ALL:-C}"
-
-  # Comportamento padrão do make:
   export MAKEFLAGS="${MAKEFLAGS:--j${JOBS}}"
 }
 
-# -------------------- Source dir: auto e seguro --------------------
+# -------------------- Source dir --------------------
 
-# Entra em SRCDIR e escolhe diretório:
-# 1) se SRCDIR_NAME definido, usa ele
-# 2) se houver exatamente 1 diretório dentro de SRCDIR, entra nele
-# 3) senão permanece em SRCDIR
 enter_srcdir_auto() {
   cd "$SRCDIR" || adm_die "SRCDIR inválido: $SRCDIR"
 
@@ -72,7 +49,6 @@ enter_srcdir_auto() {
     return 0
   fi
 
-  # heurística: se existir apenas um item e for dir
   set -- "$SRCDIR"/*
   if [ "$#" -eq 1 ] && [ -d "$1" ]; then
     cd "$1" || adm_die "falha ao entrar no diretório extraído"
@@ -81,23 +57,20 @@ enter_srcdir_auto() {
   fi
 }
 
-# Versão manual: o port força um subdir
 enter_srcdir() {
-  sub="${1:-}"
+  sub="${1:?subdir obrigatório}"
   cd "$SRCDIR" || adm_die "SRCDIR inválido: $SRCDIR"
-  [ -n "$sub" ] || adm_die "enter_srcdir exige subdiretório"
   [ -d "$SRCDIR/$sub" ] || adm_die "subdir inválido: $SRCDIR/$sub"
   cd "$SRCDIR/$sub" || adm_die "falha ao entrar em $SRCDIR/$sub"
 }
 
-# -------------------- Patches e files --------------------
+# -------------------- Patches / files --------------------
 
 apply_default_patches() {
   [ -d "$PATCHDIR" ] || return 0
   ensure_cmd patch
   patches="$(find "$PATCHDIR" -maxdepth 1 -type f \( -name '*.patch' -o -name '*.diff' \) 2>/dev/null | sort || true)"
   [ -n "$patches" ] || return 0
-
   for p in $patches; do
     adm_msg "aplicando patch: $(basename "$p")"
     patch -Np1 < "$p" || adm_die "falha ao aplicar patch: $p"
@@ -111,7 +84,6 @@ apply_patch() {
   patch -Np1 < "$p" || adm_die "falha ao aplicar patch: $p"
 }
 
-# Instala arquivo do FILESDIR com caminho relativo para o DESTDIR preservando caminho.
 install_files_into_destdir() {
   rel="${1:?caminho relativo obrigatório}"
   src="${FILESDIR}/${rel}"
@@ -121,7 +93,6 @@ install_files_into_destdir() {
   cp -a "$src" "$dst"
 }
 
-# Copia FILESDIR/<src_rel> para DESTDIR<dst_abs>
 install_file() {
   src_rel="${1:?arquivo em files/ obrigatório}"
   dst_abs="${2:?destino absoluto obrigatório}"
@@ -133,23 +104,29 @@ install_file() {
   cp -a "$src" "$dst"
 }
 
-# -------------------- Autotools (autogen/bootstrap/autoreconf/configure/make) --------------------
+# simples “sed in-place” POSIX
+sed_inplace() {
+  expr="${1:?expressão sed obrigatória}"
+  file="${2:?arquivo obrigatório}"
+  [ -f "$file" ] || adm_die "arquivo não encontrado: $file"
+  tmp="$(mktemp)"
+  sed "$expr" "$file" > "$tmp"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
 
-# Executa autogen.sh se existir (projetos que vêm sem configure pronto)
+# -------------------- Autotools / bootstrap --------------------
+
 do_autogen() {
-  # uso: do_autogen [args...]
   if [ -x ./autogen.sh ]; then
     adm_msg "rodando autogen.sh"
-    ensure_cmd sh
     sh ./autogen.sh "$@"
     return 0
   fi
   adm_warn "autogen.sh não encontrado/executável"
 }
 
-# Executa bootstrap se existir (muito comum em alguns projetos)
 do_bootstrap() {
-  # uso: do_bootstrap [args...]
   if [ -x ./bootstrap ]; then
     adm_msg "rodando bootstrap"
     ./bootstrap "$@"
@@ -158,12 +135,13 @@ do_bootstrap() {
   adm_warn "bootstrap não encontrado/executável"
 }
 
-# Tenta “bootstrap” automaticamente:
-# - se existir ./bootstrap => roda
-# - senão se existir ./autogen.sh => roda
-# - senão => autoreconf -fiv
+do_autoreconf() {
+  ensure_cmd autoreconf
+  adm_msg "rodando autoreconf -fiv"
+  autoreconf -fiv
+}
+
 do_bootstrap_auto() {
-  # uso: do_bootstrap_auto [args...]
   if [ -x ./bootstrap ]; then
     do_bootstrap "$@"
   elif [ -x ./autogen.sh ]; then
@@ -173,36 +151,24 @@ do_bootstrap_auto() {
   fi
 }
 
-do_autoreconf() {
-  ensure_cmd autoreconf
-  adm_msg "rodando autoreconf -fiv"
-  autoreconf -fiv
-}
-
 do_configure() {
-  # uso: do_configure [args...]
+  # tolera configure sem +x
   export CFLAGS CXXFLAGS LDFLAGS CPPFLAGS PKG_CONFIG_PATH
-  ensure_cmd ./configure
-  ./configure \
-    --prefix=/usr \
-    --sysconfdir=/etc \
-    --localstatedir=/var \
-    "$@"
+  if [ -f ./configure ]; then
+    if [ -x ./configure ]; then
+      ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var "$@"
+    else
+      sh ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var "$@"
+    fi
+  else
+    adm_die "configure não encontrado"
+  fi
 }
 
-do_make() {
-  ensure_cmd make
-  make -j"$JOBS" "$@"
-}
+do_make() { ensure_cmd make; make -j"$JOBS" "$@"; }
+do_make_install() { ensure_cmd make; make DESTDIR="$DESTDIR" "$@" install; }
 
-do_make_install() {
-  ensure_cmd make
-  make DESTDIR="$DESTDIR" "$@" install
-}
-
-# Conveniência: autotools padrão (bootstrap + configure + make)
 do_autotools_build() {
-  # uso: do_autotools_build [configure args...]
   do_bootstrap_auto
   do_configure "$@"
   do_make
@@ -211,12 +177,10 @@ do_autotools_build() {
 # -------------------- CMake --------------------
 
 do_cmake_configure() {
-  # uso: do_cmake_configure <srcdir> [args...]
   ensure_cmd cmake
   src="${1:?srcdir}"
   shift
   export CFLAGS CXXFLAGS LDFLAGS CPPFLAGS PKG_CONFIG_PATH
-
   cmake -S "$src" -B build \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_SYSCONFDIR=/etc \
@@ -228,25 +192,16 @@ do_cmake_configure() {
     "$@"
 }
 
-do_cmake_build() {
-  ensure_cmd cmake
-  cmake --build build -j "$JOBS"
-}
-
-do_cmake_install() {
-  ensure_cmd cmake
-  cmake --install build --prefix /usr --destdir "$DESTDIR"
-}
+do_cmake_build() { ensure_cmd cmake; cmake --build build -j "$JOBS"; }
+do_cmake_install() { ensure_cmd cmake; cmake --install build --prefix /usr --destdir "$DESTDIR"; }
 
 # -------------------- Meson / Ninja --------------------
 
 do_meson_setup() {
-  # uso: do_meson_setup <srcdir> [args...]
   ensure_cmd meson ninja
   src="${1:?srcdir}"
   shift
   export CFLAGS CXXFLAGS LDFLAGS CPPFLAGS PKG_CONFIG_PATH
-
   meson setup build "$src" \
     --prefix=/usr \
     --sysconfdir=/etc \
@@ -259,23 +214,14 @@ do_meson_setup() {
     "$@"
 }
 
-do_ninja_build() {
-  ensure_cmd ninja
-  ninja -C build -j "$JOBS"
-}
-
-do_ninja_install() {
-  ensure_cmd ninja
-  DESTDIR="$DESTDIR" ninja -C build install
-}
+do_ninja_build() { ensure_cmd ninja; ninja -C build -j "$JOBS"; }
+do_ninja_install() { ensure_cmd ninja; DESTDIR="$DESTDIR" ninja -C build install; }
 
 # -------------------- Python --------------------
 
 python_install_project() {
-  # Instala projeto python do diretório atual para DESTDIR.
-  # Requer pip instalado no python alvo.
   ensure_cmd python3
-  ensure_cmd python3
+  # requer pip disponível
   python3 -m pip install --no-deps --no-build-isolation --no-index \
     --prefix /usr --root "$DESTDIR" .
 }
@@ -289,13 +235,9 @@ python_setup_py_install() {
 
 # -------------------- Rust / Cargo --------------------
 
-cargo_build_release() {
-  ensure_cmd cargo
-  cargo build --release -j "$JOBS"
-}
+cargo_build_release() { ensure_cmd cargo; cargo build --release -j "$JOBS"; }
 
 cargo_install_bin() {
-  # uso: cargo_install_bin <binname> [dest=/usr/bin]
   bin="${1:?binname}"
   dest="${2:-/usr/bin}"
   [ -f "target/release/$bin" ] || adm_die "binário não encontrado: target/release/$bin"
@@ -305,7 +247,6 @@ cargo_install_bin() {
 # -------------------- Go --------------------
 
 go_build() {
-  # uso: go_build <output> [pkgspec]
   ensure_cmd go
   out="${1:?output}"
   pkgspec="${2:-.}"
@@ -313,17 +254,32 @@ go_build() {
 }
 
 go_install_bin() {
-  # uso: go_install_bin <built_binary> [dest=/usr/bin]
   bin="${1:?built binary}"
   dest="${2:-/usr/bin}"
   [ -f "$bin" ] || adm_die "binário não encontrado: $bin"
   install -Dm755 "$bin" "$DESTDIR$dest/$(basename "$bin")"
 }
 
+# -------------------- Instalações comuns --------------------
+
+install_man() {
+  # uso: install_man <manfile> <section>  (ex: foo.1 1)
+  f="${1:?manfile}"
+  sec="${2:?section}"
+  [ -f "$f" ] || adm_die "manfile não encontrado: $f"
+  install -Dm644 "$f" "$DESTDIR/usr/share/man/man${sec}/$(basename "$f")"
+}
+
+install_bash_completion() {
+  # uso: install_bash_completion <file>
+  f="${1:?completion file}"
+  [ -f "$f" ] || adm_die "arquivo não encontrado: $f"
+  install -Dm644 "$f" "$DESTDIR/usr/share/bash-completion/completions/$(basename "$f")"
+}
+
 # -------------------- Pós-instalação desktop --------------------
 
 postinstall_desktop_common() {
-  # Atualizações globais comuns para desktop (rode em post_install()).
   have_cmd glib-compile-schemas && glib-compile-schemas /usr/share/glib-2.0/schemas || true
   have_cmd gtk-update-icon-cache && gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
   have_cmd update-desktop-database && update-desktop-database -q || true
@@ -331,7 +287,7 @@ postinstall_desktop_common() {
   have_cmd fc-cache && fc-cache -r || true
 }
 
-# -------------------- Sanidade do pacote (staging) --------------------
+# -------------------- Sanidade DESTDIR --------------------
 
 ensure_destdir_nonempty() {
   [ -d "$DESTDIR" ] || adm_die "DESTDIR não existe: $DESTDIR"
