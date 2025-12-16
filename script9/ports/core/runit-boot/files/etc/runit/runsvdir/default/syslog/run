@@ -1,0 +1,5 @@
+#!/bin/sh
+exec 2>&1
+# Se você ainda não tem syslogd dedicado, isso é um placeholder.
+# Mais tarde você instala busybox-syslogd, syslog-ng ou metalog.
+sleep 9999999
