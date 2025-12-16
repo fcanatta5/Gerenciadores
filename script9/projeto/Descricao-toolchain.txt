@@ -1,0 +1,319 @@
+Premissas e convenções
+
+Diretórios
+
+SYSROOT (sistema alvo em construção): SYSROOT=/mnt/adm
+
+TOOLS (toolchain temporária isolada do host): TOOLS=/mnt/adm/tools
+
+SOURCES: SRCDIR=/mnt/adm/sources
+
+BUILD: BUILDDIR=/mnt/adm/build
+
+
+Triplet do alvo
+
+Use um triplet consistente para tudo. Sugestão simples e prática:
+
+TARGET: x86_64-adm-linux-gnu
+
+
+Isso evita ambiguidade (e não “cola” no host).
+
+Versões (alinhadas com o que você já vinha pedindo)
+
+binutils: 2.45.1
+
+gcc: 15.2.0
+
+linux-headers: mesma major do kernel que você pretende usar (ex.: 6.12.x, 6.6.x etc.)
+
+glibc: 2.42
+
+gmp/mpfr/mpc/isl: versões atuais estáveis que compilem com o gcc 15 (você pode embutir ou usar tarballs oficiais)
+
+
+
+---
+
+2) Objetivo do toolchain inicial
+
+Você vai produzir um toolchain em duas etapas:
+
+Etapa A — Toolchain temporária (isolada em /mnt/adm/tools)
+
+Serve para compilar glibc e o restante do sistema, sem “vazar” bibliotecas do host.
+
+Etapa B — Toolchain final (instalada no SYSROOT: /mnt/adm)
+
+Serve como toolchain “nativa” do seu sistema rolling.
+
+
+---
+
+3) Ordem exata de construção (recomendada)
+
+Etapa A: toolchain temporária (prefixo = /tools)
+
+1. Linux API Headers → instalados no SYSROOT (/mnt/adm/usr/include)
+
+
+2. Binutils (pass1) → instala em TOOLS
+
+
+3. GCC (pass1) → instala em TOOLS (apenas C/C++, sem libc ainda)
+
+
+4. Glibc (bootstrap) → instala no SYSROOT (com o compilador em TOOLS)
+
+
+5. Libstdc++ do GCC (para o sysroot) → instala no SYSROOT (ou em TOOLS conforme estratégia)
+
+
+
+Etapa B: toolchain final (prefixo = /usr)
+
+6. Binutils (final) → instala no SYSROOT (/mnt/adm/usr)
+
+
+7. GCC (final) → instala no SYSROOT (/mnt/adm/usr)
+
+
+8. (Opcional) LLVM/Clang (final) → instala no SYSROOT, se você quiser suportar builds modernos
+
+
+
+Essa ordem minimiza risco e torna o sistema reproduzível.
+
+
+---
+
+4) Detalhamento técnico por componente
+
+4.1 Linux API Headers (primeiro)
+
+Por quê: glibc precisa dos headers do kernel para expor syscalls e ABI correta.
+
+Instalação alvo:
+
+em $SYSROOT/usr/include
+
+
+Pontos críticos:
+
+Use os headers “exportados” (make headers_install)
+
+Não use headers do host
+
+
+
+---
+
+4.2 Binutils (pass1) — em $TOOLS
+
+Objetivo: fornecer ld, as, ar, etc. isolados.
+
+Configuração padrão segura:
+
+--prefix=$TOOLS
+
+--with-sysroot=$SYSROOT
+
+--target=$TARGET
+
+--disable-nls
+
+--disable-werror
+
+
+Resultado esperado:
+
+$TOOLS/bin/$TARGET-ld
+
+$TOOLS/bin/$TARGET-as
+
+etc.
+
+
+
+---
+
+4.3 GCC (pass1) — em $TOOLS
+
+Objetivo: um compilador cross “quase completo”, porém ainda sem depender da glibc do alvo (porque ela ainda não existe).
+
+Configuração típica correta:
+
+--prefix=$TOOLS
+
+--target=$TARGET
+
+--with-sysroot=$SYSROOT
+
+--enable-languages=c,c++
+
+--disable-multilib
+
+--disable-nls
+
+--disable-libsanitizer
+
+--disable-bootstrap
+
+--with-native-system-header-dir=/usr/include
+
+
+Importante:
+
+Nesta fase você garante que o GCC aponta para o sysroot e não para o host.
+
+
+
+---
+
+4.4 Glibc (bootstrap) — instala no SYSROOT
+
+Objetivo: fornecer a libc real do sistema em /mnt/adm.
+
+Configuração correta (conceitualmente):
+
+build out-of-tree
+
+usar o compilador do $TOOLS
+
+--prefix=/usr
+
+--host=$TARGET
+
+--build=$(gcc -dumpmachine do host) (o build é o host atual; o host/target da glibc é o seu TARGET)
+
+--with-headers=$SYSROOT/usr/include
+
+--enable-kernel=<min_kernel> (você define conforme compatibilidade desejada)
+
+
+Instalação:
+
+DESTDIR=$SYSROOT make install
+
+
+Resultado esperado:
+
+$SYSROOT/lib/ld-linux-x86-64.so.2 (e libs em /lib//usr/lib conforme layout)
+
+headers finais da libc
+
+
+
+---
+
+4.5 Libstdc++ (do GCC) — instala no SYSROOT
+
+Objetivo: habilitar C++ com a glibc do sysroot.
+
+Build típico:
+
+reusar a árvore do gcc
+
+entrar em libstdc++-v3
+
+configurar com --host=$TARGET --prefix=/usr
+
+DESTDIR=$SYSROOT make install
+
+
+Resultado:
+
+$SYSROOT/usr/lib/libstdc++.so
+
+headers C++ em $SYSROOT/usr/include/c++/...
+
+
+
+---
+
+5) Toolchain final (instalada no SYSROOT)
+
+Quando glibc + libstdc++ já existem no SYSROOT, você recompila binutils/gcc “de verdade” para rodar como toolchain nativa do seu sistema (quando você der boot nele).
+
+5.1 Binutils (final) → $SYSROOT/usr
+
+Configuração:
+
+--prefix=/usr
+
+--with-sysroot=/
+
+--disable-nls
+
+--disable-werror Instala:
+
+DESTDIR=$SYSROOT make install
+
+
+5.2 GCC (final) → $SYSROOT/usr
+
+Configuração:
+
+--prefix=/usr
+
+--enable-languages=c,c++
+
+--disable-multilib
+
+--disable-nls
+
+--disable-bootstrap
+
+--with-system-zlib Instala:
+
+DESTDIR=$SYSROOT make install
+
+
+Após isso, ao bootar no seu sistema, gcc e ld já são nativos.
+
+
+---
+
+6) Saneamento obrigatório (para não “vazar host”)
+
+Antes de começar, defina e “congele” o ambiente:
+
+PATH deve priorizar $TOOLS/bin
+
+CC, CXX, AR, AS, LD, RANLIB, STRIP devem apontar para $TARGET-* quando aplicável
+
+Use -Wl,-rpath somente se você tiver certeza do que está fazendo (o ideal: não usar)
+
+
+Testes práticos (os mais úteis):
+
+which $TARGET-gcc aponta para $TOOLS/bin
+
+echo 'int main(){}' | $TARGET-gcc -v -x c - e conferir que:
+
+include search path aponta para $SYSROOT/usr/include
+
+linker usa $SYSROOT como sysroot
+
+
+
+
+---
+
+7) O que eu recomendo como “toolchain inicial exata” para você
+
+Escolha final, direta:
+
+binutils 2.45.1 (pass1 em /mnt/adm/tools, final em /mnt/adm/usr)
+
+gcc 15.2.0 (pass1 em /mnt/adm/tools, final em /mnt/adm/usr)
+
+linux-headers do kernel que você vai usar (em /mnt/adm/usr/include)
+
+glibc 2.42 (em /mnt/adm)
+
+libstdc++ do gcc 15.2.0 (em /mnt/adm/usr)
+
+
+Isso é o “mínimo completo” para um desktop rolling, capaz de compilar qualquer programa em cima depois.
