@@ -10,9 +10,9 @@ release="1"
 
 srcdir_name="efibootmgr-18"
 
-# Observação: o tarball "efibootmgr-18.tar.gz" é a forma comum de distribuição por tag.
+# Tarball oficial do release (melhor que "archive/18" para builds reproduzíveis)
 source_urls="
-https://github.com/rhboot/efibootmgr/archive/18/efibootmgr-18.tar.gz
+https://github.com/rhboot/efibootmgr/releases/download/18/efibootmgr-18.tar.bz2
 "
 
 depends="
@@ -29,10 +29,23 @@ prepare() { :; }
 build() {
   enter_srcdir_auto
 
-  # build simples via makefile
+  ensure_cmd pkg-config
+
+  # Alguns ambientes têm efiboot.pc (do efivar), outros não.
+  # Montamos a lista PKGS de forma tolerante.
+  PKGS="efivar popt"
+  if pkg-config --exists efiboot 2>/dev/null; then
+    PKGS="efivar efiboot popt"
+  fi
+
+  # EFIDIR define o diretório “padrão” usado quando você cria entradas (ex.: \\EFI\\ADM\\grubx64.efi)
+  # Ajuste o BOOTLOADER-ID do seu grub-install para combinar (ex.: ADM).
   do_make \
     PREFIX=/usr \
-    LIBDIR=/usr/lib
+    LIBDIR=/usr/lib \
+    EFIDIR="EFI/ADM" \
+    GCC_IGNORE_WERROR=1 \
+    PKGS="$PKGS"
 }
 
 package() {
@@ -40,7 +53,8 @@ package() {
 
   make -j1 DESTDIR="$DESTDIR" install \
     PREFIX=/usr \
-    LIBDIR=/usr/lib
+    LIBDIR=/usr/lib \
+    EFIDIR="EFI/ADM"
 
   ensure_destdir_nonempty
 }
