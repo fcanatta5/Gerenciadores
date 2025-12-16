@@ -1,0 +1,13 @@
+binutils
+gcc
+glibc
+linux-headers
+busybox
+bash
+coreutils
+util-linux
+e2fsprogs
+procps-ng
+kmod
+pciutils
+usbutils
