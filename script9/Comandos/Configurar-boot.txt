@@ -1,3 +1,5 @@
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ADM --recheck
+
 Vou assumir x86_64, UEFI puro (sem legacy/CSM) e que o sistema final está em /mnt/adm.
 
 
