@@ -1,0 +1,5 @@
+#!/bin/sh
+exec 2>&1
+
+# Recomendado no system bus: --system + --nofork (foreground) + --nopidfile
+exec chpst -u messagebus:messagebus dbus-daemon --system --nofork --nopidfile
