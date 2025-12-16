@@ -1,0 +1,102 @@
+#!/bin/sh
+set -eu
+
+# wl-x11-clipboard-bridge
+# Sincroniza clipboard entre Wayland (wl-copy/wl-paste) e X11/Xwayland (xclip).
+# Requisitos:
+#   - WAYLAND_DISPLAY set (sessão Wayland)
+#   - DISPLAY set (Xwayland rodando)
+#   - wl-copy, wl-paste, xclip
+#
+# Execução:
+#   wl-x11-clipboard-bridge
+#
+# Observações:
+# - Implementa filtro simples anti-loop (cache do último conteúdo).
+# - Faz dois fluxos:
+#     1) Wayland -> X11 (wl-paste --watch)
+#     2) X11 -> Wayland (polling leve via xclip)
+#
+# Ajuste intervalos via env:
+#   X11_POLL_MS=400
+#   MAX_BYTES=1048576
+
+X11_POLL_MS="${X11_POLL_MS:-400}"
+MAX_BYTES="${MAX_BYTES:-1048576}"
+
+have(){ command -v "$1" >/dev/null 2>&1; }
+die(){ printf '%s\n' "bridge: erro: $*" >&2; exit 1; }
+
+[ -n "${WAYLAND_DISPLAY:-}" ] || die "WAYLAND_DISPLAY não definido (não é sessão Wayland?)"
+[ -n "${DISPLAY:-}" ] || die "DISPLAY não definido (Xwayland/X11 não disponível?)"
+
+have wl-copy  || die "wl-copy ausente"
+have wl-paste || die "wl-paste ausente"
+have xclip    || die "xclip ausente"
+
+tmpdir="${TMPDIR:-/tmp}/wl-x11-bridge.$$"
+mkdir -p "$tmpdir"
+trap 'rm -rf "$tmpdir"' EXIT INT TERM
+
+last_wl="$tmpdir/last_wl"
+last_x11="$tmpdir/last_x11"
+: >"$last_wl"
+: >"$last_x11"
+
+limit_bytes() {
+  # limita payload para evitar travas com clipboard gigante
+  # lê stdin, corta em MAX_BYTES
+  dd bs="$MAX_BYTES" count=1 2>/dev/null
+}
+
+wl_to_x11() {
+  # Watch Wayland clipboard (+ selection)
+  wl-paste --watch --type text/plain --no-newline 2>/dev/null | \
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s' "$line" | limit_bytes >"$tmpdir/wlbuf" || true
+
+    if cmp -s "$tmpdir/wlbuf" "$last_wl"; then
+      continue
+    fi
+    cp -f "$tmpdir/wlbuf" "$last_wl"
+
+    # Atualiza X11 CLIPBOARD
+    xclip -selection clipboard -in <"$tmpdir/wlbuf" 2>/dev/null || true
+    # Atualiza X11 PRIMARY (opcional)
+    xclip -selection primary -in <"$tmpdir/wlbuf" 2>/dev/null || true
+  done
+}
+
+x11_to_wl() {
+  # Poll leve no X11 CLIPBOARD e PRIMARY; quando mudar, empurra pra Wayland.
+  # xclip não tem "watch" universal, então polling é o jeito simples e previsível.
+  while :; do
+    xclip -selection clipboard -out 2>/dev/null | limit_bytes >"$tmpdir/x11_clip" || : >"$tmpdir/x11_clip"
+    if ! cmp -s "$tmpdir/x11_clip" "$last_x11"; then
+      cp -f "$tmpdir/x11_clip" "$last_x11"
+
+      # evita loop: só empurra se diferente do último vindo do Wayland
+      if ! cmp -s "$tmpdir/x11_clip" "$last_wl"; then
+        wl-copy --type text/plain;charset=utf-8 <"$tmpdir/x11_clip" 2>/dev/null || true
+      fi
+    fi
+
+    # PRIMARY também (muito usado por apps X11)
+    xclip -selection primary -out 2>/dev/null | limit_bytes >"$tmpdir/x11_pri" || : >"$tmpdir/x11_pri"
+    if [ -s "$tmpdir/x11_pri" ] && ! cmp -s "$tmpdir/x11_pri" "$last_x11"; then
+      cp -f "$tmpdir/x11_pri" "$last_x11"
+      if ! cmp -s "$tmpdir/x11_pri" "$last_wl"; then
+        wl-copy --primary --type text/plain;charset=utf-8 <"$tmpdir/x11_pri" 2>/dev/null || true
+      fi
+    fi
+
+    usleep "$((X11_POLL_MS * 1000))" 2>/dev/null || sleep 0.4
+  done
+}
+
+wl_to_x11 &
+p1=$!
+x11_to_wl &
+p2=$!
+
+wait "$p1" "$p2"
