@@ -1,0 +1,9 @@
+mesa
+libdrm
+wayland
+wlroots
+sway
+foot
+pipewire
+wireplumber
+alsa-lib
