@@ -1,39 +1,41 @@
 #!/bin/sh
 set -eu
 
-ADM_VERSION="0.2"
+ADM_VERSION="0.3"
 
 PORTS_DIR="${PORTS_DIR:-/usr/local/ports}"
 
 DB_DIR="${DB_DIR:-/var/db/adm}"
-PKG_DB="${DB_DIR}/pkgs"          # cada pacote instalado vira um diretório aqui
-WORLD_FILE="${DB_DIR}/world"     # pacotes explicitamente instalados
-
-CACHE_DIR="${CACHE_DIR:-/var/cache/adm}"
-DISTFILES="${CACHE_DIR}/distfiles"     # tarballs baixados
-SRCCACHE="${CACHE_DIR}/src"            # cache do source extraído
-BUILDROOT="${CACHE_DIR}/build"         # build dir (temporário)
-PKGROOT="${CACHE_DIR}/pkg"             # staging (DESTDIR)
-PACKAGES="${CACHE_DIR}/packages"       # binários .tar.zst/.tar.xz (cache)
-
-LOG_DIR="${LOG_DIR:-/var/log/adm}"
+PKG_DB="${DB_DIR}/pkgs"
+WORLD_FILE="${DB_DIR}/world"
+OWNERS_DB="${DB_DIR}/owners"       # arquivo texto: "path<TAB>pkgref"
 LOCK_DIR="${LOCK_DIR:-/run/adm.lock}"
 
-REPO_URL="${REPO_URL:-}"   # opcional (para sync clone automático)
+CACHE_DIR="${CACHE_DIR:-/var/cache/adm}"
+DISTFILES="${CACHE_DIR}/distfiles"
+SRCCACHE="${CACHE_DIR}/src"
+BUILDROOT="${CACHE_DIR}/build"
+PKGROOT="${CACHE_DIR}/pkg"
+PACKAGES="${CACHE_DIR}/packages"
 
+LOG_DIR="${LOG_DIR:-/var/log/adm}"
+
+REPO_URL="${REPO_URL:-}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
 
 umask 022
 
-die(){ echo "adm: erro: $*" >&2; exit 1; }
-msg(){ echo "adm: $*" >&2; }
+die(){ printf '%s\n' "adm: erro: $*" >&2; exit 1; }
+msg(){ printf '%s\n' "adm: $*" >&2; }
 
 need_root(){ [ "$(id -u)" -eq 0 ] || die "precisa ser root"; }
+have_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
 ensure_dirs() {
   mkdir -p "$PORTS_DIR" "$PKG_DB" "$CACHE_DIR" "$DISTFILES" "$SRCCACHE" "$BUILDROOT" "$PKGROOT" "$PACKAGES" "$LOG_DIR"
   mkdir -p "$DB_DIR"
   [ -f "$WORLD_FILE" ] || : >"$WORLD_FILE"
+  [ -f "$OWNERS_DB" ] || : >"$OWNERS_DB"
 }
 
 lock() {
@@ -55,44 +57,40 @@ safe_rm_rf() {
   rm -rf -- "$p"
 }
 
-have_cmd(){ command -v "$1" >/dev/null 2>&1; }
-
-# ---------------- Ports index / resolução categoria/pacote ----------------
+# -------------------- Ports index / resolução --------------------
 
 list_all_ports() {
-  # imprime "categoria/pacote"
-  find "$PORTS_DIR" -mindepth 2 -maxdepth 2 -type f -name build.sh \
+  find "$PORTS_DIR" -mindepth 2 -maxdepth 2 -type f -name build.sh 2>/dev/null \
     | sed "s#^${PORTS_DIR}/##" \
     | sed "s#/build\.sh$##" \
     | sort
 }
 
 resolve_pkgref() {
-  # aceita: "cat/pkg" ou "pkg" (se único)
   in="$1"
   case "$in" in
     */*)
       [ -f "${PORTS_DIR}/${in}/build.sh" ] || die "port não encontrado: $in"
-      echo "$in"
+      printf '%s\n' "$in"
       ;;
     *)
       matches="$(list_all_ports | awk -F/ -v p="$in" '$2==p {print $0}')"
-      count="$(printf "%s\n" "$matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+      count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')"
       [ "$count" -ge 1 ] || die "port não encontrado: $in"
       if [ "$count" -gt 1 ]; then
         msg "ambíguo: '$in' existe em múltiplas categorias:"
-        printf "%s\n" "$matches" >&2
+        printf '%s\n' "$matches" >&2
         die "use categoria/pacote"
       fi
-      printf "%s\n" "$matches"
+      printf '%s\n' "$matches"
       ;;
   esac
 }
 
-# ---------------- Carregamento do port ----------------
+# -------------------- Carregamento do port --------------------
 
 reset_port_env() {
-  unset name version release source_urls depends makedepends srcdir_name
+  unset name version release source_urls sources depends makedepends srcdir_name
   unset -f pre_fetch post_fetch pre_prepare prepare post_prepare pre_build build post_build \
           pre_package package post_package pre_install post_install pre_remove post_remove \
           pre_upgrade post_upgrade 2>/dev/null || true
@@ -110,9 +108,9 @@ load_port() {
   [ -n "${name:-}" ] || die "port ${pkgref}: variável 'name' não definida"
   [ -n "${version:-}" ] || die "port ${pkgref}: variável 'version' não definida"
 
-  # compat: aceita sources= ou source_urls=
+  # compat
   if [ -n "${source_urls:-}" ]; then
-    : # ok
+    :
   elif [ -n "${sources:-}" ]; then
     source_urls="${sources}"
   else
@@ -130,7 +128,8 @@ load_port() {
   export PORTDIR
   export PATCHDIR="${PORTDIR}/patches"
   export FILESDIR="${PORTDIR}/files"
-  echo "$pkgref"
+
+  printf '%s\n' "$pkgref"
 }
 
 port_vars() {
@@ -143,17 +142,16 @@ port_vars() {
   SRCDIR="${WORKDIR}/src"
   PKGDIR="${PKGROOT}/${PKGREF//\//_}-${PKGVERSION}"
   LOGFILE="${LOG_DIR}/${PKGREF//\//_}-${PKGVERSION}.log"
-  # Exporta srcdir_name para o ambiente do port/helpers
+
+  # FIX CRÍTICO: atribuir antes de exportar
+  DESTDIR="$PKGDIR"
   SRCDIR_NAME="${srcdir_name:-}"
-  export SRCDIR_NAME
 
   export JOBS WORKDIR SRCDIR PKGDIR DESTDIR LOGFILE SRCDIR_NAME
-  DESTDIR="$PKGDIR"
-
   export CFLAGS="${CFLAGS:--O2 -pipe}"
   export CXXFLAGS="${CXXFLAGS:--O2 -pipe}"
   export LDFLAGS="${LDFLAGS:-}"
-
+  export CPPFLAGS="${CPPFLAGS:-}"
   export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
@@ -165,16 +163,14 @@ run_hook() {
   fi
 }
 
-# ---------------- Fetch / checksums ----------------
+# -------------------- Fetch / checksums --------------------
 
 fetch_one() {
   url="$1"
   fname="$(basename "$url")"
   out="${DISTFILES}/${fname}"
 
-  if [ -f "$out" ]; then
-    return 0
-  fi
+  [ -f "$out" ] && return 0
 
   msg "baixando: $url"
   if have_cmd curl; then
@@ -198,41 +194,42 @@ cmd_checksum() {
   run_hook pre_fetch
   for url in $source_urls; do fetch_one "$url"; done
 
-  # gera checksums com basenames
   tmp="$(mktemp)"
   for url in $source_urls; do
     f="$(basename "$url")"
     [ -f "${DISTFILES}/${f}" ] || die "distfile ausente: ${f}"
     sha256sum "${DISTFILES}/${f}" | awk '{print $1 "  " $2}' >>"$tmp"
   done
-
   mv -f "$tmp" "${PORTDIR}/checksums"
   run_hook post_fetch
   msg "checksums atualizados: ${pkgref}"
 }
 
-# ---------------- Cache de source extraído ----------------
+# -------------------- Source cache --------------------
 
 extract_one() {
   file="$1"
   outdir="$2"
+
   case "$file" in
-    *.tar.gz|*.tgz)  tar -xzf "$file" -C "$outdir" ;;
-    *.tar.xz)        tar -xJf "$file" -C "$outdir" ;;
-    *.tar.zst)       tar --zstd -xf "$file" -C "$outdir" ;;
-    *.tar.bz2)       tar -xjf "$file" -C "$outdir" ;;
-    *.zip)           unzip -q "$file" -d "$outdir" ;;
+    *.tar.zst)
+      have_cmd zstd || die "zstd necessário para extrair: $file"
+      zstd -d -q -c "$file" | tar -xpf - -C "$outdir" || die "falha ao extrair: $file"
+      ;;
+    *.tar.xz)  tar -xJf "$file" -C "$outdir" ;;
+    *.tar.gz|*.tgz) tar -xzf "$file" -C "$outdir" ;;
+    *.tar.bz2) tar -xjf "$file" -C "$outdir" ;;
+    *.zip)
+      have_cmd unzip || die "unzip necessário para extrair: $file"
+      unzip -q "$file" -d "$outdir"
+      ;;
     *) die "formato desconhecido: $file" ;;
   esac
 }
 
 prepare_src_cache() {
-  # cria/atualiza cache extraído por versão (por portref + version)
   cache="${SRCCACHE}/${PKGREF//\//_}-${PKGVERSION}"
-  if [ -d "$cache" ]; then
-    msg "usando src cache: $(basename "$cache")"
-    return 0
-  fi
+  [ -d "$cache" ] && return 0
 
   mkdir -p "$cache"
   for url in $source_urls; do
@@ -248,33 +245,27 @@ populate_work_src_from_cache() {
   cache="${SRCCACHE}/${PKGREF//\//_}-${PKGVERSION}"
   [ -d "$cache" ] || die "src cache ausente: $cache"
   mkdir -p "$SRCDIR"
-  # cópia rápida e segura (rsync se houver)
   if have_cmd rsync; then
     rsync -a --delete "$cache"/ "$SRCDIR"/
   else
-    # fallback
     ( cd "$cache" && tar -cpf - . ) | ( cd "$SRCDIR" && tar -xpf - )
   fi
 }
 
-# ---------------- Patches padrão ----------------
-
 apply_default_patches() {
   [ -d "$PATCHDIR" ] || return 0
-  # aplica *.patch e *.diff em ordem
-  set +e
-  patches="$(find "$PATCHDIR" -maxdepth 1 -type f \( -name '*.patch' -o -name '*.diff' \) | sort)"
-  set -e
+  have_cmd patch || die "precisa de 'patch' para aplicar patches"
+
+  patches="$(find "$PATCHDIR" -maxdepth 1 -type f \( -name '*.patch' -o -name '*.diff' \) 2>/dev/null | sort || true)"
   [ -n "${patches:-}" ] || return 0
 
-  have_cmd patch || die "precisa de 'patch' para aplicar patches"
   for p in $patches; do
     msg "aplicando patch: $(basename "$p")"
     patch -Np1 < "$p" || die "falha ao aplicar patch: $p"
   done
 }
 
-# ---------------- Dependências (DFS simples) ----------------
+# -------------------- Deps (DFS simples) --------------------
 
 _seen=""
 _stack=""
@@ -299,15 +290,24 @@ resolve_deps() {
   _seen="$_seen $pkgref"
 }
 
-# ---------------- DB (texto puro) ----------------
+# -------------------- DB helpers --------------------
 
-pkg_db_dir(){ echo "${PKG_DB}/$1"; }
-
-pkg_is_installed() { [ -d "$(pkg_db_dir "$1")" ]; }
-
-pkg_installed_version() {
+pkg_db_dir(){ printf '%s\n' "${PKG_DB}/$1"; }
+pkg_is_installed(){ [ -d "$(pkg_db_dir "$1")" ]; }
+pkg_installed_version(){
   f="$(pkg_db_dir "$1")/version"
   [ -f "$f" ] && cat "$f" || true
+}
+
+world_add() {
+  pkgref="$1"
+  grep -qx "$pkgref" "$WORLD_FILE" 2>/dev/null || echo "$pkgref" >>"$WORLD_FILE"
+}
+world_remove() {
+  pkgref="$1"
+  [ -f "$WORLD_FILE" ] || return 0
+  grep -vx "$pkgref" "$WORLD_FILE" > "${WORLD_FILE}.tmp" || true
+  mv -f "${WORLD_FILE}.tmp" "$WORLD_FILE"
 }
 
 db_write_pkg() {
@@ -318,48 +318,78 @@ db_write_pkg() {
 
   dir="$(pkg_db_dir "$pkgref")"
   mkdir -p "$dir"
-  printf "%s\n" "$ver" > "${dir}/version"
-  printf "%s\n" "$depsline" > "${dir}/meta"
+  printf '%s\n' "$ver" > "${dir}/version"
+  printf '%s\n' "$depsline" > "${dir}/meta"
   cat "$files" > "${dir}/files"
 }
 
-world_add() {
+# -------------------- Owners DB (anti-colisão) --------------------
+
+owners_set() {
   pkgref="$1"
-  grep -qx "$pkgref" "$WORLD_FILE" 2>/dev/null || echo "$pkgref" >>"$WORLD_FILE"
+  filelist="$2"
+
+  # Remove entradas antigas desse pkgref
+  awk -F'\t' -v p="$pkgref" '$2!=p {print $0}' "$OWNERS_DB" > "${OWNERS_DB}.tmp" || true
+
+  # Adiciona novas: apenas paths absolutos e não vazios
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      /*)
+        # não registrar "/" em si
+        [ "$path" = "/" ] && continue
+        printf '%s\t%s\n' "$path" "$pkgref" >> "${OWNERS_DB}.tmp"
+        ;;
+    esac
+  done < "$filelist"
+
+  mv -f "${OWNERS_DB}.tmp" "$OWNERS_DB"
 }
 
-# ---------------- Empacotamento binário ----------------
+owners_owner_of() {
+  path="$1"
+  # retorna o último owner registrado (caso duplicado) — simples e suficiente
+  awk -F'\t' -v x="$path" '$1==x {o=$2} END{if(o!="") print o}' "$OWNERS_DB" 2>/dev/null || true
+}
+
+owners_remove_pkg() {
+  pkgref="$1"
+  awk -F'\t' -v p="$pkgref" '$2!=p {print $0}' "$OWNERS_DB" > "${OWNERS_DB}.tmp" || true
+  mv -f "${OWNERS_DB}.tmp" "$OWNERS_DB"
+}
+
+# -------------------- Empacotamento binário --------------------
 
 pkg_archive_paths() {
   base="${PACKAGES}/${PKGREF//\//_}-${PKGVERSION}-${PKGRELEASE}"
-  echo "${base}.tar.zst" "${base}.tar.xz"
+  printf '%s\n' "${base}.tar.zst" "${base}.tar.xz"
 }
 
 make_package_archive() {
   [ -d "$PKGDIR" ] || die "staging ausente: rode adm build primeiro"
-  zst="$(pkg_archive_paths | awk '{print $1}')"
-  xz="$(pkg_archive_paths | awk '{print $2}')"
+  zst="$(pkg_archive_paths | awk 'NR==1{print $0}')"
+  xz="$(pkg_archive_paths | awk 'NR==2{print $0}')"
 
   mkdir -p "$PACKAGES"
-  msg "empacotando: ${PKGREF} -> $(basename "$zst") (preferencial)"
+  msg "empacotando: ${PKGREF}"
 
   if have_cmd zstd; then
-    # tar stream + zstd: rápido e bom
     ( cd "$PKGDIR" && tar -cpf - . ) | zstd -T0 -19 -q -o "$zst" || die "falha ao gerar tar.zst"
     rm -f "$xz" 2>/dev/null || true
   else
-    msg "zstd ausente, usando fallback: $(basename "$xz")"
+    msg "zstd ausente, fallback tar.xz"
     ( cd "$PKGDIR" && tar -cJf "$xz" . ) || die "falha ao gerar tar.xz"
     rm -f "$zst" 2>/dev/null || true
   fi
 }
 
 find_best_package_archive() {
-  zst="$(pkg_archive_paths | awk '{print $1}')"
-  xz="$(pkg_archive_paths | awk '{print $2}')"
-  if [ -f "$zst" ]; then echo "$zst"; return 0; fi
-  if [ -f "$xz" ]; then echo "$xz"; return 0; fi
-  echo ""
+  zst="$(pkg_archive_paths | awk 'NR==1{print $0}')"
+  xz="$(pkg_archive_paths | awk 'NR==2{print $0}')"
+  [ -f "$zst" ] && { printf '%s\n' "$zst"; return 0; }
+  [ -f "$xz" ] && { printf '%s\n' "$xz"; return 0; }
+  printf '%s\n' ""
 }
 
 install_archive_to_root() {
@@ -376,11 +406,11 @@ install_archive_to_root() {
     *.tar.xz)
       tar -xJpf "$archive" -C / || die "falha ao extrair tar.xz"
       ;;
-    *) die "formato de pacote desconhecido: $archive" ;;
+    *) die "formato desconhecido: $archive" ;;
   esac
 }
 
-# ---------------- Build / Install / Remove ----------------
+# -------------------- Filelist / install / remove --------------------
 
 pkg_filelist() {
   pkgdir="$1"
@@ -419,16 +449,15 @@ do_build() {
     prepare_src_cache
     populate_work_src_from_cache
 
-    # entra na raiz do src (ou srcdir_name)
-    if [ -n "${srcdir_name:-}" ] && [ -d "${SRCDIR}/${srcdir_name}" ]; then
-      cd "${SRCDIR}/${srcdir_name}"
+    # entra no src principal
+    if [ -n "${SRCDIR_NAME:-}" ] && [ -d "${SRCDIR}/${SRCDIR_NAME}" ]; then
+      cd "${SRCDIR}/${SRCDIR_NAME}"
     else
       cd "$SRCDIR"
       set -- "$SRCDIR"/*
       if [ "$#" -eq 1 ] && [ -d "$1" ]; then cd "$1"; fi
     fi
 
-    # patches padrão
     apply_default_patches
 
     run_hook pre_prepare
@@ -444,34 +473,28 @@ do_build() {
     run_hook post_package
   ) || die "build falhou (veja $LOGFILE)"
 
-  # gera pacote binário e deixa no cache
   make_package_archive
-
   msg "build ok: ${pkgref} (log: $LOGFILE)"
 }
 
-do_install() {
+do_install_one() {
   need_root
   pkgref="$(load_port "$1")"
   port_vars "$pkgref"
 
-  # tenta instalar do cache binário primeiro
   archive="$(find_best_package_archive)"
   if [ -z "$archive" ]; then
     msg "sem pacote binário em cache; construindo: ${pkgref}"
     do_build "$pkgref"
     archive="$(find_best_package_archive)"
-    [ -n "$archive" ] || die "falha: pacote binário não foi gerado"
+    [ -n "$archive" ] || die "pacote binário não foi gerado"
   fi
 
   run_hook pre_install
 
-  filelist_tmp="$(mktemp)"
-
-  # Se temos staging atual, usamos ele para filelist. Caso contrário,
-  # extraímos lista do archive? (mais complexo). Estratégia prática:
-  # garante staging existindo: se PKGDIR não existe, recria extraindo para PKGDIR.
+  # garante staging para filelist (extraindo o pacote para PKGDIR se necessário)
   if [ ! -d "$PKGDIR" ] || [ -z "$(ls -A "$PKGDIR" 2>/dev/null || true)" ]; then
+    safe_rm_rf "$PKGDIR"
     mkdir -p "$PKGDIR"
     case "$archive" in
       *.tar.zst) zstd -d -q -c "$archive" | tar -xpf - -C "$PKGDIR" ;;
@@ -479,13 +502,14 @@ do_install() {
     esac
   fi
 
+  filelist_tmp="$(mktemp)"
   pkg_filelist "$PKGDIR" "$filelist_tmp"
 
-  # instala para /
   install_archive_to_root "$archive"
 
   depsline="depends=$depends; makedepends=$makedepends"
   db_write_pkg "$pkgref" "${PKGVERSION}-${PKGRELEASE}" "$filelist_tmp" "$depsline"
+  owners_set "$pkgref" "$filelist_tmp"
   world_add "$pkgref"
 
   rm -f "$filelist_tmp"
@@ -494,12 +518,12 @@ do_install() {
   msg "instalado: ${pkgref}"
 }
 
-do_remove() {
+do_remove_one() {
   need_root
   pkgref="$(resolve_pkgref "$1")"
   pkg_is_installed "$pkgref" || die "não instalado: $pkgref"
 
-  # carrega port se existir (para hooks); se não existir mais, remove mesmo assim sem hooks
+  # hooks se port ainda existe
   if [ -f "${PORTS_DIR}/${pkgref}/build.sh" ]; then
     load_port "$pkgref" >/dev/null
     port_vars "$pkgref"
@@ -509,26 +533,35 @@ do_remove() {
   files="$(pkg_db_dir "$pkgref")/files"
   [ -f "$files" ] || die "db corrompido: sem lista de arquivos"
 
-  msg "removendo: $pkgref"
+  msg "removendo: $pkgref (respeitando owners)"
+  # remove apenas se ainda for owner
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    case "$p" in
-      /*) : ;;
-      *) continue ;;
-    esac
+    case "$p" in /*) : ;; *) continue ;; esac
+    [ "$p" = "/" ] && continue
+
+    owner="$(owners_owner_of "$p")"
+    if [ -n "$owner" ] && [ "$owner" != "$pkgref" ]; then
+      continue
+    fi
+
     if [ -f "$p" ] || [ -L "$p" ]; then
       rm -f -- "$p" || true
     fi
   done < "$files"
 
-  tac "$files" 2>/dev/null | while IFS= read -r p; do
+  # tenta limpar diretórios vazios (ordem reversa sem tac)
+  awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}' "$files" 2>/dev/null | while IFS= read -r p; do
     [ -n "$p" ] || continue
+    case "$p" in /*) : ;; *) continue ;; esac
     if [ -d "$p" ]; then
       rmdir --ignore-fail-on-non-empty "$p" 2>/dev/null || true
     fi
   done
 
+  owners_remove_pkg "$pkgref"
   safe_rm_rf "$(pkg_db_dir "$pkgref")"
+  world_remove "$pkgref"
 
   if [ -f "${PORTS_DIR}/${pkgref}/build.sh" ]; then
     run_hook post_remove
@@ -537,38 +570,67 @@ do_remove() {
   msg "removido: $pkgref"
 }
 
-# upgrade seguro: build+package OK -> remove antigo -> install novo
+# upgrade seguro: build OK -> remove antigo -> install novo
 do_upgrade_one() {
   need_root
   pkgref="$(resolve_pkgref "$1")"
   installed_before=0
-  if pkg_is_installed "$pkgref"; then installed_before=1; fi
+  pkg_is_installed "$pkgref" && installed_before=1
 
+  # build sempre usa port atual
   load_port "$pkgref" >/dev/null
   port_vars "$pkgref"
 
   run_hook pre_upgrade || true
-  do_build "$pkgref"          # se falhar, não remove nada
+  do_build "$pkgref"      # se falhar, não remove nada
   run_hook post_upgrade || true
 
   if [ "$installed_before" -eq 1 ]; then
-    do_remove "$pkgref"
+    do_remove_one "$pkgref"
   fi
-  do_install "$pkgref"
+  do_install_one "$pkgref"
 }
 
-# ---------------- Commands: info / search ----------------
+# -------------------- Comandos --------------------
+
+cmd_sync() {
+  ensure_dirs
+  if [ -d "$PORTS_DIR/.git" ]; then
+    msg "atualizando ports: $PORTS_DIR"
+    ( cd "$PORTS_DIR" && git pull --ff-only ) || die "falha no git pull"
+  else
+    [ -n "$REPO_URL" ] || die "PORTS_DIR não é git. Defina REPO_URL para clone automático."
+    msg "clonando ports de $REPO_URL em $PORTS_DIR"
+    git clone "$REPO_URL" "$PORTS_DIR" || die "falha no git clone"
+  fi
+}
+
+cmd_list() { list_all_ports; }
+
+cmd_search() {
+  q="$1"
+  list_all_ports | while IFS= read -r pkgref; do
+    case "$pkgref" in
+      *"$q"*)
+        if pkg_is_installed "$pkgref"; then
+          printf '%s\n' "$pkgref [ ✔️]"
+        else
+          printf '%s\n' "$pkgref"
+        fi
+        ;;
+    esac
+  done
+}
 
 cmd_info() {
   pkgref="$(resolve_pkgref "$1")"
-  installed="no"
   mark=""
+  installed="no"
   if pkg_is_installed "$pkgref"; then
     installed="yes"
     mark="[ ✔️]"
   fi
 
-  # se existe port, mostra metadados; se não, ao menos estado instalado
   if [ -f "${PORTS_DIR}/${pkgref}/build.sh" ]; then
     load_port "$pkgref" >/dev/null
     echo "${pkgref} ${mark}"
@@ -585,45 +647,12 @@ cmd_info() {
   fi
 }
 
-cmd_search() {
-  q="$1"
-  list_all_ports | while IFS= read -r pkgref; do
-    case "$pkgref" in
-      *"$q"*) 
-        if pkg_is_installed "$pkgref"; then
-          echo "$pkgref [ ✔️]"
-        else
-          echo "$pkgref"
-        fi
-        ;;
-    esac
-  done
-}
-
-# ---------------- Sync Git ----------------
-
-cmd_sync() {
-  ensure_dirs
-  if [ -d "$PORTS_DIR/.git" ]; then
-    msg "atualizando ports: $PORTS_DIR"
-    ( cd "$PORTS_DIR" && git pull --ff-only ) || die "falha no git pull"
-  else
-    [ -n "$REPO_URL" ] || die "PORTS_DIR não é git. Defina REPO_URL para clone automático."
-    msg "clonando ports de $REPO_URL em $PORTS_DIR"
-    git clone "$REPO_URL" "$PORTS_DIR" || die "falha no git clone"
-  fi
-}
-
-# ---------------- High-level: build/install with deps ----------------
-
 cmd_build() {
   ensure_dirs
   lock
   _seen=""; _stack=""
   resolve_deps "$1"
-  for p in $_seen; do
-    do_build "$p"
-  done
+  for p in $_seen; do do_build "$p"; done
 }
 
 cmd_install() {
@@ -633,12 +662,18 @@ cmd_install() {
   resolve_deps "$1"
   for p in $_seen; do
     if ! pkg_is_installed "$p"; then
-      do_install "$p"
+      do_install_one "$p"
     fi
   done
 }
 
-cmd_upgrade_world() {
+cmd_remove() {
+  ensure_dirs
+  lock
+  do_remove_one "$1"
+}
+
+cmd_upgrade() {
   ensure_dirs
   lock
   while IFS= read -r p; do
@@ -648,30 +683,18 @@ cmd_upgrade_world() {
 }
 
 cmd_rebuild_installed() {
-  # Reconstrói tudo instalado em ordem correta (a partir do world),
-  # garantindo build OK antes de trocar.
+  # reconstrói e “troca” em ordem topológica do world (deps primeiro)
   ensure_dirs
   lock
-
   _seen=""; _stack=""
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     resolve_deps "$p"
   done < "$WORLD_FILE"
 
-  # _seen já está em ordem topológica (deps primeiro).
   for p in $_seen; do
-    if pkg_is_installed "$p"; then
-      do_upgrade_one "$p"
-    else
-      # se não instalado, não reconstrói
-      :
-    fi
+    pkg_is_installed "$p" && do_upgrade_one "$p"
   done
-}
-
-cmd_list_ports() {
-  list_all_ports
 }
 
 usage() {
@@ -696,19 +719,18 @@ EOF
 main() {
   [ "$#" -ge 1 ] || usage
   ensure_dirs
-
   cmd="$1"; shift
   case "$cmd" in
     sync)              cmd_sync ;;
-    list)              cmd_list_ports ;;
+    list)              cmd_list ;;
     search)            [ "$#" -eq 1 ] || usage; cmd_search "$1" ;;
     info)              [ "$#" -eq 1 ] || usage; cmd_info "$1" ;;
     fetch)             [ "$#" -eq 1 ] || usage; do_fetch "$1" ;;
     checksum)          [ "$#" -eq 1 ] || usage; cmd_checksum "$1" ;;
     build)             [ "$#" -eq 1 ] || usage; cmd_build "$1" ;;
     install)           [ "$#" -eq 1 ] || usage; cmd_install "$1" ;;
-    remove)            [ "$#" -eq 1 ] || usage; lock; do_remove "$1" ;;
-    upgrade)           [ "$#" -eq 0 ] || usage; cmd_upgrade_world ;;
+    remove)            [ "$#" -eq 1 ] || usage; cmd_remove "$1" ;;
+    upgrade)           [ "$#" -eq 0 ] || usage; cmd_upgrade ;;
     rebuild-installed) [ "$#" -eq 0 ] || usage; cmd_rebuild_installed ;;
     *) usage ;;
   esac
