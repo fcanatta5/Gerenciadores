@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+echo "[runit] stage 2"
+exec runsvdir -P /etc/runit/runsvdir/default
