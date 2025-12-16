@@ -14,6 +14,8 @@ source_urls="
 https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz
 "
 
+# Dependências reais para build do GRUB.
+# efibootmgr e os-prober são runtime/integração, mas manter aqui ajuda no "set desktop" sem esquecer.
 depends="
 core/make
 core/pkgconf
@@ -36,14 +38,17 @@ build() {
   mkdir -p build
   cd build
 
-  # UEFI x86_64, sem NLS (evita gettext; mais simples em musl)
+  # UEFI x86_64
+  # --disable-nls: evita gettext/NLS (mais simples e estável em musl)
+  # --disable-device-mapper: evita puxar LVM/device-mapper (dependência surpresa)
   ../configure \
     --prefix=/usr \
+    --sbindir=/usr/sbin \
     --sysconfdir=/etc \
     --localstatedir=/var \
-    --sbindir=/usr/sbin \
     --disable-nls \
     --disable-werror \
+    --disable-device-mapper \
     --with-platform=efi \
     --target=x86_64 \
     --with-bootdir=/boot
@@ -57,10 +62,10 @@ package() {
 
   make -j1 DESTDIR="$DESTDIR" install
 
-  # Diretórios padrão esperados
-  mkdir -p "$DESTDIR/etc/default" "$DESTDIR/boot/grub"
+  # Diretórios esperados
+  mkdir -p "$DESTDIR/boot/grub" "$DESTDIR/etc/default"
 
-  # Arquivo default opcional (não interfere se você gerar grub.cfg manual)
+  # Default simples (você pode gerar grub.cfg manualmente depois)
   if [ ! -f "$DESTDIR/etc/default/grub" ]; then
     cat >"$DESTDIR/etc/default/grub" <<'EOF'
 GRUB_TIMEOUT=5
