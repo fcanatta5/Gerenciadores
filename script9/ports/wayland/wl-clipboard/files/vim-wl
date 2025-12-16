@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+# vim-wl: executa vim no terminal e, se estiver em Wayland, injeta config de clipboard via wl-copy/wl-paste.
+# Uso:
+#   vim-wl arquivo.txt
+
+if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1 && command -v wl-paste >/dev/null 2>&1; then
+  # Carrega o snippet de clipboard sem mexer no vimrc global do usuário.
+  SNIP="/usr/share/vim/vimrc.d/90-wayland-clipboard.vim"
+  if [ -f "$SNIP" ]; then
+    # VIMINIT é avaliado antes do vimrc do usuário; adicionamos 'source' do snippet.
+    export VIMINIT="source $SNIP | ${VIMINIT:-}"
+  fi
+fi
+
+exec vim "$@"
