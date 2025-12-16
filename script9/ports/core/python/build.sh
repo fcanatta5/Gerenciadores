@@ -8,18 +8,22 @@ name="python"
 version="3.12.7"
 release="1"
 
+# Tarball extrai para Python-<version>
 srcdir_name="Python-3.12.7"
 
 source_urls="
 https://www.python.org/ftp/python/3.12.7/Python-3.12.7.tar.xz
 "
 
-# Dependências mínimas típicas para um Python útil:
-# - zlib: compressão
-# - xz/bzip2: tarballs e módulos
-# (openssl não é estritamente obrigatório para compilar o interpretador,
-#  mas é essencial para TLS, pip, etc. então é melhor declarar.)
-depends="core/zlib core/xz core/bzip2"
+# Dependências reais para Python funcional no desktop
+depends="
+core/zlib
+core/xz
+core/bzip2
+core/openssl
+core/certificates
+"
+
 makedepends=""
 
 prepare() {
@@ -29,9 +33,9 @@ prepare() {
 build() {
   enter_srcdir_auto
 
-  # Python é autotools-like (configure + make), mas não requer autoreconf.
-  # --enable-shared é importante para muitos usos (extensões, embedding).
-  # --with-ensurepip=install tenta instalar pip/setuptools via ensurepip.
+  # Python não requer autoreconf
+  # --enable-shared: necessário para extensões, embedding, ctypes
+  # --with-ensurepip=install: pip funcional já na instalação
   ./configure \
     --prefix=/usr \
     --enable-shared \
@@ -43,10 +47,10 @@ build() {
 package() {
   enter_srcdir_auto
 
-  make DESTDIR="$DESTDIR" install
+  # install sequencial é mais robusto
+  make -j1 DESTDIR="$DESTDIR" install
 
-  # Alguns sistemas querem garantir o symlink "python" -> "python3"
-  # (opcional; você decide política)
+  # Política comum: python -> python3
   mkdir -p "$DESTDIR/usr/bin"
   if [ -x "$DESTDIR/usr/bin/python3" ] && [ ! -e "$DESTDIR/usr/bin/python" ]; then
     ln -sf python3 "$DESTDIR/usr/bin/python"
