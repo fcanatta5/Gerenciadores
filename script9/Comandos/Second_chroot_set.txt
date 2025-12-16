@@ -1,0 +1,101 @@
+SECOND CHROOT SET — MUSL DESKTOP (x86_64)
+Executar SOMENTE após concluir todo o FIRST_CHROOT_SET
+
+Objetivo:
+- Base de sistema desktop funcional
+- Sessão gráfica
+- Áudio, input, dispositivos
+- Sem ambientes gráficos ainda (GNOME/KDE vêm depois)
+
+--------------------------------------------------
+FASE 1 — SISTEMA, USUÁRIOS, LOGIN
+--------------------------------------------------
+1)  core/util-linux
+2)  core/shadow
+3)  core/pam   (necessário para login moderno)
+4)  core/elogind
+5)  core/dbus
+
+--------------------------------------------------
+FASE 2 — DISPOSITIVOS, INPUT, UDEV
+--------------------------------------------------
+6)  core/kmod
+7)  core/libudev-zero   (ou eudev, escolha UMA)
+8)  core/libinput
+9)  core/mtdev
+
+--------------------------------------------------
+FASE 3 — REDE
+--------------------------------------------------
+10) core/iptables
+11) core/iproute2
+12) core/ethtool
+13) core/dhcpcd        (ou NetworkManager depois)
+
+--------------------------------------------------
+FASE 4 — ÁUDIO / MULTIMÍDIA
+--------------------------------------------------
+14) core/alsa-lib
+15) core/alsa-utils
+16) core/pipewire
+17) core/wireplumber
+
+--------------------------------------------------
+FASE 5 — GRÁFICOS (BASE)
+--------------------------------------------------
+18) core/wayland
+19) core/wayland-protocols
+20) core/libdrm
+21) core/mesa
+
+--------------------------------------------------
+FASE 6 — X11 (OPCIONAL, MAS RECOMENDADO)
+--------------------------------------------------
+22) core/xorgproto
+23) core/xcb-proto
+24) core/libxcb
+25) core/xorg-server   (ou Xwayland depois)
+
+--------------------------------------------------
+FASE 7 — TOOLKITS GRÁFICOS
+--------------------------------------------------
+26) core/gtk3
+27) core/gtk4
+28) core/qt6-base
+
+--------------------------------------------------
+FASE 8 — FONTES E TEXTO
+--------------------------------------------------
+29) core/fontconfig
+30) core/freetype
+31) core/harfbuzz
+
+--------------------------------------------------
+FASE 9 — APLICAÇÕES BASE
+--------------------------------------------------
+32) core/xdg-utils
+33) core/xdg-desktop-portal
+34) core/xdg-desktop-portal-wlr (Wayland)
+35) core/foot   (terminal)
+36) core/pcmanfm (ou outro file manager)
+
+--------------------------------------------------
+FASE 10 — UTILITÁRIOS DESKTOP ESSENCIAIS
+--------------------------------------------------
+37) core/polkit
+38) core/seatd
+39) core/cliphist
+40) core/brightnessctl
+41) core/playerctl
+
+--------------------------------------------------
+APÓS CONCLUIR
+--------------------------------------------------
+- Sistema desktop MUSL funcional
+- Pronto para:
+  * Sway / Hyprland / GNOME / KDE
+  * Gerenciador de login (greetd, sddm, gdm)
+
+--------------------------------------------------
+FIM DO SECOND CHROOT SET
+--------------------------------------------------
