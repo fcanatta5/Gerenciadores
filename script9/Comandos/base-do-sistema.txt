@@ -1,0 +1,14 @@
+core/make
+core/m4
+core/pkgconf
+core/zlib
+core/xz
+core/zstd
+core/bzip2
+core/ncurses
+core/bash
+core/coreutils
+core/findutils
+core/sed
+core/grep
+core/awk
