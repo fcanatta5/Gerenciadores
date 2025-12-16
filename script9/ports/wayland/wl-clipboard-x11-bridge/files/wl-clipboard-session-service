@@ -1,0 +1,14 @@
+[Unit]
+Description=Wayland clipboard persistence + Xwayland bridge (wl-clip-persist + wl-clipboard + xclip)
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=PERSIST_MODE=regular
+Environment=PERSIST_LIMIT_BYTES=1048576
+Environment=X11_POLL_MS=400
+ExecStart=/usr/bin/wl-clipboard-session
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
