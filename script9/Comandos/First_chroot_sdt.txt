@@ -1,0 +1,108 @@
+FIRST CHROOT SET — MUSL DESKTOP (x86_64)
+Ordem obrigatória — NÃO pular etapas
+
+FASE 0 — SANITY CHECK (manual)
+- entrar no chroot
+- toolchain cross funcional
+- /bin/sh funcionando (busybox)
+
+--------------------------------------------------
+FASE 1 — FERRAMENTAS FUNDAMENTAIS DE BUILD
+--------------------------------------------------
+1)  core/make
+2)  core/pkgconf
+3)  core/m4
+
+--------------------------------------------------
+FASE 2 — COMPRESSÃO E FORMATOS BÁSICOS
+--------------------------------------------------
+4)  core/zlib
+5)  core/xz
+6)  core/zstd
+7)  core/bzip2
+
+--------------------------------------------------
+FASE 3 — USERLAND GNU BÁSICO
+--------------------------------------------------
+8)  core/coreutils
+9)  core/findutils
+10) core/grep
+11) core/sed
+12) core/gawk
+13) core/tar
+
+--------------------------------------------------
+FASE 4 — TERMINAIS E TEXTO
+--------------------------------------------------
+14) core/ncurses
+15) core/readline
+
+--------------------------------------------------
+FASE 5 — SHELL PRINCIPAL
+--------------------------------------------------
+16) core/bash
+17) core/less
+
+--------------------------------------------------
+FASE 6 — TOOLCHAIN NATIVO DEFINITIVO
+(ABANDONA O CROSS)
+--------------------------------------------------
+18) core/binutils
+19) core/gcc
+
+--------------------------------------------------
+FASE 7 — INFRAESTRUTURA PYTHON / BUILDS MODERNOS
+--------------------------------------------------
+20) core/python
+21) core/setuptools
+22) core/wheel
+23) core/ninja
+24) core/meson
+
+--------------------------------------------------
+FASE 8 — CRIPTOGRAFIA, TLS, DOWNLOADS
+--------------------------------------------------
+25) core/openssl
+26) core/certificates
+27) core/curl
+
+--------------------------------------------------
+FASE 9 — PARSERS, DOCS, AUTOTOOLS HELPERS
+--------------------------------------------------
+28) core/bison
+29) core/flex
+30) core/texinfo
+
+--------------------------------------------------
+FASE 10 — UTILITÁRIOS ESSENCIAIS
+--------------------------------------------------
+31) core/file
+32) core/which
+33) core/diffutils
+34) core/patch
+35) core/wget   (opcional se curl já cobre tudo)
+
+--------------------------------------------------
+APÓS CONCLUIR TODAS AS FASES
+--------------------------------------------------
+- sistema MUSL nativo funcional
+- adm assume totalmente
+- pronto para iniciar stack desktop (dbus, mesa, wayland/X11)
+
+--------------------------------------------------
+COMANDOS SUGERIDOS (EXEMPLO)
+--------------------------------------------------
+adm install core/make core/pkgconf core/m4
+adm install core/zlib core/xz core/zstd core/bzip2
+adm install core/coreutils core/findutils core/grep core/sed core/gawk core/tar
+adm install core/ncurses core/readline
+adm install core/bash core/less
+adm install core/binutils core/gcc
+adm install core/python core/setuptools core/wheel core/ninja core/meson
+adm install core/openssl core/certificates core/curl
+adm install core/bison core/flex core/texinfo
+adm install core/file core/which core/diffutils core/patch core/wget
+
+--------------------------------------------------
+FIM DO FIRST CHROOT SET
+--------------------------------------------------
