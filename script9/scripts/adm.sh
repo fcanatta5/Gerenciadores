@@ -143,8 +143,11 @@ port_vars() {
   SRCDIR="${WORKDIR}/src"
   PKGDIR="${PKGROOT}/${PKGREF//\//_}-${PKGVERSION}"
   LOGFILE="${LOG_DIR}/${PKGREF//\//_}-${PKGVERSION}.log"
+  # Exporta srcdir_name para o ambiente do port/helpers
+  SRCDIR_NAME="${srcdir_name:-}"
+  export SRCDIR_NAME
 
-  export JOBS WORKDIR SRCDIR PKGDIR DESTDIR LOGFILE
+  export JOBS WORKDIR SRCDIR PKGDIR DESTDIR LOGFILE SRCDIR_NAME
   DESTDIR="$PKGDIR"
 
   export CFLAGS="${CFLAGS:--O2 -pipe}"
