@@ -1,0 +1,11 @@
+# Para baixar o sha256sum 
+adm checksum core/m4
+
+# Construir e instalar
+adm build core/m4
+adm install core/m4
+
+# Verificar
+adm info core/m4
+m4 --version
+  
