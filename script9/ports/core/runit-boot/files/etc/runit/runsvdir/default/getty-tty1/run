@@ -1,0 +1,4 @@
+#!/bin/sh
+exec 2>&1
+# ajuste a velocidade/tty se quiser
+exec agetty -L 115200 tty1 linux
