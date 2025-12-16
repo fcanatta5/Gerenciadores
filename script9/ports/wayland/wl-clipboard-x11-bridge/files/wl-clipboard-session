@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+# wl-clipboard-session
+# Sobe wl-clip-persist (persistência) + wl-x11-clipboard-bridge (sincronização Xwayland).
+#
+# Env úteis:
+#   PERSIST_LIMIT_BYTES=1048576   (1 MiB; 0/desdefinido = sem limite)
+#   PERSIST_MODE=regular          (regular|primary|both)  -> cuidado com primary/both em alguns setups
+#   X11_POLL_MS=400
+#
+# Requisitos:
+#   WAYLAND_DISPLAY set
+#   DISPLAY set (para Xwayland)
+#
+# Nota: wl-clip-persist tem opção --selection-size-limit (recomendada para evitar consumo de RAM). 2
+
+have(){ command -v "$1" >/dev/null 2>&1; }
+die(){ printf '%s\n' "wl-clipboard-session: erro: $*" >&2; exit 1; }
+msg(){ printf '%s\n' "wl-clipboard-session: $*" >&2; }
+
+[ -n "${WAYLAND_DISPLAY:-}" ] || die "WAYLAND_DISPLAY não definido (não é sessão Wayland?)"
+[ -n "${DISPLAY:-}" ] || die "DISPLAY não definido (Xwayland/X11 não disponível?)"
+
+have wl-copy || die "wl-copy ausente (instale base/wl-clipboard)"
+have wl-paste || die "wl-paste ausente (instale base/wl-clipboard)"
+have wl-clip-persist || die "wl-clip-persist ausente"
+have wl-x11-clipboard-bridge || die "wl-x11-clipboard-bridge ausente"
+
+PERSIST_MODE="${PERSIST_MODE:-regular}"
+PERSIST_LIMIT_BYTES="${PERSIST_LIMIT_BYTES:-1048576}"
+
+# Inicia persistência (Wayland)
+persist_args="--clipboard ${PERSIST_MODE}"
+if [ -n "${PERSIST_LIMIT_BYTES:-}" ] && [ "${PERSIST_LIMIT_BYTES}" != "0" ]; then
+  persist_args="${persist_args} --selection-size-limit ${PERSIST_LIMIT_BYTES}"
+fi
+
+msg "iniciando wl-clip-persist (${persist_args})"
+wl-clip-persist ${persist_args} &
+p_persist=$!
+
+# Inicia ponte X11 <-> Wayland
+msg "iniciando bridge wl-x11-clipboard-bridge"
+wl-x11-clipboard-bridge &
+p_bridge=$!
+
+trap 'kill "$p_bridge" "$p_persist" 2>/dev/null || true' INT TERM EXIT
+
+wait "$p_persist" "$p_bridge"
