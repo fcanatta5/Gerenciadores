@@ -1,0 +1,6 @@
+#!/bin/sh
+exec 2>&1
+
+# dhcpcd normalmente daemoniza; com debug (-d) ele não daemoniza (mantém foreground). 9
+# -t 0: espera indefinidamente por lease
+exec /usr/bin/dhcpcd -d -t 0
