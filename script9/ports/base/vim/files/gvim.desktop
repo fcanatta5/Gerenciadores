@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=GVim
+GenericName=Text Editor
+Comment=Vim editor (GUI)
+Exec=gvim %F
+TryExec=gvim
+Terminal=false
+Categories=Utility;TextEditor;
+Icon=gvim
+StartupNotify=true
+MimeType=text/plain;
