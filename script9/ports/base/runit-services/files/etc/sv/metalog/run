@@ -1,0 +1,4 @@
+#!/bin/sh
+exec 2>&1
+# metalog roda em foreground por padrão; -B seria daemonize. 7
+exec /usr/sbin/metalog -C /etc/metalog.conf -s
