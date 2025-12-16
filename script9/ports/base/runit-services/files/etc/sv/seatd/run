@@ -1,0 +1,6 @@
+#!/bin/sh
+exec 2>&1
+
+# Ajuste o grupo conforme seu desktop (muito comum: video).
+# Se você criar grupo "seat", troque para: -g seat
+exec /usr/bin/seatd -g video
