@@ -1,0 +1,7 @@
+# /usr/share/adm/grub.cfg.header
+# Header simples e robusto para GRUB (UEFI/BIOS)
+insmod part_gpt
+insmod part_msdos
+insmod fat
+insmod ext2
+insmod gzio
