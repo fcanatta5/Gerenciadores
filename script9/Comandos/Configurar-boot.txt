@@ -1,0 +1,230 @@
+Vou assumir x86_64, UEFI puro (sem legacy/CSM) e que o sistema final está em /mnt/adm.
+
+
+---
+
+Visão geral (o que vamos fazer)
+
+1. Garantir que a ESP (EFI System Partition) está montada
+
+
+2. Instalar GRUB UEFI dentro do sysroot
+
+
+3. Criar grub.cfg simples e funcional para musl
+
+
+4. Testar boot
+
+
+
+Nada aqui depende de systemd.
+
+
+---
+
+1) Pré-requisitos obrigatórios
+
+Você precisa destes ports instalados no chroot:
+
+adm install core/grub core/efibootmgr core/os-prober
+
+> Se ainda não gerou esses ports e quiser, eu faço agora.
+
+
+
+Além disso, confirme:
+
+ls /sys/firmware/efi
+
+Se existir → você está em UEFI (ok).
+
+
+---
+
+2) Partições esperadas (exemplo)
+
+Exemplo comum:
+
+Partição	Tipo	Montagem
+
+EFI System Partition	FAT32	/boot/efi
+Root (musl)	ext4	/
+
+
+No host (ou chroot), monte assim:
+
+mount /dev/nvme0n1p1 /mnt/adm/boot/efi
+
+> Substitua pelo seu dispositivo real.
+
+
+
+Crie os diretórios se necessário:
+
+mkdir -p /mnt/adm/boot/efi
+
+
+---
+
+3) Entrar no chroot corretamente
+
+Monte pseudo-fs:
+
+mount --bind /dev  /mnt/adm/dev
+mount --bind /proc /mnt/adm/proc
+mount --bind /sys  /mnt/adm/sys
+
+Entre:
+
+chroot /mnt/adm /bin/bash
+
+Garanta PATH correto:
+
+export PATH=/usr/bin:/bin:/sbin
+
+
+---
+
+4) Instalar GRUB (UEFI)
+
+Dentro do chroot:
+
+grub-install \
+  --target=x86_64-efi \
+  --efi-directory=/boot/efi \
+  --bootloader-id=ADM \
+  --recheck
+
+Resultado esperado:
+
+/boot/efi/EFI/ADM/grubx64.efi
+
+entrada criada no NVRAM (via efibootmgr)
+
+
+Verifique:
+
+efibootmgr -v
+
+
+---
+
+5) Criar grub.cfg (musl-safe)
+
+Crie /boot/grub/grub.cfg manualmente (recomendado):
+
+cat > /boot/grub/grub.cfg <<'EOF'
+set timeout=5
+set default=0
+
+menuentry "ADM Linux (musl)" {
+    insmod gzio
+    insmod part_gpt
+    insmod ext2
+
+    search --no-floppy --label ADMROOT --set=root
+
+    linux /boot/vmlinuz-$(ls /boot | grep vmlinuz | sed 's/vmlinuz-//') \
+        root=LABEL=ADMROOT \
+        rw quiet
+
+}
+EOF
+
+IMPORTANTE
+
+Isso assume que sua partição root tem label ADMROOT.
+
+Se ainda não tiver, fora do chroot:
+
+e2label /dev/nvme0n1p2 ADMROOT
+
+(ajuste o device)
+
+
+---
+
+6) Verificações finais
+
+Ainda no chroot:
+
+ls /boot
+ls /boot/efi/EFI/ADM
+
+Você deve ver:
+
+vmlinuz-<versão>
+
+grub.cfg
+
+grubx64.efi
+
+
+
+---
+
+7) Reiniciar e bootar
+
+Saia do chroot:
+
+exit
+
+Desmonte:
+
+umount -R /mnt/adm/dev
+umount -R /mnt/adm/proc
+umount -R /mnt/adm/sys
+
+Reinicie:
+
+reboot
+
+Selecione ADM no menu UEFI se necessário.
+
+
+---
+
+Notas importantes para musl
+
+Initramfs
+
+Não é obrigatório se:
+
+root não é criptografado
+
+drivers SATA/NVMe estão embutidos
+
+
+Se quiser initramfs depois: use mkinitramfs simples ou dracut sem systemd.
+
+
+Locale
+
+musl não usa locale como glibc
+
+evite LANG=pt_BR.UTF-8 no começo
+
+use LANG=C inicialmente
+
+
+
+---
+
+Próximo passo natural
+
+Depois do primeiro boot bem-sucedido:
+
+1. Instalar core/seatd
+
+
+2. core/dbus
+
+
+3. core/elogind
+
+
+4. core/wayland
+
+
+5. compositor (Sway ou Hyprland)
