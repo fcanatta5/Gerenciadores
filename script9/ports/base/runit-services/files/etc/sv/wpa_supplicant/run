@@ -1,0 +1,12 @@
+#!/bin/sh
+exec 2>&1
+
+CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
+[ -r /etc/default/wpa_supplicant ] && . /etc/default/wpa_supplicant
+
+# Defina IFACE em /etc/default/wpa_supplicant, ex:
+# IFACE=wlan0
+: "${IFACE:=wlan0}"
+
+# Sem -B ele fica em foreground (ideal p/ runit)
+exec /usr/sbin/wpa_supplicant -i "${IFACE}" -c "${CONF}"
