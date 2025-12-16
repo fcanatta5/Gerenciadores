@@ -14,13 +14,10 @@ source_urls="
 https://sourceware.org/pub/binutils/releases/binutils-2.45.1.tar.xz
 "
 
-# zlib é usado para suporte a seções comprimidas (debug, etc.)
 depends="core/zlib core/make"
 makedepends=""
 
-prepare() {
-  :
-}
+prepare() { :; }
 
 build() {
   enter_srcdir_auto
@@ -32,11 +29,12 @@ build() {
   ../configure \
     --prefix=/usr \
     --sysconfdir=/etc \
+    --disable-nls \
+    --disable-werror \
     --disable-static \
     --enable-shared \
     --enable-plugins \
-    --with-system-zlib \
-    --disable-werror
+    --with-system-zlib
 
   do_make
 }
@@ -44,13 +42,8 @@ build() {
 package() {
   enter_srcdir_auto
   cd build
-
-  # install serial é mais robusto
   make -j1 DESTDIR="$DESTDIR" install
-
   ensure_destdir_nonempty
 }
 
-post_install() {
-  :
-}
+post_install() { :; }
