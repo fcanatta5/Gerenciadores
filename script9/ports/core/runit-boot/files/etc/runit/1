@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+echo "[runit] stage 1"
+
+# mounts básicos
+mount -t proc proc /proc || true
+mount -t sysfs sys /sys || true
+mount -t devtmpfs dev /dev || true
+
+mkdir -p /run /tmp
+mount -t tmpfs tmpfs /run || true
+chmod 1777 /tmp || true
+
+# hostname opcional
+[ -f /etc/hostname ] && hostname "$(cat /etc/hostname)" || true
+
+# carrega módulos (opcional, você pode remover)
+if command -v modprobe >/dev/null 2>&1; then
+  modprobe loop 2>/dev/null || true
+fi
+
+# udev/eudev
+if command -v udevd >/dev/null 2>&1; then
+  echo "[runit] starting udevd"
+  udevd --daemon
+  udevadm trigger --type=subsystems --action=add || true
+  udevadm trigger --type=devices --action=add || true
+  udevadm settle || true
+fi
+
+# fsck/mount via fstab (simples)
+if [ -f /etc/fstab ]; then
+  mount -a || true
+fi
+
+exit 0
