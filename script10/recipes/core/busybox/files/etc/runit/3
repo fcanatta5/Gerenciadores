@@ -1,0 +1,4 @@
+#!/bin/sh
+# /etc/runit/3
+sync
+umount -a -r 2>/dev/null || true
