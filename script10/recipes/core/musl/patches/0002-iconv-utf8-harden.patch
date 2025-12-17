@@ -1,0 +1,17 @@
+From c47ad25ea3b484e10326f933e927c0bc8cded3da Mon Sep 17 00:00:00 2001
+From: Rich Felker
+Date: Wed, 12 Feb 2025 17:06:30 -0500
+Subject: iconv: harden UTF-8 output code path against input decoder bugs
+
+--- a/src/locale/iconv.c
++++ b/src/locale/iconv.c
+@@ -545,6 +545,10 @@ size_t iconv(iconv_t cd, char **restrict in, size_t *restrict inb, char **restri
+        memcpy(*out, tmp, k);
+ 
+        } else k = wctomb_utf8(*out, c);
++       /* This failure condition should be unreachable, but
++        * is included to prevent decoder bugs from translating
++        * into advancement outside the output buffer range. */
++       if (k>4) goto ilseq;
+        *out += k;
+        *outb -= k;
