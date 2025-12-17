@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# /var/lib/adm/packages/core/m4/build
+# GNU m4 - macro processor (base para autotools e muitos builds)
+# Build autotools clássico (configure/make), instala em /usr.
+
+set -Eeuo pipefail
+
+PKG_NAME="m4"
+PKG_CAT="core"
+PKG_VER="1.4.19"
+PKG_DESC="GNU m4 macro processor"
+PKG_URL="https://www.gnu.org/software/m4/"
+PKG_LICENSE="GPL-3.0-or-later"
+
+PKG_DEPS=( "core/musl" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://ftp.gnu.org/gnu/m4/m4-${PKG_VER}.tar.xz"
+)
+
+# IMPORTANTE:
+# Seu adm exige checksum para fontes não-git, a menos que ALLOW_NO_CHECKSUM=1.
+# Troque por SHA256 real assim que possível.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-m4-${PKG_VER}.tar.xz>"
+)
+
+do_configure(){
+  # Helpers (opcional)
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # Configuração out-of-tree
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --disable-nls )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # Opcional: reduzir ruído/tamanho no sistema base
+  rm -rf "${DESTDIR}/usr/share/info" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/man"  2>/dev/null || true
+}
