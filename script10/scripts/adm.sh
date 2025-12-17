@@ -168,23 +168,44 @@ sig_set(){ echo "$2" >"$ADM_DB/$1.sig"; }
 # -------------------------
 # recipe "name" is path without .sh, e.g. base/musl, programa/sway
 list_recipes(){
-  ( cd "$ADM_RECIPES" && find . -type f -name '*.sh' | sed 's|^\./||; s|\.sh$||' | sort )
+  # Novo padrão: */*/recipe.sh  => categoria/nome
+  # Legado: */*.sh             => categoria/nome
+  (
+    cd "$ADM_RECIPES"
+
+    # novo padrão
+    find . -type f -path './*/*/recipe.sh' -print \
+      | sed 's|^\./||; s|/recipe\.sh$||' \
+
+    # legado
+    find . -type f -path './*/*.sh' -print \
+      | grep -v '/recipe\.sh$' \
+      | sed 's|^\./||; s|\.sh$||'
+  ) | sort -u
 }
 
 recipe_path(){
   local r="$1"
-  echo "$ADM_RECIPES/$r.sh"
+  # Novo padrão
+  if [[ -f "$ADM_RECIPES/$r/recipe.sh" ]]; then
+    echo "$ADM_RECIPES/$r/recipe.sh"
+    return 0
+  fi
+  # Legado
+  if [[ -f "$ADM_RECIPES/$r.sh" ]]; then
+    echo "$ADM_RECIPES/$r.sh"
+    return 0
+  fi
+  die "recipe não encontrado: $r"
 }
 
-# patch dir convention:
-# - same base name with .d/patches:  base/musl.sh -> base/musl.d/patches/*.patch
-# - or base/musl/patches/*.patch (alt)
 patch_dirs_for(){
   local r="$1"
-  local rp="$ADM_RECIPES/$r.sh"
-  local base="${rp%.sh}"
-  echo "${base}.d/patches"
-  echo "${base}/patches"
+  # Novo padrão
+  echo "$ADM_RECIPES/$r/patches"
+  # Legado compatível
+  echo "$ADM_RECIPES/$r.d/patches"
+  echo "$ADM_RECIPES/$r/patches"
 }
 
 # -------------------------
@@ -216,21 +237,52 @@ reset_recipe_vars(){
   # unset any hook funcs? not possible safely; rely on unique names per load by sourcing in subshell where needed
 }
 
-load_recipe(){
+load_recipe() {
   local r="$1"
-  local file
-  file="$(recipe_path "$r")"
-  [[ -f "$file" ]] || die "recipe não encontrado: $r"
 
-  reset_recipe_vars
+  # Resolve o caminho real do recipe (suporta novo layout e legado)
+  RECIPE_FILE="$(recipe_path "$r")"
+  [[ -f "$RECIPE_FILE" ]] || die "recipe não encontrado: $r"
+
+  # Diretórios úteis para o recipe
+  RECIPE_DIR="$(cd "$(dirname "$RECIPE_FILE")" && pwd)"
+  # Novo layout: .../<cat>/<pkg>/recipe.sh  => files em .../<cat>/<pkg>/files
+  # Legado: .../<cat>/<pkg>.sh             => files em .../<cat>/<pkg>/files (se existir)
+  FILES_DIR="$RECIPE_DIR/files"
+  PATCHES_DIR="$RECIPE_DIR/patches"
+
+  # Nome lógico (categoria/nome)
+  RECIPE_NAME="$r"
+  RECIPE_CATEGORY="$(dirname "$r")"
+  RECIPE_PKG="$(basename "$r")"
+
+  # Limpa variáveis esperadas do recipe (evita vazamento entre loads)
+  unset pkgname pkgver srcurl srcext sha256 md5 description category
+  deps=()
+  provides=()
+
+  # Carrega recipe
   # shellcheck disable=SC1090
-  source "$file"
+  source "$RECIPE_FILE"
 
-  [[ -n "${pkgname:-}" && -n "${pkgver:-}" && -n "${srcurl:-}" ]] || die "metadata incompleto em $r"
-  [[ "$(type -t build || true)" == "function" ]] || die "recipe sem build(): $r"
-  [[ "$(type -t install_pkg || true)" == "function" ]] || die "recipe sem install_pkg(): $r"
+  # Defaults úteis (opcionais)
+  : "${category:=$RECIPE_CATEGORY}"
+
+  # Valida metadata mínima
+  [[ -n "${pkgname:-}" ]] || die "metadata faltando (pkgname) em: $RECIPE_NAME"
+  [[ -n "${pkgver:-}"  ]] || die "metadata faltando (pkgver) em: $RECIPE_NAME"
+  [[ -n "${srcurl:-}"  ]] || die "metadata faltando (srcurl) em: $RECIPE_NAME"
+
+  # Valida funções obrigatórias
+  [[ "$(type -t build || true)" == "function" ]] || die "recipe sem função build(): $RECIPE_NAME"
+  [[ "$(type -t install_pkg || true)" == "function" ]] || die "recipe sem função install_pkg(): $RECIPE_NAME"
+
+  # Normaliza arrays
   deps=("${deps[@]:-}")
   provides=("${provides[@]:-}")
+
+  # Exposição de variáveis padronizadas (para recipes usarem)
+  export RECIPE_FILE RECIPE_DIR FILES_DIR PATCHES_DIR RECIPE_NAME RECIPE_CATEGORY RECIPE_PKG
 }
 
 # -------------------------
