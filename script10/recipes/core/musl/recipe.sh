@@ -1,29 +1,29 @@
 # /var/lib/adm/recipes/core/musl/recipe.sh
+# musl 1.2.5 + patches CVE-2025-26519 (aplicados via patches/ automaticamente)
 
 pkgname="musl"
 pkgver="1.2.5"
 srcext="tar.gz"
 srcurl="https://musl.libc.org/releases/musl-${pkgver}.tar.gz"
 
-# Observação: checksums abaixo precisam ser do tarball oficial que você baixar.
-# Eu recomendo você preencher com:
-#   sha256="$(sha256sum musl-1.2.5.tar.gz | awk '{print $1}')"
-# Para não arriscar divergência por mirror/corrupt download.
-sha256=""
+# SHA256 conhecido do tarball musl-1.2.5.tar.gz 2
+sha256="a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4"
 md5=""
 
-description="musl libc (core). Inclui patches de segurança CVE-2025-26519 para 1.2.5."
+description="musl libc (core) - 1.2.5 + patches de segurança CVE-2025-26519"
 category="core"
-deps=()
-provides=("so:libc.so=0")
 
-: "${MUSL_PREFIX:=/usr}"
+deps=()
+provides=("so:libc.so=0" "cmd:ldd")
+
+# O seu adm chama install_pkg com PREFIX=/usr e DESTDIR=<staging> 3
+# musl loader deve ficar em /lib (syslibdir), mantendo /usr limpo.
 : "${MUSL_SYSLIBDIR:=/lib}"
 : "${MUSL_DISABLE_GCC_WRAPPER:=1}"
 
 build() {
   local cfg=(
-    "--prefix=${MUSL_PREFIX}"
+    "--prefix=${PREFIX:-/usr}"
     "--syslibdir=${MUSL_SYSLIBDIR}"
   )
 
@@ -38,7 +38,14 @@ build() {
 install_pkg() {
   make DESTDIR="${DESTDIR}" install
 
-  # ldd (fallback seguro)
+  # Garante /etc/ld-musl-x86_64.path (musl usa esse arquivo para lookup de libs)
+  # Não use hook post_install: no seu adm os hooks não herdam DESTDIR de forma confiável.
+  install -d "${DESTDIR}/etc"
+  if [[ -d "${FILES_DIR}" ]]; then
+    cp -a "${FILES_DIR}/." "${DESTDIR}/"
+  fi
+
+  # Fallback seguro para ldd (geralmente o musl instala, mas garantimos)
   if [[ ! -e "${DESTDIR}/usr/bin/ldd" ]]; then
     install -d "${DESTDIR}/usr/bin"
     cat > "${DESTDIR}/usr/bin/ldd" <<'EOF'
@@ -46,19 +53,5 @@ install_pkg() {
 exec /lib/libc.so "$@"
 EOF
     chmod +x "${DESTDIR}/usr/bin/ldd"
-  fi
-
-  # files/ (ex.: /etc/ld-musl-x86_64.path)
-  if [[ -d "${FILES_DIR}" ]]; then
-    cp -a "${FILES_DIR}/." "${DESTDIR}/"
-  fi
-}
-
-post_install() {
-  # garante arquivo de path mínimo
-  local f="${DESTDIR}/etc/ld-musl-x86_64.path"
-  if [[ ! -e "$f" ]]; then
-    install -d "${DESTDIR}/etc"
-    printf "%s\n" "/usr/lib" "/lib" >"$f"
   fi
 }
