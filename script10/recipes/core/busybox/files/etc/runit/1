@@ -1,0 +1,31 @@
+#!/bin/sh
+# /etc/runit/1
+
+# Montagens mínimas
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sys /sys 2>/dev/null || true
+
+# /dev via devtmpfs se disponível (kernel config)
+mount -t devtmpfs dev /dev 2>/dev/null || true
+
+# /dev/pts para getty
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+
+# tmpfs para /run e /tmp
+mkdir -p /run /tmp /var/log
+mount -t tmpfs tmpfs /run -o mode=0755,nosuid,nodev 2>/dev/null || true
+mount -t tmpfs tmpfs /tmp -o mode=1777,nosuid,nodev 2>/dev/null || true
+
+# hostname
+if [ -f /etc/hostname ]; then
+  hostname "$(cat /etc/hostname)" 2>/dev/null || true
+fi
+
+# one-shot optional
+if [ -x /etc/init.d/rcS ]; then
+  /etc/init.d/rcS 2>/dev/null || true
+fi
+
+# Sobe serviços
+exec /usr/bin/runsvdir -P /etc/service
