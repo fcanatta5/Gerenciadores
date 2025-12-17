@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# /var/lib/adm/packages/core/gcc/build
+# GCC final (C/C++) para sistema musl.
+#
+# Projetado para ser construído APÓS o cross-toolchain temporário e já DENTRO do chroot,
+# usando o compilador temporário (/mnt/adm/tools/bin/x86_64-linux-musl-gcc) como compilador “host”.
+#
+# Requisitos práticos:
+# - musl instalada no rootfs (core/musl)
+# - binutils instalada no rootfs (core/binutils)
+# - linux-headers instalada no rootfs (core/linux-headers)
+# - Bibliotecas do GCC: gmp, mpfr, mpc (e opcional isl) instaladas no rootfs (recomendado)
+#
+# Observação: você pode começar sem isl (GCC funciona sem ISL para Graphite em muitos casos),
+# mas gmp/mpfr/mpc são essencialmente obrigatórios.
+
+set -Eeuo pipefail
+
+PKG_NAME="gcc"
+PKG_CAT="core"
+PKG_VER="15.2.0"
+PKG_DESC="GNU Compiler Collection (C/C++) for musl-based system"
+PKG_URL="https://gcc.gnu.org/"
+PKG_LICENSE="GPL-3.0-or-later"
+
+# Base mínima para GCC final
+PKG_DEPS=(
+  "core/linux-headers"
+  "core/musl"
+  "core/binutils"
+)
+
+# Bibliotecas matemáticas obrigatórias do GCC (crie esses pacotes em seguida no core/)
+# Ajuste os nomes/categorias se o seu tree usar outros caminhos.
+PKG_BDEPS=(
+  "core/gmp"
+  "core/mpfr"
+  "core/mpc"
+  # "core/isl"   # opcional (Graphite)
+  # "core/zlib"  # recomendado (melhora alguns recursos; GCC pode usar zlib do sistema)
+)
+
+SOURCES=(
+  "https://ftp.gnu.org/gnu/gcc/gcc-${PKG_VER}/gcc-${PKG_VER}.tar.xz"
+)
+
+# IMPORTANTE:
+# Seu adm exige checksum para fontes não-git, a menos que ALLOW_NO_CHECKSUM=1.
+# Recomendo fortemente trocar por SHA256 real assim que possível.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-gcc-${PKG_VER}.tar.xz>"
+)
+
+do_configure(){
+  # Helpers (opcional, mas recomendado)
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # Target (musl)
+  export TARGET="${TARGET:-x86_64-linux-musl}"
+
+  # Durante o “pós-bootstrap”, normalmente quem existe é ${TARGET}-gcc (toolchain temporária).
+  # Garantimos que o configure usa isso, não o gcc do host (que pode nem existir).
+  export CC="${CC:-${TARGET}-gcc}"
+  export CXX="${CXX:-${TARGET}-g++}"
+  export AR="${AR:-${TARGET}-ar}"
+  export RANLIB="${RANLIB:-${TARGET}-ranlib}"
+  export LD="${LD:-${TARGET}-ld}"
+
+  # Em chroot inicial, às vezes não há /usr/bin/gcc ainda; forçamos PATH do tools antes.
+  # (Se você já exportou PATH corretamente antes de chamar adm, isso não muda nada.)
+  if [[ -d "/mnt/adm/tools/bin" ]]; then
+    export PATH="/mnt/adm/tools/bin:${PATH}"
+  fi
+
+  # Flags recomendadas (simples e seguras)
+  export CFLAGS="${CFLAGS:--O2 -pipe}"
+  export CXXFLAGS="${CXXFLAGS:--O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+
+  # Configure:
+  # - --disable-bootstrap: evita “3-stage bootstrap” (mais rápido e menos frágil no early system)
+  # - --disable-multilib: mantém simples (x86_64 puro)
+  # - --disable-nls: reduz deps
+  # - --enable-languages=c,c++: suficiente para base + Wayland + Firefox
+  # - --with-native-system-header-dir=/usr/include: correto para sysroot/rootfs
+  # - --with-system-zlib: usa zlib do sistema se disponível (recomendado)
+  #
+  # Nota: se você ainda NÃO tem zlib no sistema, gcc pode configurar sem ela em alguns casos,
+  # mas é melhor construir core/zlib antes e manter --with-system-zlib.
+  local zlib_opt="--with-system-zlib"
+  if [[ ! -f "/usr/include/zlib.h" ]]; then
+    # fallback: ainda tenta, mas não falha se o configure recusar; se falhar, construa zlib e refaça.
+    zlib_opt="--with-system-zlib"
+  fi
+
+  # Libs obrigatórias: gmp/mpfr/mpc precisam estar em /usr (ou ajuste os prefixos aqui).
+  # Se você instalar em outro prefixo, ajuste --with-xxx=...
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --libdir=/usr/lib \
+      --libexecdir=/usr/lib \
+      --disable-bootstrap \
+      --disable-multilib \
+      --disable-nls \
+      --enable-shared \
+      --enable-threads=posix \
+      --enable-languages=c,c++ \
+      --with-native-system-header-dir=/usr/include \
+      ${zlib_opt} \
+      --with-gmp=/usr \
+      --with-mpfr=/usr \
+      --with-mpc=/usr \
+  )
+}
+
+do_build(){
+  # GCC é grande; build out-of-tree é obrigatório na prática
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # Reduz tamanho (opcional): remove info/man no sistema base inicial
+  rm -rf "${DESTDIR}/usr/share/info" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/man"  2>/dev/null || true
+
+  # Conveniência: garante que cc existe (muitos builds assumem)
+  if [[ -x "${DESTDIR}/usr/bin/gcc" && ! -e "${DESTDIR}/usr/bin/cc" ]]; then
+    ln -sf gcc "${DESTDIR}/usr/bin/cc"
+  fi
+
+  # Segurança: cria diretórios padrão
+  mkdir -p "${DESTDIR}/usr/lib" "${DESTDIR}/usr/include" "${DESTDIR}/usr/bin"
+
+  # Nota:
+  # - Alguns sistemas preferem symlink de /usr/bin/${TARGET}-gcc -> gcc, mas eu NÃO forço isso aqui.
+  #   Isso depende do layout que você deseja para toolchains no seu sistema.
+}
+```0
