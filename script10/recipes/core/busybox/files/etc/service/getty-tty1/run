@@ -1,0 +1,3 @@
+#!/bin/sh
+# getty no tty1
+exec /bin/busybox getty -L 115200 tty1 vt100
