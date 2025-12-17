@@ -1,0 +1,10 @@
+#!/bin/sh
+# /etc/init.d/rcS
+# tarefas one-shot no boot
+/bin/busybox mkdir -p /run /var/log /tmp
+/bin/busybox chmod 1777 /tmp
+
+# Ajuste permissões básicas
+/bin/busybox chmod 0755 /run 2>/dev/null || true
+
+exit 0
