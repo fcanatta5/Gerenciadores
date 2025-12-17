@@ -1,0 +1,208 @@
+TUTORIAL COMPLETO DE USO DO SCRIPT build-cross-tools.sh
+
+Este documento descreve como utilizar o script build-cross-tools.sh para construir uma cross-toolchain temporária, limpa, reproduzível e funcional para a arquitetura x86_64 utilizando musl libc, sem contaminar o sistema root do host Linux. Todo o processo ocorre exclusivamente dentro de /mnt/adm/tools.
+
+O objetivo é deixar uma toolchain pronta para continuar a construção de um sistema Linux do zero, com retomada segura, logs completos, paralelismo e controle de versões centralizado.
+
+--------------------------------------------------------------------
+
+1. O QUE O SCRIPT CONSTRÓI
+
+O script constrói, na ordem correta, os seguintes componentes:
+
+- binutils 2.45.1 (pass1)
+- gcc 15.2.0 (pass1, sem headers)
+- linux headers 6.18.1
+- musl libc 1.2.5 com patches de segurança aplicados
+- gcc 15.2.0 final (C e C++)
+- busybox 1.36.1 (estático por padrão)
+- teste automático da toolchain (smoketest)
+
+Target final da toolchain:
+x86_64-linux-musl
+
+Prefixo de instalação:
+ /mnt/adm/tools
+
+Sysroot:
+ /mnt/adm/tools/x86_64-linux-musl
+
+--------------------------------------------------------------------
+
+2. REQUISITOS DO SISTEMA HOST
+
+O sistema host deve ser Linux x86_64 e possuir as seguintes ferramentas instaladas:
+
+bash
+gcc (host)
+make
+tar
+xz
+bzip2
+gzip
+curl
+patch
+sed
+awk
+sha256sum
+sha512sum
+
+Não é recomendado executar o script como root.
+O usuário deve ter permissão de escrita em /mnt/adm.
+
+--------------------------------------------------------------------
+
+3. PREPARAÇÃO DO AMBIENTE
+
+Crie o diretório base e ajuste permissões:
+
+sudo mkdir -p /mnt/adm
+sudo chown -R $USER:$USER /mnt/adm
+
+Coloque o arquivo build-cross-tools.sh em um diretório de sua escolha e torne-o executável:
+
+chmod +x build-cross-tools.sh
+
+--------------------------------------------------------------------
+
+4. EXECUÇÃO BÁSICA
+
+Para executar o script com configurações padrão:
+
+./build-cross-tools.sh
+
+O script irá:
+
+- criar automaticamente os diretórios necessários
+- baixar os fontes oficiais
+- verificar integridade com checksums
+- compilar tudo com paralelismo automático
+- gerar logs detalhados por etapa
+- permitir retomada automática em caso de falha
+
+--------------------------------------------------------------------
+
+5. VARIÁVEIS DE CONTROLE IMPORTANTES
+
+Todas as versões estão definidas no início do script para facilitar manutenção.
+
+Variáveis configuráveis via ambiente:
+
+JOBS=8
+Define o número de núcleos usados na compilação.
+
+Exemplo:
+JOBS=16 ./build-cross-tools.sh
+
+CLEAN_BUILD_DIRS=1
+Remove diretórios temporários de build ao final.
+
+Exemplo:
+CLEAN_BUILD_DIRS=1 ./build-cross-tools.sh
+
+BUILD_FINAL_GCC=0
+Desabilita a construção do GCC final (não recomendado).
+
+BUILD_BUSYBOX_STATIC=0
+Constrói o busybox dinâmico ao invés de estático.
+
+USE_COLOR=0
+Desativa cores na saída do terminal.
+
+--------------------------------------------------------------------
+
+6. RETOMADA AUTOMÁTICA
+
+O script é totalmente retomável.
+
+Cada etapa cria um marcador em:
+/mnt/adm/.state/
+
+Exemplo:
+binutils-pass1.done
+gcc-pass1.done
+musl.done
+
+Se o script for interrompido, basta executá-lo novamente:
+
+./build-cross-tools.sh
+
+Ele continuará automaticamente da última etapa incompleta.
+
+--------------------------------------------------------------------
+
+7. LOGS E DEPURAÇÃO
+
+Cada etapa gera um log separado em:
+
+/mnt/adm/logs/
+
+Exemplos:
+binutils-pass1-configure.log
+gcc-pass1-make.log
+musl-install.log
+gcc-final-make.log
+
+Em caso de erro, consulte o log correspondente para diagnóstico completo.
+
+--------------------------------------------------------------------
+
+8. BUSYBOX
+
+O busybox é compilado usando a toolchain musl recém-criada.
+
+Por padrão:
+- build estático
+- instalado em staging, não no rootfs do host
+
+Local de instalação:
+ /mnt/adm/tools/busybox-rootfs
+
+Este diretório pode ser copiado diretamente para o rootfs final do sistema.
+
+--------------------------------------------------------------------
+
+9. TESTE DA TOOLCHAIN
+
+Ao final, o script executa um teste automático:
+
+- compila um programa simples em C
+- utiliza --sysroot correto
+- valida o binário gerado
+
+O binário de teste fica em:
+ /mnt/adm/build/_smoketest/hello
+
+--------------------------------------------------------------------
+
+10. USO DA TOOLCHAIN APÓS A CONSTRUÇÃO
+
+Antes de compilar outros pacotes para o sistema final, exporte o PATH:
+
+export PATH=/mnt/adm/tools/bin:$PATH
+
+Use sempre o compilador correto:
+
+x86_64-linux-musl-gcc --sysroot=/mnt/adm/tools/x86_64-linux-musl
+
+Exemplo:
+
+x86_64-linux-musl-gcc --sysroot=/mnt/adm/tools/x86_64-linux-musl hello.c -o hello
+
+--------------------------------------------------------------------
+
+11. CONTINUAÇÃO DO SISTEMA
+
+Após este script, você já pode continuar a construção do sistema Linux:
+
+- criar o layout final do rootfs
+- instalar busybox no rootfs real
+- adicionar init, /etc, /proc, /sys
+- compilar pacotes adicionais usando musl
+- empacotar ou gerar imagem final
+
+Esta toolchain foi construída exatamente para esse propósito.
+
+--------------------------------------------------------------------
+
+FIM DO TUTORIAL
