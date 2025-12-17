@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# /var/lib/adm/packages/core/zlib/build
+# zlib - biblioteca de compressão essencial (muitos pacotes, incluindo binutils/gcc/openssl, dependem).
+# Build simples (configure+make), instala em /usr.
+
+set -Eeuo pipefail
+
+PKG_NAME="zlib"
+PKG_CAT="core"
+PKG_VER="1.3.1"
+PKG_DESC="zlib compression library"
+PKG_URL="https://zlib.net/"
+PKG_LICENSE="Zlib"
+
+PKG_DEPS=( "core/musl" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://zlib.net/zlib-${PKG_VER}.tar.xz"
+)
+
+# IMPORTANTE:
+# Seu adm exige checksum para fontes não-git, a menos que ALLOW_NO_CHECKSUM=1.
+# Recomendo fortemente trocar por SHA256 real assim que possível.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-zlib-${PKG_VER}.tar.xz>"
+)
+
+do_configure(){
+  # Helpers (se existir)
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # zlib costuma ser melhor configurada/buildada in-tree (ela gera arquivos no source).
+  # Para manter SRCTOP “limpo”, copiamos para um builddir “src-copy”.
+  rm -rf "${WORKDIR}/src-copy"
+  cp -a "${SRCTOP}" "${WORKDIR}/src-copy"
+  export ZLIB_SRCTOP="${WORKDIR}/src-copy"
+  cd "${ZLIB_SRCTOP}"
+
+  # Configuração:
+  # - --prefix=/usr
+  # - shared: gera libz.so (útil para quase tudo)
+  #
+  # Respeita CC/CFLAGS/LDFLAGS exportados pelo ambiente/adm.
+  ./configure --prefix=/usr
+}
+
+do_build(){
+  cd "${ZLIB_SRCTOP:-${SRCTOP}}"
+  make ${MAKEFLAGS}
+}
+
+do_install(){
+  cd "${ZLIB_SRCTOP:-${SRCTOP}}"
+  make DESTDIR="${DESTDIR}" install
+
+  # zlib instala normalmente em /usr/lib e /usr/include; garantir dirs
+  mkdir -p "${DESTDIR}/usr/lib" "${DESTDIR}/usr/include"
+
+  # Remove docs no base minimalista (opcional)
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+}
