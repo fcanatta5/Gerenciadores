@@ -1,0 +1,6 @@
+# /etc/os-release
+NAME="adm-linux"
+ID=adm
+PRETTY_NAME="adm-linux (musl + runit)"
+VERSION_ID="rolling"
+HOME_URL="https://example.invalid"
