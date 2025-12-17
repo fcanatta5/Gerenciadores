@@ -1,0 +1,160 @@
+LISTA CORE (ORDEM RECOMENDADA) APÓS O CROSS-TOOLCHAIN TEMPORÁRIO
+Objetivo: sistema base musl + busybox + runit + Wayland + Firefox + Vim + requisitos do adm.
+
+Observações rápidas:
+- “Ordem” aqui significa: construa/instale na sequência para evitar dor com dependências.
+- Onde houver alternativas, escolhi o caminho mais simples para um sistema minimalista em musl.
+- Itens marcados como “(obrigatório p/ adm)” são para o gerenciador funcionar bem (download, patch, compressão, git, verificação, etc).
+
+-----------------------------------------------------------------------
+FASE 0 — Preparação do rootfs e diretórios (antes de compilar pacotes)
+1) Layout do sistema: /bin /sbin /usr/{bin,sbin,lib,share} /etc /var /tmp /proc /sys /dev /run /root /home
+2) Permissões e owners básicos (root:root), sticky-bit em /tmp
+3) Dispositivos básicos (devtmpfs/udev depois; no mínimo: console/null/zero/tty)
+4) Montagens em fstab (proc, sysfs, devtmpfs, tmpfs, run)
+
+-----------------------------------------------------------------------
+FASE 1 — “Toolchain final” dentro do sistema (substitui a temporária)
+(Construa usando o cross-toolchain temporário, mas instalando no ROOTFS final)
+1) linux-headers (para o rootfs final)
+2) musl (libc final)
+3) binutils (final)
+4) gcc (final, com C e C++)
+5) libgcc + libstdc++ (vem do gcc final)
+6) pkgconf ou pkg-config (necessário para compilar stack Wayland/Firefox)
+7) (opcional) clang/llvm/lld (útil para Firefox e projetos modernos, mas não estritamente obrigatório se gcc bastar)
+
+-----------------------------------------------------------------------
+FASE 2 — Sistema base minimalista (boot + shell + utilitários)
+1) busybox (completo, incluindo ash, coreutils applets, init applet pode ser desabilitado se usar runit)
+2) runit (init e supervisão)
+3) runit “scripts” do seu sistema:
+   - /etc/runit/1  (boot)
+   - /etc/runit/2  (serviços)
+   - /etc/runit/3  (shutdown)
+   - /etc/service/* (serviços)
+4) mdev (busybox) ou eudev (se quiser udev completo; para Wayland normalmente eudev é mais confortável)
+5) util-linux (mínimo recomendado: mount/umount, fdisk/blkid, login/agetty se não usar busybox)
+6) e2fsprogs (fsck/mkfs.ext*, essencial se usar ext4)
+7) dosfstools (se usar EFI/FAT)
+8) kmod (modprobe/depmod para módulos)
+9) shadow (passwd, login, user/group 관리; se quiser sistema “real”)
+10) tzdata (timezone)
+11) ca-certificates (necessário para HTTPS real, Firefox, git via https)
+12) zlib (base para muitos pacotes)
+13) openssl OU libressl (TLS para curl/git/firefox; escolha 1)
+14) curl (download robusto; opcional se usar wget, mas recomendado)
+15) wget (opcional)
+16) file (detecção de tipo; útil para debug/strip)
+17) less (opcional, mas útil)
+
+-----------------------------------------------------------------------
+FASE 3 — Requisitos do “adm” (para funcionar corretamente no sistema base)
+(Se você quer o adm operando 100% no sistema final, precisa destes)
+1) bash (recomendado; busybox ash pode quebrar scripts mais complexos)  (obrigatório p/ adm)
+2) coreutils (se quiser além do busybox; recomendado)                  (recomendado p/ adm)
+3) findutils                                                           (obrigatório p/ adm)
+4) gawk (ou awk suficiente do busybox; gawk é recomendado)             (recomendado p/ adm)
+5) sed                                                                 (obrigatório p/ adm)
+6) grep                                                                (obrigatório p/ adm)
+7) tar                                                                 (obrigatório p/ adm)
+8) xz                                                                  (obrigatório p/ adm se usar tar.xz)
+9) zstd                                                                (recomendado p/ adm para tar.zst)
+10) gzip + bzip2 (se for lidar com .gz/.bz2 em sources)                (recomendado p/ adm)
+11) patch                                                               (obrigatório p/ adm)
+12) git                                                                 (obrigatório p/ adm para sync e fontes git)
+13) rsync                                                               (recomendado p/ adm para sync eficiente)
+14) sha256sum (coreutils) ou busybox com sha256sum                      (obrigatório p/ adm)
+15) md5sum (opcional se você realmente usar md5)                        (opcional p/ adm)
+
+-----------------------------------------------------------------------
+FASE 4 — Base de compilação “moderna” (necessária para Wayland e Firefox)
+1) python3 + pip (ou método offline controlado)                         (quase obrigatório)
+2) meson                                                                 (obrigatório p/ Wayland stack)
+3) ninja                                                                 (obrigatório p/ Wayland stack)
+4) cmake                                                                 (muitos deps usam)
+5) autoconf + automake + libtool + m4                                     (muitos deps “autotools”)
+6) bison + flex                                                          (alguns deps)
+7) gettext + intltool (alguns projetos)
+8) pkgconf/pkg-config (se não instalou na toolchain final)
+9) rust + cargo (praticamente obrigatório para Firefox atual)
+10) perl (alguns builds/scripts)
+11) python-setuptools/build/wheel (para pacotes python que geram wheels)
+
+-----------------------------------------------------------------------
+FASE 5 — Stack gráfico Wayland (mínimo funcional)
+Base (protocolo e libs)
+1) libdrm
+2) libgbm (geralmente via mesa)
+3) mesa (OpenGL/EGL/GBM)  (é o “monstro” central do stack)
+4) wayland
+5) wayland-protocols
+6) libffi
+7) expat
+8) libxml2 (muitos componentes usam)
+
+Input/seat
+9) libinput
+10) mtdev (às vezes)
+11) libevdev
+12) seatd (alternativa simples) OU elogind (mais completo) OU systemd-logind (não recomendado se você quer simples)
+
+Compositor (escolha 1 caminho)
+Caminho A (mais simples e leve):
+13A) wlroots
+14A) sway (opcional) ou outro compositor baseado em wlroots
+
+Caminho B (desktop mais pesado):
+13B) GTK + mutter/gnome-shell (muito mais deps; não é “simples”)
+
+Fontes/Renderização (recomendado para Firefox e ambiente gráfico decente)
+15) freetype
+16) fontconfig
+17) harfbuzz
+18) pixman
+19) cairo
+20) pango (se usar GTK e vários apps)
+21) icu (muito comum, Firefox usa)
+
+Áudio (opcional, mas Firefox normalmente precisa)
+22) pipewire + wireplumber (moderno) OU pulseaudio (mais simples legado)
+23) alsa-lib (base)
+
+-----------------------------------------------------------------------
+FASE 6 — Firefox (alto nível de deps que você provavelmente vai precisar)
+A lista exata varia, mas na prática você vai precisar de pelo menos:
+1) rust + cargo (já na Fase 4)
+2) llvm/clang (muito recomendado; alguns setups exigem)
+3) python3 + nodejs (alguns scripts e toolchains)
+4) nasm (muito comum para builds que usam asm)
+5) gtk3/gtk4 + glib + gobject-introspection (se build com UI GTK)
+6) dbus (normalmente necessário em desktops)
+7) nss/nspr (Firefox usa)
+8) icu (já listado)
+9) zlib, bzip2, libpng, jpeg, webp (libs comuns)
+10) sqlite (Firefox usa internamente)
+11) libevent (às vezes)
+12) alsa-lib + (pipewire/pulse) se quiser áudio
+
+Recomendação prática:
+- Antes de atacar Firefox, garanta que o Wayland stack e uma sessão gráfica funcionam.
+- Firefox em musl pode exigir patches específicos; planeje isso no seu tree de patches.
+
+-----------------------------------------------------------------------
+FASE 7 — Ferramentas do usuário
+1) vim
+2) git (se não instalou ainda)
+3) openssh (acesso remoto)
+4) man-db + mandoc (opcional)
+5) sudo/doas (opcional)
+
+-----------------------------------------------------------------------
+RESUMO SUPER CURTO (apenas “nomes” em ordem)
+1) linux-headers -> musl -> binutils -> gcc -> pkgconf
+2) busybox -> runit -> (mdev ou eudev) -> util-linux -> e2fsprogs -> kmod -> shadow -> ca-certificates -> openssl -> curl
+3) bash -> findutils -> sed -> grep -> tar -> xz -> zstd -> patch -> git -> rsync -> (sha256sum/md5sum)
+4) python3 -> meson -> ninja -> cmake -> autoconf/automake/libtool/m4 -> bison/flex -> gettext -> rust/cargo
+5) libdrm -> mesa -> wayland -> wayland-protocols -> libinput -> seatd/elogind -> wlroots -> compositor
+6) freetype -> fontconfig -> harfbuzz -> cairo/pango/icu -> (pipewire/alsa)
+7) firefox
+8) vim
