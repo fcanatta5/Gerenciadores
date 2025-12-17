@@ -1,0 +1,66 @@
+#!/bin/sh
+# Runit service: DHCP automático usando BusyBox udhcpc
+# Interface: eth0
+# Dependências: busybox (udhcpc, ip)
+
+IFACE="eth0"
+HOSTNAME="$(cat /etc/hostname 2>/dev/null || echo adm)"
+PIDFILE="/run/udhcpc-${IFACE}.pid"
+SCRIPT="/etc/udhcpc/default.script"
+
+# Garante diretórios básicos
+mkdir -p /run /etc/udhcpc
+
+# Script padrão do udhcpc (criado se não existir)
+if [ ! -x "$SCRIPT" ]; then
+  cat >"$SCRIPT" <<'EOF'
+#!/bin/sh
+# udhcpc script - BusyBox
+# Chamado com: deconfig | bound | renew | nak
+
+case "$1" in
+  deconfig)
+    ip addr flush dev "$interface"
+    ;;
+
+  bound|renew)
+    ip addr flush dev "$interface"
+    ip addr add "$ip/$mask" dev "$interface"
+
+    # Gateway
+    if [ -n "$router" ]; then
+      ip route add default via "$router" dev "$interface" 2>/dev/null || \
+      ip route replace default via "$router" dev "$interface"
+    fi
+
+    # DNS
+    : > /etc/resolv.conf
+    for s in $dns; do
+      echo "nameserver $s" >> /etc/resolv.conf
+    done
+    ;;
+esac
+
+exit 0
+EOF
+  chmod +x "$SCRIPT"
+fi
+
+# Aguarda a interface aparecer (útil em boot rápido)
+i=0
+while ! ip link show "$IFACE" >/dev/null 2>&1; do
+  i=$((i+1))
+  [ "$i" -gt 10 ] && break
+  sleep 1
+done
+
+# Sobe interface
+ip link set "$IFACE" up 2>/dev/null || true
+
+# Exec do udhcpc (modo foreground para runit)
+exec /bin/busybox udhcpc \
+  -i "$IFACE" \
+  -x hostname:"$HOSTNAME" \
+  -p "$PIDFILE" \
+  -s "$SCRIPT" \
+  -f
