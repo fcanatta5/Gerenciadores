@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# core/musl/build
+# musl libc (libc final do sistema)
+# Instala em /usr e coloca o loader em /lib (via --syslibdir=/lib)
+
+set -Eeuo pipefail
+
+PKG_NAME="musl"
+PKG_CAT="core"
+PKG_VER="1.2.5"
+PKG_DESC="musl libc - lightweight standard C library for Linux"
+PKG_URL="https://musl.libc.org/"
+PKG_LICENSE="MIT"
+
+# Ordem base: headers antes da libc
+PKG_DEPS=( "core/linux-headers" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://musl.libc.org/releases/musl-${PKG_VER}.tar.gz"
+)
+
+# IMPORTANTE:
+# Seu adm exige checksum para fontes não-git, a menos que ALLOW_NO_CHECKSUM=1.
+# Recomendo fortemente você substituir isso pelo SHA256 real assim que possível.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-musl-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){
+  # Usa helpers se disponíveis
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    cd "${WORKDIR}/build"
+  fi
+
+  # musl é simples e bem determinística; out-of-tree é ok.
+  # --prefix=/usr para o sistema final
+  # --syslibdir=/lib para loader/ld-musl e libs essenciais em /lib
+  "${SRCTOP}/configure" \
+    --prefix=/usr \
+    --syslibdir=/lib
+
+  # Observação:
+  # - Se você estiver fazendo build “cross” usando TARGET/SYSROOT, o configure da musl
+  #   aceita CC, AR, RANLIB etc via ambiente. Seu adm/helpers já exportam isso.
+}
+
+do_build(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+  fi
+
+  # Sempre compilar a partir do BUILD_DIR (WORKDIR/build)
+  make -C "${WORKDIR}/build" ${MAKEFLAGS}
+}
+
+do_install(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+  fi
+
+  make -C "${WORKDIR}/build" DESTDIR="${DESTDIR}" install
+
+  # Segurança: garantir diretórios base (alguns rootfs minimalistas não os têm ainda)
+  mkdir -p "${DESTDIR}/lib" "${DESTDIR}/usr/lib" "${DESTDIR}/usr/include"
+
+  # musl instala o loader (ld-musl-*.so.1) em /lib conforme --syslibdir
+  # Não forçamos symlinks extras aqui; a própria musl cuida disso.
+}
