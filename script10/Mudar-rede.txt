@@ -1,0 +1,12 @@
+# Mudar para outro nome prefixo
+cp -a /etc/service/net-eth0 /etc/service/net-enp0s3
+sed -i 's/eth0/enp0s3/g' /etc/service/net-enp0s3/run
+
+# Wi-Fi assumindo wpa_suplicant
+cp -a /etc/service/net-eth0 /etc/service/net-wlan0
+sed -i 's/eth0/wlan0/g' /etc/service/net-wlan0/run
+
+# Sanity check dentro do sistema 
+sv status net-eth0
+ip addr show eth0
+cat /etc/resolv.conf
