@@ -1,0 +1,112 @@
+# /var/lib/adm/conf/world
+# World file inicial (ponto de partida após cross-toolchain temporário em /mnt/adm/tools)
+# Ajuste os nomes/categorias para bater com o seu tree em /var/lib/adm/packages/<cat>/<name>
+# Comentários (#) e linhas vazias são ignorados.
+
+# ------------------------------------------------------------
+# 1) Sistema base mínimo (para chroot/boot básico)
+core/linux-headers
+core/musl
+core/binutils
+core/gcc
+
+core/busybox
+core/runit
+
+# (Escolha 1) device manager: mdev (busybox) OU eudev
+#core/eudev
+
+# Filesystems / módulos / disco (recomendado)
+core/kmod
+core/util-linux
+core/e2fsprogs
+core/dosfstools
+
+# Certificados + TLS + download (para o adm e para Firefox depois)
+core/ca-certificates
+core/openssl
+core/curl
+
+# ------------------------------------------------------------
+# 2) Ferramentas necessárias para o adm funcionar sem dor
+core/bash
+core/coreutils
+core/findutils
+core/gawk
+core/grep
+core/sed
+core/tar
+core/patch
+core/xz
+core/zstd
+core/git
+core/rsync
+
+# ------------------------------------------------------------
+# 3) Build toolchain “moderna” (para Wayland/Firefox)
+lang/python
+dev/pkgconf
+dev/meson
+dev/ninja
+dev/cmake
+dev/autoconf
+dev/automake
+dev/libtool
+dev/m4
+dev/bison
+dev/flex
+dev/gettext
+lang/perl
+
+# Rust (Firefox)
+lang/rust
+lang/cargo
+
+# Opcional mas comum/útil (alguns builds)
+#dev/nasm
+#dev/llvm
+#dev/clang
+
+# ------------------------------------------------------------
+# 4) Stack gráfico Wayland (mínimo funcional)
+# Base
+core/zlib
+core/bzip2
+core/libpng
+core/jpeg-turbo
+
+gui/expat
+gui/libffi
+gui/libdrm
+gui/mesa
+gui/wayland
+gui/wayland-protocols
+
+# Input/seat (escolha 1)
+gui/libevdev
+gui/mtdev
+gui/libinput
+gui/seatd
+#ou:
+#gui/elogind
+
+# Compositor (escolha 1 caminho)
+gui/wlroots
+gui/sway
+#ou:
+#gui/labwc
+
+# Fontes/render (recomendado para apps e Firefox)
+gui/freetype
+gui/fontconfig
+gui/harfbuzz
+gui/pixman
+gui/cairo
+
+# ------------------------------------------------------------
+# 5) Apps alvo
+app/vim
+
+# Firefox (alto nível – você vai ajustar conforme sua receita real)
+# Observação: Firefox normalmente puxa muita coisa (gtk, glib, nss/nspr, icu, sqlite, etc)
+app/firefox
