@@ -1,0 +1,87 @@
+# Você começa com o script de bootstrap (build-cross-tools.sh) constrói:
+
+binutils (pass1),gcc (pass1),linux-headers,musl,gcc-final,busybox
+
+toolchain funcional testada.
+
+Tudo isolado em: /mnt/adm/tools
+
+🔹 Isso é a toolchain temporária, exatamente como tem que ser.
+
+Até aqui:
+
+❌ não há sistema completo
+
+❌ não há gerenciador de pacotes
+
+❌ não há init nem serviços
+
+✔️ há compilador confiável
+---
+
+2️⃣ Quando o bootstrap termina, você não estende esse script.Este ponto é importante:
+
+⛔ Você NÃO adiciona mais pacotes ao script de bootstrap
+⛔ Você NÃO usa ele para Wayland, Firefox, vim, etc
+
+O script para no ponto certo.
+---
+
+3️⃣ Você cria o rootfs final (uma vez) Depois do bootstrap:
+
+1. Cria o rootfs final (exemplo):
+
+/mnt/adm/rootfs
+
+2. Copia o BusyBox para ele:
+
+cp -a /mnt/adm/tools/busybox-rootfs/* /mnt/adm/rootfs/
+
+3. Cria diretórios básicos:
+
+mkdir -p /mnt/adm/rootfs/{proc,sys,dev,run,etc,var,usr}
+
+4. Cria fstab, usuários mínimos, etc.
+
+# Aqui você ainda não está usando o adm — é preparação.
+---
+
+4️⃣ Agora SIM: você começa a usar o adm.Este é o ponto de transição.
+
+Você entra no ambiente (chroot ou boot real) e exporta:
+
+export PATH=/mnt/adm/tools/bin:$PATH
+export SYSROOT=/mnt/adm/tools/x86_64-linux-musl
+
+E então:
+
+adm world
+
+🔹 A partir daqui: o adm assume 100% da construção,dependências são resolvidas automaticamente,pacotes são empacotados
+upgrades ficam seguros,rebuilds são limpos.
+---
+
+5️⃣ O adm substitui o bootstrap,Depois que o adm constrói:
+
+musl-final,gcc-final,binutils-final,busybox-final
+
+Você pode: remover a toolchain temporária (/mnt/adm/tools),recompilar tudo com a toolchain “oficial” do sistema,Isso é o ciclo correto.
+---
+
+Fluxo final resumido (cola e guarda)
+
+1) build-cross-tools.sh
+   -> toolchain temporária OK
+
+2) criar rootfs + busybox
+   -> sistema mínimo sobe
+
+3) entrar no sistema (chroot/boot)
+   -> export PATH + SYSROOT
+
+4) adm world
+   -> sistema completo cresce automaticamente
+
+5) remover toolchain temporária
+   -> sistema “self-hosted”
+
