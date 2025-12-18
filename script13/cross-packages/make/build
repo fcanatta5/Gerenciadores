@@ -1,0 +1,71 @@
+pkgname="make"
+pkgver="4.4.1"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://ftp.gnu.org/gnu/make/make-${pkgver}.tar.gz::make-${pkgver}.tar.gz"
+)
+
+# O anúncio oficial do GNU Make 4.4.1 publica MD5 do tarball.
+# Seu cross-toolchain.sh aceita md5 como fallback.
+md5sums=(
+  "c8469a3713cbbe04d955d4ae4be23eeb make-4.4.1.tar.gz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  # cross tools
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  # Evita vazamento de CXX para /usr/bin/make (prática comum em recipes)
+  unset CXX || true
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # build triplet do host atual
+  local build_triplet
+  build_triplet="$("$CC" -dumpmachine 2>/dev/null || true)"
+  if [[ -z "$build_triplet" ]]; then
+    # fallback: melhor do que nada
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  # GNU Make cross:
+  # - prefix=/usr para staging conter usr/bin/make etc.
+  # - host=$TARGET para gerar binário para o target
+  # - build=$build_triplet para o autoconf saber o host builder
+  # - sem NLS para reduzir dependências
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # opcional: enxugar docs
+  rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
+}
