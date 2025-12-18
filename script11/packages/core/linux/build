@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# /var/lib/adm/packages/core/linux/build
+# Linux kernel (x86_64) - build e instalação em DESTDIR (/boot + /lib/modules).
+#
+# Convenções:
+# - Config do kernel deve estar em um destes locais (primeiro que existir):
+#   1) $LINUX_CONFIG (variável de ambiente)
+#   2) /var/lib/adm/packages/$PKGID/files/boot/config-${PKG_VER}
+#   3) /var/lib/adm/packages/$PKGID/files/boot/config
+#   4) /var/lib/adm/packages/$PKGID/files/etc/kernel/config-${PKG_VER}
+#   5) /var/lib/adm/packages/$PKGID/files/etc/kernel/config
+#
+# Requisitos práticos:
+# - build dentro do chroot (pós-bootstrap) com toolchain funcional
+# - dependências de build (básicas): make, perl, flex, bison, bc (e opcionalmente python)
+# - este script força alguns “defaults” para evitar falhas comuns (ex.: BTF/pahole)
+
+set -Eeuo pipefail
+
+PKG_NAME="linux"
+PKG_CAT="core"
+PKG_VER="6.18.1"
+PKG_DESC="Linux kernel (x86_64) + modules"
+PKG_URL="https://www.kernel.org/"
+PKG_LICENSE="GPL-2.0-only"
+
+PKG_DEPS=(
+  "core/musl"
+)
+PKG_BDEPS=(
+  "core/make"
+  "core/m4"
+  "core/flex"
+  # "core/bison"  # recomendado (gere esse pacote quando for buildar kernel de verdade)
+  # "core/bc"     # recomendado (kernel usa bc em várias configs)
+  # "core/perl"   # recomendado (scripts do kernel)
+  # "core/python" # opcional (dependendo de features)
+  # "core/openssl" # só se você habilitar assinatura de módulos; aqui desabilitamos
+)
+
+SOURCES=(
+  "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${PKG_VER}.tar.xz"
+)
+
+# Recomenda-se preencher SHA256SUMS e remover ALLOW_NO_CHECKSUM.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-linux-${PKG_VER}.tar.xz>"
+)
+
+# Jobs (o adm normalmente exporta MAKEFLAGS; aqui é só fallback)
+: "${JOBS:=4}"
+
+pkgdir(){
+  local root="${ADM_ROOT:-/var/lib/adm}"
+  echo "${root}/packages/${PKGID}"
+}
+
+pick_kernel_config(){
+  local d; d="$(pkgdir)"
+  if [[ -n "${LINUX_CONFIG:-}" && -f "${LINUX_CONFIG}" ]]; then
+    echo "${LINUX_CONFIG}"
+    return 0
+  fi
+  for c in \
+    "${d}/files/boot/config-${PKG_VER}" \
+    "${d}/files/boot/config" \
+    "${d}/files/etc/kernel/config-${PKG_VER}" \
+    "${d}/files/etc/kernel/config"
+  do
+    if [[ -f "$c" ]]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+do_configure(){
+  # Kernel é in-tree; usamos BUILD_DIR como O=... para não sujar SRCTOP.
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    export BUILD_DIR="${WORKDIR}/build"
+    rm -rf "${BUILD_DIR}"
+    mkdir -p "${BUILD_DIR}"
+  fi
+
+  cd "${SRCTOP}"
+  make mrproper
+
+  local cfg=""
+  if cfg="$(pick_kernel_config 2>/dev/null)"; then
+    echo "Usando config: ${cfg}"
+    install -m 0644 "${cfg}" "${BUILD_DIR}/.config"
+  else
+    echo "AVISO: nenhum config fornecido. Usando defconfig (x86_64)."
+    make O="${BUILD_DIR}" defconfig
+  fi
+
+  # Normaliza e evita falhas comuns:
+  # - Desabilita BTF (evita depender de pahole/elfutils em base mínima)
+  # - Desabilita assinatura de módulos por padrão (evita dependência openssl e chaves)
+  if [[ -x "${SRCTOP}/scripts/config" ]]; then
+    "${SRCTOP}/scripts/config" --file "${BUILD_DIR}/.config" \
+      -d DEBUG_INFO_BTF \
+      -d MODULE_SIG \
+      -d SYSTEM_TRUSTED_KEYS \
+      -d SYSTEM_REVOCATION_KEYS || true
+  else
+    # fallback best-effort via sed (não cobre tudo, mas ajuda)
+    sed -i \
+      -e 's/^CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' \
+      -e 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' \
+      "${BUILD_DIR}/.config" || true
+  fi
+
+  make O="${BUILD_DIR}" olddefconfig
+}
+
+do_build(){
+  cd "${SRCTOP}"
+
+  # Kernel + módulos
+  make O="${BUILD_DIR}" ${MAKEFLAGS:-"-j${JOBS}"} bzImage
+  make O="${BUILD_DIR}" ${MAKEFLAGS:-"-j${JOBS}"} modules
+}
+
+do_install(){
+  cd "${SRCTOP}"
+
+  # Destinos padrão
+  mkdir -p "${DESTDIR}/boot" "${DESTDIR}/lib/modules"
+
+  # Instala módulos no DESTDIR
+  make O="${BUILD_DIR}" \
+    INSTALL_MOD_PATH="${DESTDIR}" \
+    modules_install
+
+  # Instala o kernel (bzImage) e artefatos úteis
+  install -m 0644 "${BUILD_DIR}/arch/x86/boot/bzImage" "${DESTDIR}/boot/vmlinuz-${PKG_VER}"
+  install -m 0644 "${BUILD_DIR}/System.map"           "${DESTDIR}/boot/System.map-${PKG_VER}"
+  install -m 0644 "${BUILD_DIR}/.config"              "${DESTDIR}/boot/config-${PKG_VER}"
+
+  # Opcional: symlink padrão
+  ln -sf "vmlinuz-${PKG_VER}"    "${DESTDIR}/boot/vmlinuz"    2>/dev/null || true
+  ln -sf "System.map-${PKG_VER}" "${DESTDIR}/boot/System.map" 2>/dev/null || true
+  ln -sf "config-${PKG_VER}"     "${DESTDIR}/boot/config"     2>/dev/null || true
+
+  # Limpeza: remove symlinks 'build'/'source' (se quiser manter, comente)
+  find "${DESTDIR}/lib/modules" -maxdepth 3 -type l \( -name build -o -name source \) -delete 2>/dev/null || true
+}
