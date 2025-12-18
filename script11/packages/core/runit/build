@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# /var/lib/adm/packages/core/runit/build
+# runit - init/supervisão de serviços (PID 1) para sistema minimalista.
+#
+# Este build:
+# - compila runit
+# - instala binários em /sbin e /usr/bin (layout típico do runit)
+# - cria symlink /sbin/init -> runit-init (para runit ser PID1)
+# - não sobrescreve configs do /etc: use files/ para seus scripts em /etc/runit e serviços em /etc/service
+#
+# Integração com BusyBox:
+# - getty pode ser BusyBox (já incluímos serviço exemplo em files/ no busybox)
+# - mount/ifup/udhcpc etc podem vir do BusyBox
+
+set -Eeuo pipefail
+
+PKG_NAME="runit"
+PKG_CAT="core"
+PKG_VER="2.1.2"
+PKG_DESC="runit init and service supervision suite"
+PKG_URL="http://smarden.org/runit/"
+PKG_LICENSE="BSD-like (runit license)"
+
+PKG_DEPS=( "core/busybox" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "http://smarden.org/runit/runit-${PKG_VER}.tar.gz"
+)
+
+# Seu adm exige checksum para fontes não-git, a menos que ALLOW_NO_CHECKSUM=1.
+# Recomendo fortemente trocar por SHA256 real assim que possível.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-runit-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){
+  : # runit não usa configure clássico
+}
+
+do_build(){
+  # runit usa um build system simples (package/compile).
+  # Precisamos ajustar alguns paths e então rodar "make" no src.
+  # O runit é sensível a diretórios, então build in-tree é o padrão.
+
+  cd "${SRCTOP}"
+
+  # Alguns tarballs vêm com diretório admin/ e src/. O build é em src/
+  [[ -d "src" ]] || die "Estrutura inesperada do runit: faltando src/"
+
+  # Ajuste de toolchain (respeita CC do ambiente se definido)
+  # Se você estiver no chroot pós-bootstrap, garanta PATH para a toolchain temporária.
+  make -C src ${MAKEFLAGS}
+}
+
+do_install(){
+  cd "${SRCTOP}"
+
+  # Layout de instalação:
+  # - /sbin: runit, runsvdir, runsv, runsvchdir, runit-init etc
+  # - /usr/bin: sv, chpst (ou em /usr/bin conforme preferir)
+  #
+  # O "make install" do runit é meio “hardcoded”; a forma mais controlável é copiar binários.
+
+  mkdir -p "${DESTDIR}/sbin" "${DESTDIR}/usr/bin" "${DESTDIR}/etc/runit" "${DESTDIR}/etc/service"
+
+  # Binários principais (em src/)
+  install -m 0755 "${SRCTOP}/src/runit"       "${DESTDIR}/sbin/runit"
+  install -m 0755 "${SRCTOP}/src/runit-init"  "${DESTDIR}/sbin/runit-init"
+  install -m 0755 "${SRCTOP}/src/runsvdir"    "${DESTDIR}/sbin/runsvdir"
+  install -m 0755 "${SRCTOP}/src/runsv"       "${DESTDIR}/sbin/runsv"
+  install -m 0755 "${SRCTOP}/src/runsvchdir"  "${DESTDIR}/sbin/runsvchdir"
+  install -m 0755 "${SRCTOP}/src/sv"          "${DESTDIR}/usr/bin/sv"
+  install -m 0755 "${SRCTOP}/src/chpst"       "${DESTDIR}/usr/bin/chpst"
+
+  # Symlinks úteis
+  ln -sf chpst "${DESTDIR}/usr/bin/envdir" 2>/dev/null || true
+  ln -sf chpst "${DESTDIR}/usr/bin/envuidgid" 2>/dev/null || true
+  ln -sf chpst "${DESTDIR}/usr/bin/softlimit" 2>/dev/null || true
+  ln -sf chpst "${DESTDIR}/usr/bin/setuidgid" 2>/dev/null || true
+  ln -sf chpst "${DESTDIR}/usr/bin/setlock" 2>/dev/null || true
+
+  # Define runit como init do sistema
+  ln -sf runit-init "${DESTDIR}/sbin/init"
+
+  # Nota:
+  # Scripts /etc/runit/{1,2,3} e serviços em /etc/service devem vir do overlay files/
+  # (ou do pacote busybox, se você preferir manter lá inicialmente).
+}
