@@ -610,8 +610,18 @@ build_one(){
 
 # build with deps
 cmd_build(){
-  local bf="$1"
-  [[ -f "$bf" ]] || die "Uso: adm build <caminho-do-buildfile>"
+  local arg="$1"
+  [[ -n "$arg" ]] || die "Uso: adm build <nome|buildfile>"
+
+  local bf=""
+  if [[ -f "$arg" ]]; then
+    bf="$arg"
+  else
+    # arg é NAME do pacote (ex.: zlib)
+    bf="$(find_buildfile_by_name "$arg")"
+    [[ -n "$bf" && -f "$bf" ]] || die "Não encontrei buildfile para '$arg' em $PKGROOT"
+  fi
+
   mapfile -t order < <(resolve_order "$bf")
   step "Build order"
   for x in "${order[@]}"; do
