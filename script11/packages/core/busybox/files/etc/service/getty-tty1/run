@@ -1,0 +1,5 @@
+# 9) Serviço getty no tty1 (usa busybox getty)
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/service/getty-tty1/run
+#!/bin/sh
+exec getty 38400 tty1 linux
