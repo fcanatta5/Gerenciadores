@@ -9,7 +9,7 @@ sources=(
 )
 
 sha256sums=(
-  "6b8b3d91f5c4b3b07c1b4a8d7f3c4e8a5f2a7f6e0e8f2f3c5f2b6b7f6b7b8e3 sed-4.9.tar.xz"
+  "6e226b732e1cd739464ad6862bd1a1aba42d7982922da7a53519631d24975181 sed-4.9.tar.xz"
 )
 
 pre_build() {
@@ -45,7 +45,6 @@ build() {
     build_triplet="$(uname -m)-unknown-linux-gnu"
   fi
 
-  # prefix=/usr para staging correto
   ../configure \
     --prefix=/usr \
     --host="$TARGET" \
@@ -63,6 +62,6 @@ install() {
   mkdir -p "$DESTDIR/bin"
   ln -sf ../usr/bin/sed "$DESTDIR/bin/sed"
 
-  # Enxugar docs
+  # Enxugar docs (opcional)
   rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
 }
