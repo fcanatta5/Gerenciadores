@@ -1,0 +1,53 @@
+pkgname="musl"
+pkgver="1.2.5"
+pkgrel=1
+
+# musl deve ir para o sysroot (ROOTFS), não para tools
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://musl.libc.org/releases/musl-${pkgver}.tar.gz::musl-${pkgver}.tar.gz"
+)
+
+sha256sums=(
+  # musl-1.2.5.tar.gz (mesmo hash usado por pacotes distro para orig.tar.gz)
+  "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 musl-1.2.5.tar.gz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  # Usar toolchain do pass1
+  export PATH="$TOOLS/bin:$PATH"
+  export CC="${TOOLS}/bin/${TARGET}-gcc"
+  export AR="${TOOLS}/bin/${TARGET}-ar"
+  export RANLIB="${TOOLS}/bin/${TARGET}-ranlib"
+
+  # Flags conservadoras
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  # musl é simples; build in-tree
+  make distclean >/dev/null 2>&1 || true
+
+  # Para sysroot final:
+  # - prefix=/usr (headers e libs em /usr)
+  # - syslibdir=/lib (loader/ld-musl e libs essenciais em /lib)
+  # - target: triplet musl
+  ./configure \
+    --prefix=/usr \
+    --syslibdir=/lib \
+    --target="$TARGET"
+
+  make -j"$JOBS"
+}
+
+install() {
+  # Instala no staging (DESTDIR) para o cross-toolchain.sh rsync -> ROOTFS
+  make DESTDIR="$DESTDIR" install
+}
