@@ -1,0 +1,6 @@
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/runit/3
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+umount -a -r 2>/dev/null || true
