@@ -4,3 +4,22 @@
 #!/bin/sh
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
+
+mount -a 2>/dev/null || true
+ip link set lo up 2>/dev/null || true
+
+# sobe rede via ifupdown (DHCP em eth0 conforme interfaces)
+if command -v ifup >/dev/null 2>&1; then
+  ifup -a 2>/dev/null || true
+fi
+
+echo "runit stage 1 done."
+
+
+
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/runit/3
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+umount -a -r 2>/dev/null || true
