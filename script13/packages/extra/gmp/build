@@ -1,0 +1,41 @@
+pkgname="gmp"
+pkgver="6.3.0"
+pkgrel=1
+category="extra"
+pkgdesc="GNU Multiple Precision Arithmetic Library"
+url="https://gmplib.org/"
+license="LGPL-3.0-or-later GPL-2.0-or-later"
+arch="x86_64"
+
+depends=()
+
+sources=(
+  "https://ftp.gnu.org/gnu/gmp/gmp-${pkgver}.tar.xz::gmp-${pkgver}.tar.xz"
+)
+sha256sums=(
+  "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898 gmp-6.3.0.tar.xz"
+)
+
+pre_build() {
+  : "${CC:=cc}"
+  : "${CFLAGS:=-O2 -pipe}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # --enable-cxx é útil para toolchains (ex.: GCC)
+  ../configure \
+    --prefix=/usr \
+    --enable-cxx \
+    --with-pic
+
+  make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+}
