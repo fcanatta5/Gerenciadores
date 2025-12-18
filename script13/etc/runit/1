@@ -1,0 +1,11 @@
+# Device nodes (BusyBox mdev)
+if command -v mdev >/dev/null 2>&1; then
+  mkdir -p /etc/mdev
+  [ -x /etc/mdev/hotplug ] || true
+
+  # aponta hotplug para nosso handler
+  echo /etc/mdev/hotplug > /proc/sys/kernel/hotplug 2>/dev/null || true
+
+  # popula /dev baseado no sysfs atual
+  mdev -s 2>/dev/null || true
+fi
