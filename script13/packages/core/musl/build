@@ -10,12 +10,11 @@ arch="x86_64"
 depends=()
 
 sources=(
-  # Fonte oficial (musl releases). O Dockerfile abaixo referencia esse mesmo endpoint.
   "https://musl.libc.org/releases/musl-${pkgver}.tar.gz::musl-${pkgver}.tar.gz"
 )
 
 sha256sums=(
-  # SHA256 do musl_1.2.5.orig.tar.gz (equivalente ao tarball upstream)
+  # musl-1.2.5.tar.gz
   "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 musl-1.2.5.tar.gz"
 )
 
@@ -26,11 +25,11 @@ pre_build() {
 }
 
 build() {
-  # build in-tree (musl é simples), mas garantindo limpeza
+  # O adm entra em SRC_DIR e chama build()
+  # Garantir ambiente limpo
   make distclean >/dev/null 2>&1 || true
 
-  # Para x86_64-linux-musl nativo, isso é o suficiente.
-  # --syslibdir=/lib garante o layout tradicional do loader/so em /lib
+  # Layout recomendado: loader/libc em /lib, headers em /usr/include
   ./configure \
     --prefix=/usr \
     --syslibdir=/lib
@@ -39,11 +38,6 @@ build() {
 }
 
 install() {
-  # musl respeita DESTDIR no install
+  # musl respeita DESTDIR
   make DESTDIR="$DESTDIR" install
-
-  # Garantias úteis (sem complicar):
-  # alguns sistemas esperam /usr/lib/libc.so (linker script) e/ou symlinks coerentes.
-  # musl normalmente já instala corretamente; deixo apenas um “no-op” seguro.
-  :
 }
