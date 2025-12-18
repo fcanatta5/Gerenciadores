@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# Build script padrão para adm (runit+musl+busybox stack friendly)
+# Requisitos de layout:
+#   /usr/local/adm/packages/<cat>/<prog>/build/{build,patch/,files/}
+#
+# Este script é "leve": o adm chama (source) este arquivo e executa defaults
+# via pkg_* se existirem; caso contrário usa os defaults abaixo.
+
+# =========================
+# Metadados obrigatórios
+# =========================
+NAME=""         # se vazio, adm usa o nome do programa
+CATEGORY=""     # se vazio, adm usa a categoria
+VERSION=""      # obrigatório
+URL=""          # obrigatório (preferir URL determinística)
+SHA256=""       # obrigatório
+
+# =========================
+# Dependências
+# =========================
+DEPENDS=""        # runtime (preferir "categoria/programa")
+BUILD_DEPENDS=""  # build-time (preferir "categoria/programa")
+PROVIDES=""       # virtuais (opcional)
+
+# =========================
+# Política de build
+# =========================
+PREFIX="/usr"
+# Uma destas:
+#   auto | autotools | meson | cmake | make | cargo | go | python | perl | ruby | node-gyp
+BUILD_SYSTEM="auto"
+
+# Diretório de build fora da source tree (para meson/cmake)
+OOB_BUILD=1
+
+# =========================
+# Toolchain / Linker / Flags (ajustáveis)
+# =========================
+# Escolha do compilador: auto|gcc|clang
+TOOLCHAIN="auto"
+
+# Escolha do linker: auto|bfd|lld|mold
+LINKER="auto"
+
+# Nível de otimização/hardening (ajuste ao seu gosto)
+OPT_LEVEL="${OPT_LEVEL:--O2}"
+DEBUG_FLAGS="${DEBUG_FLAGS:--g0}"
+HARDEN_CFLAGS="${HARDEN_CFLAGS:--fstack-protector-strong -D_FORTIFY_SOURCE=2}"
+HARDEN_LDFLAGS="${HARDEN_LDFLAGS:--Wl,-z,relro -Wl,-z,now}"
+
+# musl: às vezes você quer -static em alguns pacotes (não padrão)
+STATIC="${STATIC:-0}"
+
+# Paralelismo vem do adm via ADM_JOBS; fallback:
+: "${ADM_JOBS:=$(nproc 2>/dev/null || echo 1)}"
+
+# =========================
+# Opções específicas por build system
+# =========================
+CONFIGURE_OPTS="${CONFIGURE_OPTS:-}"
+MAKE_OPTS="${MAKE_OPTS:-}"
+INSTALL_OPTS="${INSTALL_OPTS:-}"
+
+MESON_OPTS="${MESON_OPTS:-}"
+CMAKE_OPTS="${CMAKE_OPTS:-}"
+CMAKE_GENERATOR="${CMAKE_GENERATOR:-Ninja}"  # Ninja ou "Unix Makefiles"
+
+CARGO_FEATURES="${CARGO_FEATURES:-}"
+CARGO_NO_DEFAULT_FEATURES="${CARGO_NO_DEFAULT_FEATURES:-0}"
+CARGO_TARGET="${CARGO_TARGET:-}"             # e.g. x86_64-unknown-linux-musl (se usar cross)
+RUST_PROFILE="${RUST_PROFILE:-release}"      # release|debug
+RUST_STD_FEATURES="${RUST_STD_FEATURES:-}"   # se você controla std builds
+
+GO_TAGS="${GO_TAGS:-}"
+GO_LDFLAGS="${GO_LDFLAGS:-}"
+GO_PKG="${GO_PKG:-./...}"
+
+PYTHON="${PYTHON:-python3}"
+
+# =========================
+# Ambiente provido pelo adm
+# =========================
+# SRCROOT: diretório do source extraído
+# DESTDIR: definido pelo adm ao chamar pkg_install (DESTDIR="$stage")
+# PREFIX: já exportado pelo adm, mas mantemos local também
+# =========================
+
+# ------------------------------------------------------------
+# Helper: escolher toolchain/linker e padronizar flags
+# ------------------------------------------------------------
+_pick_toolchain() {
+  local cc="" cxx="" ar="" ranlib="" strip=""
+  case "$TOOLCHAIN" in
+    auto)
+      if command -v clang >/dev/null 2>&1; then cc="clang"; cxx="clang++"
+      else cc="gcc"; cxx="g++"
+      fi
+      ;;
+    clang) cc="clang"; cxx="clang++" ;;
+    gcc)   cc="gcc";   cxx="g++" ;;
+    *) echo "TOOLCHAIN inválido: $TOOLCHAIN" >&2; return 1 ;;
+  esac
+
+  # binutils
+  ar="${AR:-ar}"
+  ranlib="${RANLIB:-ranlib}"
+  strip="${STRIP:-strip}"
+
+  export CC="${CC:-$cc}"
+  export CXX="${CXX:-$cxx}"
+  export AR="$ar"
+  export RANLIB="$ranlib"
+  export STRIP="$strip"
+}
+
+_pick_linker() {
+  # Ajusta flags do linker conforme preferência
+  local ldflag=""
+  case "$LINKER" in
+    auto)
+      # preferir lld se clang, senão bfd; mold se disponível e você escolher explicitamente
+      if [[ "${CC:-}" == *clang* ]] && command -v ld.lld >/dev/null 2>&1; then ldflag="-fuse-ld=lld"
+      else ldflag=""  # default do toolchain
+      fi
+      ;;
+    bfd)  ldflag="-fuse-ld=bfd" ;;
+    lld)  ldflag="-fuse-ld=lld" ;;
+    mold) ldflag="-fuse-ld=mold" ;;
+    *) echo "LINKER inválido: $LINKER" >&2; return 1 ;;
+  esac
+
+  export LDFLAGS="${LDFLAGS:-} ${HARDEN_LDFLAGS} ${ldflag}"
+}
+
+_set_common_flags() {
+  _pick_toolchain
+  _pick_linker
+
+  local static_flags=""
+  if [[ "$STATIC" == "1" ]]; then
+    static_flags="-static"
+  fi
+
+  export CFLAGS="${CFLAGS:-} ${OPT_LEVEL} ${DEBUG_FLAGS} ${HARDEN_CFLAGS} ${static_flags}"
+  export CXXFLAGS="${CXXFLAGS:-} ${OPT_LEVEL} ${DEBUG_FLAGS} ${HARDEN_CFLAGS} ${static_flags}"
+  export CPPFLAGS="${CPPFLAGS:-}"
+  export PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
+  export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}"
+  export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
+  # Rust
+  export RUSTFLAGS="${RUSTFLAGS:-} ${OPT_LEVEL}"
+  # Go
+  export CGO_ENABLED="${CGO_ENABLED:-1}"
+
+  # Locale estável (evita diferenças de build)
+  export LC_ALL=C
+  export LANG=C
+}
+
+# ------------------------------------------------------------
+# Helper: detectar build system
+# ------------------------------------------------------------
+_detect_build_system() {
+  [[ "$BUILD_SYSTEM" != "auto" ]] && { echo "$BUILD_SYSTEM"; return 0; }
+
+  # Ordem proposital (evita “falsos positivos”)
+  if [[ -f Cargo.toml ]]; then echo "cargo"; return 0; fi
+  if [[ -f go.mod ]]; then echo "go"; return 0; fi
+  if [[ -f meson.build ]]; then echo "meson"; return 0; fi
+  if [[ -f CMakeLists.txt ]]; then echo "cmake"; return 0; fi
+  if [[ -x configure || -f configure.ac || -f configure.in ]]; then echo "autotools"; return 0; fi
+  if [[ -f pyproject.toml || -f setup.py ]]; then echo "python"; return 0; fi
+  if [[ -f Makefile || -f makefile || -f GNUmakefile ]]; then echo "make"; return 0; fi
+
+  echo "make"
+}
+
+# ------------------------------------------------------------
+# Helper: diretório de build fora da árvore (meson/cmake)
+# ------------------------------------------------------------
+_builddir_path() {
+  # Usa WORKDIR fornecido pelo adm; fallback para diretório em SRCROOT
+  local wd="${WORKDIR:-}"
+  if [[ -n "$wd" ]]; then
+    echo "$wd/builddir"
+  else
+    echo "$(pwd)/.adm-builddir"
+  fi
+}
+
+# ------------------------------------------------------------
+# Defaults: hooks chamados pelo adm, se você não sobrescrever.
+# Você pode sobrescrever qualquer um: pkg_prepare, pkg_configure, pkg_build, pkg_install
+# ------------------------------------------------------------
+
+pkg_env() {
+  _set_common_flags
+}
+
+pkg_prepare() {
+  # lugar para patches manuais extra, autoreconf, etc.
+  :
+}
+
+pkg_configure() {
+  local sys; sys="$(_detect_build_system)"
+  case "$sys" in
+    autotools)
+      # Se veio de git com configure.ac sem configure, você precisa autoreconf (opcional)
+      if [[ ! -x configure && ( -f configure.ac || -f configure.in ) ]]; then
+        command -v autoreconf >/dev/null 2>&1 || { echo "autoreconf necessário (autoconf/automake/libtool)" >&2; return 1; }
+        autoreconf -fi
+      fi
+      ./configure --prefix="$PREFIX" $CONFIGURE_OPTS
+      ;;
+    meson)
+      command -v meson >/dev/null 2>&1 || { echo "meson não encontrado" >&2; return 1; }
+      local bdir; bdir="$(_builddir_path)"
+      rm -rf "$bdir"
+      meson setup "$bdir" \
+        --prefix="$PREFIX" \
+        --buildtype=release \
+        -Ddefault_library=shared \
+        $MESON_OPTS
+      ;;
+    cmake)
+      command -v cmake >/dev/null 2>&1 || { echo "cmake não encontrado" >&2; return 1; }
+      local bdir; bdir="$(_builddir_path)"
+      rm -rf "$bdir"
+      cmake -S . -B "$bdir" \
+        -G "${CMAKE_GENERATOR}" \
+        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER="${CC:-cc}" \
+        -DCMAKE_CXX_COMPILER="${CXX:-c++}" \
+        -DCMAKE_AR="${AR:-ar}" \
+        -DCMAKE_RANLIB="${RANLIB:-ranlib}" \
+        -DCMAKE_STRIP="${STRIP:-strip}" \
+        $CMAKE_OPTS
+      ;;
+    make|cargo|go|python|perl|ruby|node-gyp)
+      # sem configure
+      :
+      ;;
+    *)
+      echo "BUILD_SYSTEM desconhecido: $sys" >&2; return 1 ;;
+  esac
+}
+
+pkg_build() {
+  local sys; sys="$(_detect_build_system)"
+  case "$sys" in
+    autotools|make)
+      make -j"$ADM_JOBS" $MAKE_OPTS
+      ;;
+    meson)
+      command -v ninja >/dev/null 2>&1 || { echo "ninja não encontrado" >&2; return 1; }
+      local bdir; bdir="$(_builddir_path)"
+      ninja -C "$bdir" -j"$ADM_JOBS"
+      ;;
+    cmake)
+      local bdir; bdir="$(_builddir_path)"
+      cmake --build "$bdir" -- -j"$ADM_JOBS"
+      ;;
+    cargo)
+      command -v cargo >/dev/null 2>&1 || { echo "cargo não encontrado" >&2; return 1; }
+      local args=()
+      [[ "$RUST_PROFILE" == "release" ]] && args+=(--release)
+      [[ "$CARGO_NO_DEFAULT_FEATURES" == "1" ]] && args+=(--no-default-features)
+      [[ -n "$CARGO_FEATURES" ]] && args+=(--features "$CARGO_FEATURES")
+      [[ -n "$CARGO_TARGET" ]] && args+=(--target "$CARGO_TARGET")
+      cargo build "${args[@]}"
+      ;;
+    go)
+      command -v go >/dev/null 2>&1 || { echo "go não encontrado" >&2; return 1; }
+      local tags=() ld=()
+      [[ -n "$GO_TAGS" ]] && tags=(-tags "$GO_TAGS")
+      [[ -n "$GO_LDFLAGS" ]] && ld=(-ldflags "$GO_LDFLAGS")
+      # build do módulo inteiro; para binários específicos, sobrescreva pkg_build
+      go build "${tags[@]}" "${ld[@]}" "$GO_PKG"
+      ;;
+    python)
+      command -v "$PYTHON" >/dev/null 2>&1 || { echo "python3 não encontrado" >&2; return 1; }
+      if [[ -f pyproject.toml ]]; then
+        # PEP517/518: ideal usar build backend (python -m build) ou installer
+        # Aqui só validamos import; instalação fará o correto
+        :
+      else
+        # setup.py tradicional
+        "$PYTHON" setup.py build
+      fi
+      ;;
+    perl|ruby|node-gyp)
+      # normalmente não há "build" separado ou é tool-specific
+      :
+      ;;
+    *)
+      echo "BUILD_SYSTEM desconhecido: $sys" >&2; return 1 ;;
+  esac
+}
+
+pkg_install() {
+  # DESTDIR é fornecido pelo adm ao chamar: DESTDIR="$stage" pkg_install
+  : "${DESTDIR:?DESTDIR não definido (adm deve chamar com staging)}"
+
+  local sys; sys="$(_detect_build_system)"
+  case "$sys" in
+    autotools|make)
+      make install DESTDIR="$DESTDIR" $INSTALL_OPTS
+      ;;
+    meson)
+      command -v ninja >/dev/null 2>&1 || { echo "ninja não encontrado" >&2; return 1; }
+      local bdir; bdir="$(_builddir_path)"
+      DESTDIR="$DESTDIR" ninja -C "$bdir" install
+      ;;
+    cmake)
+      local bdir; bdir="$(_builddir_path)"
+      cmake --install "$bdir" --prefix "$PREFIX" --config Release
+      # cmake --install respeita DESTDIR via env
+      ;;
+    cargo)
+      command -v cargo >/dev/null 2>&1 || { echo "cargo não encontrado" >&2; return 1; }
+      # Padrão: tenta cargo install para prefix staging
+      # Nota: alguns projetos preferem "install" manual do binário; sobrescreva se necessário.
+      local args=()
+      [[ "$RUST_PROFILE" == "release" ]] && args+=(--release)
+      [[ "$CARGO_NO_DEFAULT_FEATURES" == "1" ]] && args+=(--no-default-features)
+      [[ -n "$CARGO_FEATURES" ]] && args+=(--features "$CARGO_FEATURES")
+      [[ -n "$CARGO_TARGET" ]] && args+=(--target "$CARGO_TARGET")
+
+      # instala em PREFIX dentro do DESTDIR
+      cargo install --path . --root "$DESTDIR$PREFIX" "${args[@]}" --locked
+      ;;
+    go)
+      command -v go >/dev/null 2>&1 || { echo "go não encontrado" >&2; return 1; }
+      # Default genérico: instala binários em $PREFIX/bin se existir um main claro
+      # Para projetos complexos, sobrescreva pkg_install.
+      mkdir -p "$DESTDIR$PREFIX/bin"
+      # tenta encontrar binários gerados em ./ (heurístico). Preferível sobrescrever.
+      local bins
+      bins="$(find . -maxdepth 2 -type f -perm -111 -name '*'" 2>/dev/null | head -n 10 || true)"
+      if [[ -z "$bins" ]]; then
+        echo "go: nenhum binário detectado; sobrescreva pkg_install para instalar explicitamente." >&2
+        return 1
+      fi
+      while IFS= read -r b; do
+        install -m 0755 "$b" "$DESTDIR$PREFIX/bin/$(basename "$b")"
+      done <<< "$bins"
+      ;;
+    python)
+      command -v "$PYTHON" >/dev/null 2>&1 || { echo "python3 não encontrado" >&2; return 1; }
+      if [[ -f pyproject.toml ]]; then
+        # Recomendado: usar installer (PEP 517) — exige 'installer' no build env
+        # Alternativa: pip (não ideal em from-scratch); aqui usamos installer se disponível.
+        if "$PYTHON" -c "import installer" >/dev/null 2>&1; then
+          # build wheel com 'build' se existir; senão falha pedindo tool
+          if "$PYTHON" -c "import build" >/dev/null 2>&1; then
+            "$PYTHON" -m build --wheel --no-isolation
+            local whl
+            whl="$(ls -1 dist/*.whl | head -n1)"
+            "$PYTHON" -m installer --destdir "$DESTDIR" --prefix "$PREFIX" "$whl"
+          else
+            echo "python: para pyproject.toml, instale python-build (módulo 'build') no ambiente de build." >&2
+            return 1
+          fi
+        else
+          echo "python: instale o módulo 'installer' para instalar wheels de forma limpa." >&2
+          return 1
+        fi
+      else
+        "$PYTHON" setup.py install --root="$DESTDIR" --prefix="$PREFIX"
+      fi
+      ;;
+    perl)
+      # defaults comuns
+      if [[ -f Makefile.PL ]]; then
+        perl Makefile.PL PREFIX="$PREFIX"
+        make -j"$ADM_JOBS"
+        make install DESTDIR="$DESTDIR"
+      elif [[ -f Build.PL ]]; then
+        perl Build.PL --install_base "$PREFIX"
+        ./Build
+        ./Build install --destdir "$DESTDIR"
+      else
+        echo "perl: nenhum Makefile.PL/Build.PL" >&2; return 1
+      fi
+      ;;
+    ruby)
+      # gem install (precisa ruby/gem)
+      command -v gem >/dev/null 2>&1 || { echo "gem não encontrado" >&2; return 1; }
+      gem build ./*.gemspec
+      local g; g="$(ls -1 *.gem | head -n1)"
+      gem install --install-dir "$DESTDIR$PREFIX" "$g" --no-document
+      ;;
+    node-gyp)
+      command -v node >/dev/null 2>&1 || { echo "node não encontrado" >&2; return 1; }
+      command -v npm >/dev/null 2>&1 || { echo "npm não encontrado" >&2; return 1; }
+      # geralmente instala em prefixo do node; em from-scratch, preferir empacotar artefatos manualmente
+      echo "node-gyp: sobrescreva pkg_install para instalar artefatos explicitamente em DESTDIR." >&2
+      return 1
+      ;;
+    *)
+      echo "BUILD_SYSTEM desconhecido: $sys" >&2; return 1 ;;
+  esac
+}
+
+# Fim do template.
+# Para customizar, basta definir pkg_prepare/pkg_configure/pkg_build/pkg_install acima,
+# ou ajustar variáveis (BUILD_SYSTEM, *_OPTS, TOOLCHAIN, LINKER, etc.).
