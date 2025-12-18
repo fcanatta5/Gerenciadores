@@ -1,0 +1,197 @@
+pkgname="runit"
+pkgver="2.3.0"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://smarden.org/runit/runit-${pkgver}.tar.gz::runit-${pkgver}.tar.gz"
+)
+
+sha256sums=(
+  "190e11c1f8072b543bb6bd53850555c458d6e306d53df3fc1232d300c3e21b51 runit-2.3.0.tar.gz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -Os -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  # O tarball do runit costuma extrair como admin/runit-<ver>
+  # e seu cross-toolchain.sh pode definir SRC_DIR como "admin".
+  # Então entramos explicitamente no subdir correto.
+  if [[ -d "admin/runit-${pkgver}" ]]; then
+    cd "admin/runit-${pkgver}"
+  fi
+
+  # Define compilador/linker do buildsystem do runit
+  # (runit usa conf-* em src/)
+  printf '%s\n' "$CC $CFLAGS" > src/conf-cc
+  printf '%s\n' "$CC $LDFLAGS" > src/conf-ld
+  printf '%s\n' "/usr" > src/conf-home
+
+  # Compila
+  make -C src -j"$JOBS"
+}
+
+install() {
+  # Mesmo ajuste de diretório da build()
+  if [[ -d "admin/runit-${pkgver}" ]]; then
+    cd "admin/runit-${pkgver}"
+  fi
+
+  # Instala binários (sem depender do package/install, para controlar DESTDIR)
+  install -d "$DESTDIR"/{sbin,usr/bin,usr/sbin,usr/share}
+
+  # Binários principais
+  install -m0755 src/runit        "$DESTDIR/sbin/runit"
+  install -m0755 src/runit-init   "$DESTDIR/sbin/runit-init"
+  install -m0755 src/runsv        "$DESTDIR/usr/bin/runsv"
+  install -m0755 src/runsvdir     "$DESTDIR/usr/bin/runsvdir"
+  install -m0755 src/sv           "$DESTDIR/usr/bin/sv"
+  install -m0755 src/chpst        "$DESTDIR/usr/bin/chpst"
+  install -m0755 src/svlogd       "$DESTDIR/usr/bin/svlogd"
+  install -m0755 src/utmpset      "$DESTDIR/usr/bin/utmpset"
+
+  # init: muitos sistemas esperam /sbin/init
+  ln -sf runit-init "$DESTDIR/sbin/init"
+
+  # Diretórios padrão runit
+  install -d "$DESTDIR/etc/runit" \
+             "$DESTDIR/etc/service" \
+             "$DESTDIR/etc/sv" \
+             "$DESTDIR/run" \
+             "$DESTDIR/var/log"
+
+  # --- /etc/runit/{1,2,3} (stages) ---
+  # Stage 1: setup básico do sistema antes de subir serviços
+  cat > "$DESTDIR/etc/runit/1" <<'EOF'
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+
+# Montagens (falham silenciosamente se já estiverem montadas)
+mount -t proc  proc  /proc 2>/dev/null || true
+mount -t sysfs sys   /sys  2>/dev/null || true
+mount -t devtmpfs dev /dev 2>/dev/null || true
+
+# Device nodes simples (BusyBox mdev) se existir
+command -v mdev >/dev/null 2>&1 && mdev -s 2>/dev/null || true
+
+# Hostname (se existir arquivo)
+[ -f /etc/hostname ] && hostname -F /etc/hostname 2>/dev/null || true
+
+# Permissões mínimas
+chmod 1777 /tmp 2>/dev/null || true
+
+exit 0
+EOF
+  chmod 0755 "$DESTDIR/etc/runit/1"
+
+  # Stage 2: inicia supervisão de serviços
+  cat > "$DESTDIR/etc/runit/2" <<'EOF'
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+
+# Garantir diretórios essenciais
+mkdir -p /run /var/log /etc/service
+
+# Inicia runsvdir (supervisão)
+# -P: não mata serviços ao trocar o diretório /etc/service (útil em updates)
+exec runsvdir -P /etc/service
+EOF
+  chmod 0755 "$DESTDIR/etc/runit/2"
+
+  # Stage 3: shutdown (derruba serviços e desmonta)
+  cat > "$DESTDIR/etc/runit/3" <<'EOF'
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+
+echo "runit: stopping services..."
+
+# Tenta derrubar tudo que estiver habilitado
+if command -v sv >/dev/null 2>&1; then
+  for s in /etc/service/*; do
+    [ -e "$s" ] || continue
+    sv -w 10 down "$s" 2>/dev/null || true
+  done
+fi
+
+sync
+
+# Desmonta (ignorando erros)
+umount -r /proc 2>/dev/null || true
+umount -r /sys  2>/dev/null || true
+umount -r /dev  2>/dev/null || true
+
+exit 0
+EOF
+  chmod 0755 "$DESTDIR/etc/runit/3"
+
+  # --- Scripts auxiliares clássicos do runit ---
+  cat > "$DESTDIR/etc/runit/ctrlaltdel" <<'EOF'
+#!/bin/sh
+# CTRL+ALT+DEL: reinicia
+exec /sbin/reboot
+EOF
+  chmod 0755 "$DESTDIR/etc/runit/ctrlaltdel"
+
+  cat > "$DESTDIR/etc/runit/reboot" <<'EOF'
+#!/bin/sh
+echo "runit: reboot requested"
+exec /sbin/reboot -f
+EOF
+  chmod 0755 "$DESTDIR/etc/runit/reboot"
+
+  cat > "$DESTDIR/etc/runit/halt" <<'EOF'
+#!/bin/sh
+echo "runit: halt requested"
+exec /sbin/poweroff -f
+EOF
+  chmod 0755 "$DESTDIR/etc/runit/halt"
+
+  cat > "$DESTDIR/etc/runit/single" <<'EOF'
+#!/bin/sh
+# Modo single-user simples: abre um shell
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+exec sh
+EOF
+  chmod 0755 "$DESTDIR/etc/runit/single"
+
+  # Template de serviço (não habilita nada automaticamente)
+  install -d "$DESTDIR/etc/sv/.template"
+  cat > "$DESTDIR/etc/sv/.template/run" <<'EOF'
+#!/bin/sh
+exec 2>&1
+# coloque aqui seu daemon/serviço
+exec sleep 2147483647
+EOF
+  chmod 0755 "$DESTDIR/etc/sv/.template/run"
+
+  # README minimal para lembrar como habilitar serviços
+  cat > "$DESTDIR/etc/sv/README.runit" <<'EOF'
+Como usar runit:
+
+1) Crie um serviço em /etc/sv/<nome>/run (executável).
+2) Habilite criando symlink em /etc/service:
+   ln -s /etc/sv/<nome> /etc/service/<nome>
+
+O runsvdir (stage2) supervisiona tudo em /etc/service.
+EOF
+}
