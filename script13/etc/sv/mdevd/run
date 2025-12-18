@@ -1,0 +1,16 @@
+#!/bin/sh
+exec 2>&1
+# Dar permissão de execução chmod +x
+# garante sysfs/proc montados (se stage1 falhar, isso ainda tenta)
+mount -t proc  proc  /proc 2>/dev/null || true
+mount -t sysfs sys   /sys  2>/dev/null || true
+mount -t devtmpfs dev /dev 2>/dev/null || true
+
+# define hotplug handler
+echo /etc/mdev/hotplug > /proc/sys/kernel/hotplug 2>/dev/null || true
+
+# popula /dev
+mdev -s 2>/dev/null || true
+
+# daemon mode (foreground)
+exec mdev -d
