@@ -1,0 +1,6 @@
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/runit/2
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+exec runsvdir -P /etc/service
