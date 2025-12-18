@@ -1,0 +1,80 @@
+pkgname="gcc-final"
+pkgver="15.2.0"
+pkgrel=1
+
+# gcc-final vai para o sysroot (ROOTFS) em /usr
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://gcc.gnu.org/pub/gcc/releases/gcc-${pkgver}/gcc-${pkgver}.tar.xz::gcc-${pkgver}.tar.xz"
+)
+
+sha256sums=(
+  "438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e gcc-15.2.0.tar.xz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  # Usar binutils/gcc do pass1 como ferramentas de target quando necessário
+  export PATH="$TOOLS/bin:$PATH"
+
+  # Flags conservadoras
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export CXXFLAGS="${CXXFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+
+  # Linguagens do gcc final
+  : "${GCC_LANGUAGES:=c,c++}"
+}
+
+build() {
+  # Baixa prereqs (gmp/mpfr/mpc/isl) dentro da árvore do GCC
+  # (evita múltiplos tarballs no extractor do cross-toolchain.sh)
+  ./contrib/download_prerequisites
+
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # gcc final (toolchain do sysroot já tem linux-headers + musl)
+  #
+  # IMPORTANTE PARA O SEU cross-toolchain.sh:
+  # - prefix=/usr para que DESTDIR contenha /usr/bin, /usr/lib etc,
+  #   e o commit rsync -> ROOTFS coloque no lugar certo.
+  #
+  # sysroot do compilador final deve ser /
+  # (porque quando você estiver dentro do chroot, / é o sysroot real).
+  ../configure \
+    --prefix=/usr \
+    --libdir=/usr/lib \
+    --libexecdir=/usr/libexec \
+    --sysconfdir=/etc \
+    --localstatedir=/var \
+    --target="$TARGET" \
+    --with-sysroot=/ \
+    --enable-languages="$GCC_LANGUAGES" \
+    --disable-multilib \
+    --disable-nls \
+    --disable-werror \
+    --disable-bootstrap \
+    --disable-libsanitizer \
+    --with-system-zlib
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # Conveniência: cc -> gcc
+  mkdir -p "$DESTDIR/usr/bin"
+  ln -sf gcc "$DESTDIR/usr/bin/cc"
+
+  # Enxuto (opcional)
+  rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
+}
