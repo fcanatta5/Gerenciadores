@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# extra/bash/build
+# GNU Bash — shell completo para o sistema (além do /bin/sh do busybox).
+
+set -Eeuo pipefail
+
+PKG_NAME="bash"
+PKG_CAT="extra"
+PKG_VER="5.2.37"
+PKG_DESC="GNU Bourne Again SHell"
+PKG_URL="https://www.gnu.org/software/bash/"
+PKG_LICENSE="GPL-3.0-or-later"
+
+PKG_DEPS=( "core/musl" "extra/ncurses" )
+PKG_BDEPS=( "core/make" )
+
+SOURCES=(
+  "https://ftp.gnu.org/gnu/bash/bash-${PKG_VER}.tar.gz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-bash-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --bindir=/usr/bin \
+      --without-bash-malloc \
+      --disable-nls )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # bash como /bin/bash (muitos scripts assumem)
+  mkdir -p "${DESTDIR}/bin"
+  ln -sf ../usr/bin/bash "${DESTDIR}/bin/bash" 2>/dev/null || true
+
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+}
