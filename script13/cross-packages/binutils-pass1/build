@@ -2,10 +2,8 @@ pkgname="binutils-pass1"
 pkgver="2.45.1"
 pkgrel=1
 
-# Para o cross-toolchain.sh decidir o destino do commit:
 INSTALL_ROOT="tools"
 
-# Tarball oficial
 sources=(
   "https://ftp.gnu.org/gnu/binutils/binutils-${pkgver}.tar.xz::binutils-${pkgver}.tar.xz"
 )
@@ -16,24 +14,20 @@ sha256sums=(
 
 pre_build() {
   : "${TARGET:=x86_64-linux-musl}"
-  : "${TOOLS:=/mnt/adm/rootfs/tools}"
   : "${SYSROOT:=/mnt/adm/rootfs}"
   : "${JOBS:=4}"
 }
 
 build() {
-  # build out-of-tree limpo
   rm -rf _build
   mkdir -p _build
   cd _build
 
-  # Configuração cross "pass1":
-  # - instala em /tools
-  # - aponta sysroot para o rootfs
-  # - desabilita nls para reduzir dependências
-  # - desabilita werror para evitar que warnings quebrem build
+  # IMPORTANTE:
+  # prefix=/ para que DESTDIR contenha bin/, lib/ etc na raiz,
+  # e o cross-toolchain.sh consiga rsync -> $TOOLS corretamente.
   ../configure \
-    --prefix="$TOOLS" \
+    --prefix=/ \
     --target="$TARGET" \
     --with-sysroot="$SYSROOT" \
     --disable-nls \
@@ -46,9 +40,6 @@ install() {
   cd _build
   make DESTDIR="$DESTDIR" install
 
-  # sane defaults: evita poluir com doc/info nesse pass1
-  rm -rf "$DESTDIR/$TOOLS/share" 2>/dev/null || true
-
-  # Em alguns setups, é útil garantir que 'ld' esteja achável:
-  # o toolchain.sh já coloca $TOOLS/bin no PATH; então ok.
+  # enxuto para pass1
+  rm -rf "$DESTDIR/share" 2>/dev/null || true
 }
