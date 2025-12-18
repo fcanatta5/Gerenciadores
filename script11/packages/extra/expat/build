@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# extra/expat/build
+# Expat - parser XML (dep comum de git, vários componentes).
+# Preferência: autotools (configure/make). Fallback: CMake se o tarball não trouxer ./configure.
+
+set -Eeuo pipefail
+
+PKG_NAME="expat"
+PKG_CAT="extra"
+PKG_VER="2.7.3"
+PKG_DESC="Expat XML parser library"
+PKG_URL="https://libexpat.github.io/"
+PKG_LICENSE="MIT"
+
+PKG_DEPS=( "core/musl" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://github.com/libexpat/libexpat/releases/download/R_${PKG_VER//./_}/expat-${PKG_VER}.tar.xz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "59c31441fec9a66205307749eccfee551055f2d792f329f18d97099e919a3b2f"  # (tar.bz2 no GitHub; para tar.xz calcule o seu)
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # Tentativa 1: autotools
+  if [[ -x "${SRCTOP}/configure" ]]; then
+    ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+        --prefix=/usr \
+        --disable-static \
+        --enable-shared )
+    return 0
+  fi
+
+  # Fallback: CMake (se você já tiver)
+  if command -v cmake >/dev/null 2>&1; then
+    cmake -S "${SRCTOP}" -B "${BUILD_DIR}" \
+      -DCMAKE_INSTALL_PREFIX=/usr \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_shared=ON \
+      -DBUILD_static=OFF
+    return 0
+  fi
+
+  echo "ERRO: expat sem ./configure e sem cmake disponível. Construa core/cmake (e opcional core/ninja) ou use um tarball com configure." >&2
+  exit 1
+}
+
+do_build(){
+  if [[ -f "${BUILD_DIR}/build.ninja" ]]; then
+    command -v ninja >/dev/null 2>&1 || { echo "ERRO: ninja ausente para build CMake/Ninja" >&2; exit 1; }
+    ninja -C "${BUILD_DIR}" -j "${JOBS:-4}"
+  else
+    make -C "${BUILD_DIR}" ${MAKEFLAGS}
+  fi
+}
+
+do_install(){
+  if [[ -f "${BUILD_DIR}/build.ninja" ]]; then
+    DESTDIR="${DESTDIR}" cmake --install "${BUILD_DIR}"
+  else
+    make -C "${BUILD_DIR}" DESTDIR="${DESTDIR}" install
+  fi
+
+  # Base minimalista (opcional)
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/doc" 2>/dev/null || true
+}
