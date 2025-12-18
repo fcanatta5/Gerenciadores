@@ -1,0 +1,72 @@
+pkgname="bash"
+pkgver="5.2.37"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://ftp.gnu.org/gnu/bash/bash-${pkgver}.tar.gz::bash-${pkgver}.tar.gz"
+)
+
+sha256sums=(
+  "9599b22ecd1d5787ad7d3b7bf0c59f312b3396d1e281175dd1f8a4014da621ff bash-5.2.37.tar.gz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  # cross tools (target)
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # Triplet do builder (host atual)
+  local build_triplet
+  if [[ -x ../support/config.guess ]]; then
+    build_triplet="$(../support/config.guess)"
+  else
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  # Cross compile: evitar dependências externas nesta fase (sem readline/history)
+  # prefix=/usr para staging conter usr/bin/bash etc. e o rsync cair certo no ROOTFS.
+  #
+  # Observação: --with-curses NÃO é usado aqui de propósito (evita ncurses/termcap).
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls \
+    --without-bash-malloc \
+    --disable-readline \
+    --disable-history
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # Conveniência: /bin/bash (muitos scripts esperam isso)
+  mkdir -p "$DESTDIR/bin"
+  ln -sf ../usr/bin/bash "$DESTDIR/bin/bash"
+
+  # Opcional: enxugar docs
+  rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
+}
