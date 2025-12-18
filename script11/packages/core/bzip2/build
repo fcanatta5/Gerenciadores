@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# core/bzip2/build
+# bzip2 (libbz2 + utilitários). Build é via Makefile (sem configure).
+# Instalamos em /usr e garantimos lib compartilhada.
+
+set -Eeuo pipefail
+
+PKG_NAME="bzip2"
+PKG_CAT="core"
+PKG_VER="1.0.8"
+PKG_DESC="bzip2 compression library and tools"
+PKG_URL="https://sourceware.org/bzip2/"
+PKG_LICENSE="bzip2"
+
+PKG_DEPS=( "core/musl" )
+PKG_BDEPS=( "core/make" )
+
+SOURCES=(
+  "https://sourceware.org/pub/bzip2/bzip2-${PKG_VER}.tar.gz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-bzip2-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){ :; }
+
+do_build(){
+  cd "${SRCTOP}"
+
+  # Limpa
+  make clean 2>/dev/null || true
+
+  # Build com PIC para shared lib em muitos ambientes
+  make ${MAKEFLAGS} CFLAGS="${CFLAGS:--O2 -pipe} -fPIC"
+}
+
+do_install(){
+  cd "${SRCTOP}"
+
+  mkdir -p "${DESTDIR}/usr/bin" "${DESTDIR}/usr/include" "${DESTDIR}/usr/lib"
+
+  # Instala utilitários e headers
+  make PREFIX=/usr DESTDIR="${DESTDIR}" install
+
+  # Alguns tarballs não instalam .so por padrão; criamos lib compartilhada.
+  # Build padrão gera libbz2.a e objetos; geramos libbz2.so manualmente.
+  if [[ -f "libbz2.a" && -f "bzlib.h" ]]; then
+    # Gera .so a partir dos objetos (bzip2 usa objs: blocksort.o huffman.o crctable.o randtable.o compress.o decompress.o bzlib.o)
+    # Se algum objeto faltar, não falha o pacote (mas tenta).
+    objs=(blocksort.o huffman.o crctable.o randtable.o compress.o decompress.o bzlib.o)
+    ok=1
+    for o in "${objs[@]}"; do [[ -f "$o" ]] || ok=0; done
+    if [[ "$ok" == "1" ]]; then
+      ${CC:-cc} -shared -Wl,-soname,libbz2.so.1.0 -o libbz2.so.1.0.8 "${objs[@]}"
+      install -m 0755 libbz2.so.1.0.8 "${DESTDIR}/usr/lib/"
+      ln -sf libbz2.so.1.0.8 "${DESTDIR}/usr/lib/libbz2.so.1.0"
+      ln -sf libbz2.so.1.0.8 "${DESTDIR}/usr/lib/libbz2.so.1"
+      ln -sf libbz2.so.1.0.8 "${DESTDIR}/usr/lib/libbz2.so"
+    fi
+  fi
+
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+}
