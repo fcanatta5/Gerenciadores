@@ -1,43 +1,37 @@
 pkgname="musl"
 pkgver="1.2.5"
 pkgrel=1
-category="core"
-pkgdesc="musl libc - lightweight C standard library implementation"
-url="https://musl.libc.org/"
-license="MIT"
-arch="x86_64"
 
-depends=()
+# Para musl "nativo", você normalmente já tem binutils/gcc no sistema.
+# O requisito funcional aqui é ter headers do kernel em /usr/include (linux-headers).
+depends=(linux-headers)
 
 sources=(
   "https://musl.libc.org/releases/musl-${pkgver}.tar.gz::musl-${pkgver}.tar.gz"
 )
 
 sha256sums=(
-  # musl-1.2.5.tar.gz
   "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 musl-1.2.5.tar.gz"
 )
 
 pre_build() {
-  : "${CC:=cc}"
-  : "${CFLAGS:=-O2 -pipe}"
-  : "${LDFLAGS:=}"
+  : "${JOBS:=$(nproc 2>/dev/null || echo 4)}"
 }
 
 build() {
-  # O adm entra em SRC_DIR e chama build()
-  # Garantir ambiente limpo
+  # musl faz build in-tree; manter limpo
   make distclean >/dev/null 2>&1 || true
 
-  # Layout recomendado: loader/libc em /lib, headers em /usr/include
+  # Instalação nativa padrão:
+  # - /usr para headers/libs "normais"
+  # - /lib para loader e libs essenciais (layout correto para musl)
   ./configure \
     --prefix=/usr \
     --syslibdir=/lib
 
-  make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+  make -j"$JOBS"
 }
 
 install() {
-  # musl respeita DESTDIR
   make DESTDIR="$DESTDIR" install
 }
