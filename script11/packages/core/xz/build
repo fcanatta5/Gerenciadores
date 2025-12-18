@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# core/xz/build
+# xz-utils (liblzma + ferramentas). Necessário para tar.xz e vários sources.
+
+set -Eeuo pipefail
+
+PKG_NAME="xz"
+PKG_CAT="core"
+PKG_VER="5.8.1"
+PKG_DESC="XZ Utils (liblzma and xz tools)"
+PKG_URL="https://tukaani.org/xz/"
+PKG_LICENSE="0BSD AND LGPL-2.1-or-later AND GPL-2.0-or-later"
+
+PKG_DEPS=( "core/musl" )
+PKG_BDEPS=( "core/make" )
+
+SOURCES=(
+  "https://tukaani.org/xz/xz-${PKG_VER}.tar.xz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-xz-${PKG_VER}.tar.xz>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --disable-static \
+      --enable-shared \
+      --disable-nls )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+}
