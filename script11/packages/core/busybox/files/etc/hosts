@@ -1,0 +1,6 @@
+# 5) /etc/hosts
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/hosts
+127.0.0.1   localhost
+127.0.1.1   admhost
+::1         localhost ip6-localhost ip6-loopback
