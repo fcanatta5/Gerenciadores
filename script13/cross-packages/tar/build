@@ -1,0 +1,67 @@
+pkgname="tar"
+pkgver="1.35"
+pkgrel=1
+
+# tar vai para o sysroot (ROOTFS)
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://ftp.gnu.org/gnu/tar/tar-${pkgver}.tar.xz::tar-${pkgver}.tar.xz"
+)
+
+sha256sums=(
+  "4e9b4c1a77f3b3a4f53b4bb3c6f1d4e88f2d9a44b7f409775888b8595047a507 tar-1.35.tar.xz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  # cross tools
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # Triplet do host de build
+  local build_triplet
+  if [[ -x ../build-aux/config.guess ]]; then
+    build_triplet="$(../build-aux/config.guess)"
+  else
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  # Cross compile simples:
+  # - prefix=/usr para staging correto
+  # - sem NLS
+  # - sem SELinux
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls \
+    --without-selinux
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # Opcional: enxugar docs
+  rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
+}
