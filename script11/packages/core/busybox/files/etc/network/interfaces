@@ -1,0 +1,9 @@
+# 2) /etc/network/interfaces (ifupdown) – DHCP em eth0 + loopback
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/network/interfaces
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+    udhcpc_opts -T 3 -t 5 -A 1 -b
