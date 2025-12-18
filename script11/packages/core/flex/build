@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# core/flex/build
+# Flex 2.6.4 (gerador de analisador léxico) - essencial para vários builds (incl. toolchains e projetos).
+#
+# Dependências típicas:
+# - m4 (para autotools e alguns fluxos)
+# - (bison é frequentemente usado junto, mas não é dependência direta)
+
+set -Eeuo pipefail
+
+PKG_NAME="flex"
+PKG_CAT="core"
+PKG_VER="2.6.4"
+PKG_DESC="Flex - fast lexical analyzer generator"
+PKG_URL="https://github.com/westes/flex"
+PKG_LICENSE="BSD-3-Clause AND LGPL-2.0-or-later"
+
+PKG_DEPS=(
+  "core/musl"
+  "core/m4"
+)
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://github.com/westes/flex/releases/download/v${PKG_VER}/flex-${PKG_VER}.tar.gz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-flex-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --disable-nls )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # Base minimalista (opcional)
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/info" 2>/dev/null || true
+}
