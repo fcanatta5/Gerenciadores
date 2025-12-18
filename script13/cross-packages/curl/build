@@ -1,0 +1,76 @@
+pkgname="curl"
+pkgver="8.17.0"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://curl.se/download/curl-${pkgver}.tar.gz::curl-${pkgver}.tar.gz"
+)
+
+sha256sums=(
+  "e8e74cdeefe5fb78b3ae6e90cd542babf788fa9480029cfcee6fd9ced42b7910 curl-8.17.0.tar.gz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  local build_triplet
+  if [[ -x ../build-aux/config.guess ]]; then
+    build_triplet="$(../build-aux/config.guess)"
+  else
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  local ssl_opt zlib_opt
+  if [[ -e "$SYSROOT/usr/include/openssl/ssl.h" ]]; then
+    ssl_opt="--with-openssl=$SYSROOT/usr"
+  else
+    ssl_opt="--without-ssl"
+  fi
+
+  if [[ -e "$SYSROOT/usr/include/zlib.h" ]]; then
+    zlib_opt="--with-zlib=$SYSROOT/usr"
+  else
+    zlib_opt="--without-zlib"
+  fi
+
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls \
+    --disable-manual \
+    --disable-docs \
+    "$ssl_opt" \
+    "$zlib_opt" \
+    --without-libpsl \
+    --without-brotli \
+    --without-zstd
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+  rm -rf "$DESTDIR/usr/share/man" "$DESTDIR/usr/share/doc" 2>/dev/null || true
+}
