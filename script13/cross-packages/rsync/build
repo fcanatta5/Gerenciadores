@@ -1,0 +1,70 @@
+pkgname="rsync"
+pkgver="3.4.1"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://rsync.samba.org/ftp/rsync/rsync-${pkgver}.tar.gz::rsync-${pkgver}.tar.gz"
+)
+
+sha256sums=(
+  "2924bcb3a1ed8b551fc101f740b9f0fe0a202b115027647cf69850d65fd88c52 rsync-3.4.1.tar.gz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  local build_triplet
+  if [[ -x ../config.guess ]]; then
+    build_triplet="$(../config.guess)"
+  elif [[ -x ../build-aux/config.guess ]]; then
+    build_triplet="$(../build-aux/config.guess)"
+  else
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  # Objetivo: minimizar deps externas.
+  # - usa popt incluso (evita pacote popt externo)
+  # - desabilita openssl (evita dependência; rsync over ssh continua ok)
+  # - desabilita libs opcionais (lz4/zstd/xxhash) se você ainda não tiver elas no sysroot
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls \
+    --enable-ipv6 \
+    --with-included-popt=yes \
+    --disable-openssl \
+    --disable-lz4 \
+    --disable-zstd \
+    --disable-xxhash
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # Enxugar docs (opcional)
+  rm -rf "$DESTDIR/usr/share/man" "$DESTDIR/usr/share/doc" 2>/dev/null || true
+}
