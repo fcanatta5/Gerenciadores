@@ -1,0 +1,67 @@
+pkgname="xz"
+pkgver="5.6.4"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://github.com/tukaani-project/xz/releases/download/v${pkgver}/xz-${pkgver}.tar.xz::xz-${pkgver}.tar.xz"
+)
+
+# O LFS 12.3 lista o MD5 do xz-5.6.4.tar.xz.
+# Seu cross-toolchain.sh aceita md5 como checksum.
+md5sums=(
+  "4b1cf07d45ec7eb90a01dd3c00311a3e xz-5.6.4.tar.xz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  # cross tools
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # Triplet do builder
+  local build_triplet
+  if [[ -x ../build-aux/config.guess ]]; then
+    build_triplet="$(../build-aux/config.guess)"
+  else
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  # XZ Utils:
+  # - prefix=/usr para staging cair em usr/bin, usr/lib, etc.
+  # - host=$TARGET para gerar binários do target
+  # - desabilitar NLS para reduzir dependências
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # Opcional: enxugar docs
+  rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
+}
