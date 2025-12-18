@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# /var/lib/adm/packages/core/grub/build
+# GNU GRUB bootloader (x86_64) — build “core” para BIOS (pc) por padrão.
+#
+# Importante:
+# - Este pacote só COMPILA e INSTALA os binários/módulos do grub no sistema via DESTDIR.
+# - NÃO executa "grub-install" nem gera grub.cfg automaticamente (isso é pós-instalação, depende do seu disco/EFI).
+#
+# Configuração:
+# - Plataforma padrão: pc (BIOS/Legacy)
+# - Para UEFI x86_64, exporte antes do build:
+#     GRUB_PLATFORM=efi
+#   (note: UEFI normalmente exige dependências extras/firmware e layout ESP; trate depois)
+#
+# Observação para sistema mínimo:
+# - Para evitar dependências grandes cedo, desabilitamos NLS e não construímos docs.
+# - O grub pode usar mais libs (freetype, etc) se você quiser temas/fonts; isso fica para depois.
+
+set -Eeuo pipefail
+
+PKG_NAME="grub"
+PKG_CAT="core"
+PKG_VER="2.12"
+PKG_DESC="GNU GRUB bootloader (x86_64)"
+PKG_URL="https://www.gnu.org/software/grub/"
+PKG_LICENSE="GPL-3.0-or-later"
+
+# Dependências mínimas razoáveis para compilar GRUB:
+PKG_DEPS=(
+  "core/musl"
+  "core/zlib"
+)
+PKG_BDEPS=(
+  "core/make"
+  "core/m4"
+  "core/bison"
+  "core/flex"
+  # "core/gettext"   # opcional (NLS); aqui desabilitamos
+  # "core/python"    # raramente necessário dependendo de features
+)
+
+SOURCES=(
+  "https://ftp.gnu.org/gnu/grub/grub-${PKG_VER}.tar.xz"
+)
+
+# Recomenda-se preencher SHA256SUMS e remover ALLOW_NO_CHECKSUM.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-grub-${PKG_VER}.tar.xz>"
+)
+
+: "${GRUB_PLATFORM:=pc}"     # pc (BIOS) ou efi
+: "${GRUB_TARGET:=x86_64}"   # arquitetura do grub (x86_64)
+: "${JOBS:=4}"
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # GRUB recomenda build out-of-tree.
+  # Flags para manter simples e evitar falhas por warnings:
+  # - --disable-nls       (sem traduções)
+  # - --disable-werror    (não falhar por warnings)
+  # - --with-platform     (pc ou efi)
+  # - --target            (x86_64)
+  #
+  # Paths:
+  # - sbin em /sbin (boot tools)
+  # - sysconfdir em /etc
+  #
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --sbindir=/sbin \
+      --sysconfdir=/etc \
+      --disable-nls \
+      --disable-werror \
+      --with-platform="${GRUB_PLATFORM}" \
+      --target="${GRUB_TARGET}" )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS:-"-j${JOBS}"}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # Base minimalista: remover docs/man/info (opcional)
+  rm -rf "${DESTDIR}/usr/share/man"  2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/info" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/doc"  2>/dev/null || true
+
+  # Garantias mínimas
+  mkdir -p "${DESTDIR}/boot" "${DESTDIR}/etc"
+
+  # Nota: arquivos de configuração padrão (ex.: /etc/default/grub) podem ser fornecidos via files/
+  # em /var/lib/adm/packages/core/grub/files/...
+}
