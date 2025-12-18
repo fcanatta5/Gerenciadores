@@ -1,0 +1,54 @@
+pkgname="binutils-pass1"
+pkgver="2.45.1"
+pkgrel=1
+
+# Para o cross-toolchain.sh decidir o destino do commit:
+INSTALL_ROOT="tools"
+
+# Tarball oficial
+sources=(
+  "https://ftp.gnu.org/gnu/binutils/binutils-${pkgver}.tar.xz::binutils-${pkgver}.tar.xz"
+)
+
+sha256sums=(
+  "5fe101e6fe9d18fdec95962d81ed670fdee5f37e3f48f0bef87bddf862513aa5 binutils-2.45.1.tar.xz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+}
+
+build() {
+  # build out-of-tree limpo
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # Configuração cross "pass1":
+  # - instala em /tools
+  # - aponta sysroot para o rootfs
+  # - desabilita nls para reduzir dependências
+  # - desabilita werror para evitar que warnings quebrem build
+  ../configure \
+    --prefix="$TOOLS" \
+    --target="$TARGET" \
+    --with-sysroot="$SYSROOT" \
+    --disable-nls \
+    --disable-werror
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # sane defaults: evita poluir com doc/info nesse pass1
+  rm -rf "$DESTDIR/$TOOLS/share" 2>/dev/null || true
+
+  # Em alguns setups, é útil garantir que 'ld' esteja achável:
+  # o toolchain.sh já coloca $TOOLS/bin no PATH; então ok.
+}
