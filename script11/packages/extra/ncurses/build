@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# extra/ncurses/build
+# ncurses - terminfo/terminal UI. Essencial para vim, less, dialog, etc.
+# Build com terminfo em /usr/share/terminfo e libs em /usr/lib.
+
+set -Eeuo pipefail
+
+PKG_NAME="ncurses"
+PKG_CAT="extra"
+PKG_VER="6.5"
+PKG_DESC="ncurses terminal handling library"
+PKG_URL="https://invisible-island.net/ncurses/"
+PKG_LICENSE="X11"
+
+PKG_DEPS=( "core/musl" )
+PKG_BDEPS=( "core/make" )
+
+SOURCES=(
+  "https://invisible-mirror.net/archives/ncurses/ncurses-${PKG_VER}.tar.gz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-ncurses-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # ncurses recomenda alguns knobs:
+  # - --with-shared, --without-normal para evitar libs duplicadas
+  # - --enable-widec para suporte unicode (libncursesw)
+  # - --with-termlib=tinfo separa libtinfo (comum em distros)
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --mandir=/usr/share/man \
+      --with-shared \
+      --without-static \
+      --without-debug \
+      --enable-pc-files \
+      --enable-widec \
+      --with-termlib=tinfo \
+      --disable-stripping )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # Compat: muitos programas esperam libncurses.so e libtinfo.so sem o sufixo w
+  # (ncursesw é o padrão em widec; criamos symlinks compatíveis)
+  mkdir -p "${DESTDIR}/usr/lib"
+  if ls "${DESTDIR}/usr/lib"/*ncursesw*.so* >/dev/null 2>&1; then
+    ln -sf libncursesw.so "${DESTDIR}/usr/lib/libncurses.so" 2>/dev/null || true
+  fi
+  if ls "${DESTDIR}/usr/lib"/*tinfow*.so* >/dev/null 2>&1; then
+    ln -sf libtinfow.so "${DESTDIR}/usr/lib/libtinfo.so" 2>/dev/null || true
+  fi
+
+  # Base minimalista (opcional)
+  rm -rf "${DESTDIR}/usr/share/doc" 2>/dev/null || true
+}
+```0
