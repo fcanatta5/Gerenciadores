@@ -1,0 +1,39 @@
+pkgname="mpfr"
+pkgver="4.2.2"
+pkgrel=1
+category="extra"
+pkgdesc="Multiple-precision floating-point computations with correct rounding"
+url="https://www.mpfr.org/"
+license="LGPL-3.0-or-later"
+arch="x86_64"
+
+depends=( "gmp" )
+
+sources=(
+  "https://www.mpfr.org/mpfr-${pkgver}/mpfr-${pkgver}.tar.xz::mpfr-${pkgver}.tar.xz"
+)
+sha256sums=(
+  "b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01 mpfr-4.2.2.tar.xz"
+)
+
+pre_build() {
+  : "${CC:=cc}"
+  : "${CFLAGS:=-O2 -pipe}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  ../configure \
+    --prefix=/usr \
+    --with-gmp=/usr
+
+  make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+}
