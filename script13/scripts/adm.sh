@@ -29,6 +29,8 @@ IFS=$'\n\t'
 #   - Transactional upgrade/install (staging + commit)
 #   - Reverse dependency uninstall + optional cascade + autoremove
 #   - Dry-run, resume, clean
+#   - install --from <pkg.tar.zst|tar.xz>
+#   - verify <pkg> [--hash]
 # ============================================================
 
 ADM_ROOT="/var/lib/adm"
@@ -67,6 +69,23 @@ die()  { err "$*"; exit 1; }
 ts() { date +"%Y-%m-%d %H:%M:%S"; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "Ferramenta ausente: $1"; }
+
+tar_supports_zstd() {
+  tar --help 2>/dev/null | grep -q -- '--zstd'
+}
+
+tar_extract_zst() {
+  local archive="$1" dest="$2"
+  if tar_supports_zstd; then
+    run_cmd tar --xattrs --acls --zstd -xf "$archive" -C "$dest"
+  elif command -v unzstd >/dev/null 2>&1; then
+    run_cmd bash -c "unzstd -c \"${archive}\" | tar --xattrs --acls -xf - -C \"${dest}\""
+  elif command -v zstd >/dev/null 2>&1; then
+    run_cmd bash -c "zstd -dc \"${archive}\" | tar --xattrs --acls -xf - -C \"${dest}\""
+  else
+    die "Não há suporte a .zst: tar sem --zstd e sem (unzstd|zstd)."
+  fi
+}
 
 mkdirs() {
   if ((DRYRUN)); then return 0; fi
@@ -570,7 +589,7 @@ unpack_sources() {
       *.tar.gz|*.tgz) run_cmd tar -C "$workdir" -xzf "$f" ;;
       *.tar.bz2|*.tbz2) run_cmd tar -C "$workdir" -xjf "$f" ;;
       *.tar.xz|*.txz) run_cmd tar -C "$workdir" -xJf "$f" ;;
-      *.tar.zst|*.tzst) run_cmd tar -C "$workdir" --zstd -xf "$f" ;;
+      *.tar.zst|*.tzst) tar_extract_zst "$f" "$workdir" ;;
       *.zip) need unzip; run_cmd unzip -q "$f" -d "$workdir" ;;
       *) run_cmd cp -a "$f" "$workdir/" ;;
     esac
@@ -682,14 +701,13 @@ make_package() {
   } >"$admmeta"
 
   # create tar
-  if tar --help 2>/dev/null | grep -q -- '--zstd'; then
+  if tar_supports_zstd; then
     info "Empacotando: ${outzst##*/}"
     run_cmd tar -C "$destdir" --xattrs --acls --zstd -cf "$outzst" .
     printf "%s\n" "$outzst"
   else
     need xz
     info "Empacotando (fallback xz): ${outxz##*/}"
-    # preserve xattrs/acls where possible (tar does, xz compress)
     run_cmd bash -c "tar -C \"${destdir}\" --xattrs --acls -c . | xz -T0 -9e > \"${outxz}\""
     printf "%s\n" "$outxz"
   fi
@@ -701,24 +719,25 @@ stage_extract_pkg() {
   run_cmd rm -rf "$stage"
   run_cmd mkdir -p "$stage"
   if [[ "$pkgfile" == *.tar.zst ]]; then
-    run_cmd tar --xattrs --acls --zstd -xf "$pkgfile" -C "$stage"
+    tar_extract_zst "$pkgfile" "$stage"
   else
     run_cmd tar --xattrs --acls -xf "$pkgfile" -C "$stage"
   fi
 }
 
 commit_stage_to_root() {
+  # Safe commit: copy files from stage into /, backing up overwritten files.
+  # DOES NOT delete anything from / globally.
   local stage="$1" backupdir="$2"
-  # prefer rsync for robust copy (preserve hardlinks/xattrs/acls when possible)
+  run_cmd mkdir -p "$backupdir"
+
+  # Prefer rsync for robustness, but WITHOUT --delete.
   if command -v rsync >/dev/null 2>&1; then
-    run_cmd mkdir -p "$backupdir"
-    # --delay-updates reduces partial state; --backup keeps overwritten files
-    run_cmd rsync -aHAX --numeric-ids --delete \
+    run_cmd rsync -aHAX --numeric-ids --delay-updates \
       --backup --backup-dir="$backupdir" \
-      --exclude "/.adm/" \
-      "$stage"/ / 
+      --exclude ".adm/" \
+      "$stage"/ /
   else
-    # fallback: cp -a (less robust)
     warn "rsync não encontrado; usando cp -a (menos robusto)."
     run_cmd cp -a "$stage"/. /
   fi
@@ -736,11 +755,9 @@ install_from_pkgfile_atomic() {
   info "Staging: extraindo ${base}..."
   stage_extract_pkg "$pkgfile" "$stage"
 
-  # read embedded meta/files
   [[ -f "$stage/.adm/META" ]] || die "Pacote inválido (sem .adm/META): $pkgfile"
   [[ -f "$stage/.adm/FILES" ]] || die "Pacote inválido (sem .adm/FILES): $pkgfile"
 
-  # conflict check (before commit)
   if [[ -f "$stage/.adm/FILES" ]]; then
     local f owner
     while IFS= read -r f; do
@@ -759,18 +776,39 @@ install_from_pkgfile_atomic() {
   info "Commit transacional para / ..."
   commit_stage_to_root "$stage" "$backupdir"
 
-  # update db from stage
+  # If upgrading/reinstalling the same pkg, remove files that belonged to the old version but are not in the new file list.
+  # This is package-scoped cleanup (safe) and avoids global deletes.
+  if is_installed "$pkg" && [[ -f "$DBDIR/$pkg/FILES" ]]; then
+    local oldfiles="$DBDIR/$pkg/FILES"
+    local newfiles="$stage/.adm/FILES"
+    if [[ -f "$newfiles" ]]; then
+      info "Limpeza pós-upgrade: removendo arquivos antigos que não existem mais no pacote..."
+      local f
+      while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        if ! grep -Fxq "$f" "$newfiles"; then
+          local owner
+          owner="$(file_owner_of "$f" || true)"
+          if [[ -n "$owner" && "$owner" != "$pkg" ]]; then
+            continue
+          fi
+          run_cmd rm -f "/$f" 2>/dev/null || true
+        fi
+      done <"$oldfiles"
+    fi
+  fi
+
   run_cmd mkdir -p "$DBDIR/$pkg"
   run_cmd cp -f "$stage/.adm/META" "$DBDIR/$pkg/META"
   run_cmd cp -f "$stage/.adm/FILES" "$DBDIR/$pkg/FILES"
+
   if (( !DRYRUN )); then
-    awk -F= 'BEGIN{OFS="="} $1=="explicit"{$2="'$explicit'"} {print} END{if(!found){} }' "$DBDIR/$pkg/META" \
-      | awk 'BEGIN{found=0} {print} END{}' >"$DBDIR/$pkg/META.tmp" || true
-    # ensure explicit line exists
-    if ! grep -q '^explicit=' "$DBDIR/$pkg/META.tmp"; then
-      echo "explicit=$explicit" >>"$DBDIR/$pkg/META.tmp"
+    # ensure explicit= exists and is correct
+    if grep -q '^explicit=' "$DBDIR/$pkg/META"; then
+      run_cmd sed -i "s/^explicit=.*/explicit=$explicit/" "$DBDIR/$pkg/META"
+    else
+      echo "explicit=$explicit" >>"$DBDIR/$pkg/META"
     fi
-    mv -f "$DBDIR/$pkg/META.tmp" "$DBDIR/$pkg/META"
   fi
 
   run_cmd rm -rf "$stage"
@@ -780,7 +818,6 @@ install_from_pkgfile_atomic() {
 # ---------- build pipeline ----------
 choose_src_dir() {
   local workdir="$1"
-  # if single directory inside, use it; else use workdir
   local dcount
   dcount="$(find "$workdir" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
   if [[ "$dcount" == "1" ]]; then
@@ -805,11 +842,15 @@ build_one() {
   LOG_CURRENT="$LOGDIR/${base}.log"
   ((DRYRUN)) || : >"$LOG_CURRENT"
 
-  info "============================================================"
-  info "Construindo: ${B}${pkg}${C0} ${W}v${pkgver}-${pkgrel}${C0}  [cat: $cat]"
-  info "Log: $LOG_CURRENT"
+  # Pretty build header
+  printf "\n%s%s%s\n" "$B" "============================================================" "$C0"
+  printf "%sPacote:%s    %s%s%s\n" "$B" "$C0" "$G" "$pkg" "$C0"
+  printf "%sVersão:%s    %s%s-%s%s\n" "$B" "$C0" "$Y" "$pkgver" "$pkgrel" "$C0"
+  printf "%sCategoria:%s %s%s%s\n" "$B" "$C0" "$C" "$cat" "$C0"
+  printf "%sBuild dir:%s %s%s%s\n" "$B" "$C0" "$C" "$work" "$C0"
+  printf "%sLog:%s       %s%s%s\n" "$B" "$C0" "$W" "$LOG_CURRENT" "$C0"
+  printf "%s%s%s\n" "$B" "============================================================" "$C0"
 
-  # resume markers
   local m_fetch="$work/.step_fetch"
   local m_unpack="$work/.step_unpack"
   local m_patch="$work/.step_patch"
@@ -823,7 +864,6 @@ build_one() {
     run_cmd mkdir -p "$work" "$worksrc" "$workdir" "$destdir"
     run_cmd rm -f "$m_fetch" "$m_unpack" "$m_patch" "$m_build" "$m_install" "$m_pack" 2>/dev/null || true
   else
-    # keep resume, but always keep destdir clean to avoid lixo
     run_cmd rm -rf "$destdir"
     run_cmd mkdir -p "$destdir"
     run_cmd rm -rf "$workdir"
@@ -883,7 +923,6 @@ build_one() {
     info "Resume: install DESTDIR já feito."
   fi
 
-  # detect conflicts (before packaging/commit)
   check_conflicts_destdir "$pkg" "$destdir"
 
   local pkgfile=""
@@ -921,7 +960,6 @@ remove_pkg_files() {
     run_cmd rm -f "/$f" 2>/dev/null || true
   done <"$DBDIR/$pkg/FILES"
 
-  # cleanup empty dirs best-effort
   info "Limpando diretórios vazios..."
   while IFS= read -r f; do
     local d="/${f%/*}"
@@ -959,7 +997,6 @@ cmd_remove_one() {
 }
 
 autoremove() {
-  # remove installed packages that are explicit=0 and have no reverse deps
   local changed=1
   while ((changed)); do
     changed=0
@@ -980,17 +1017,160 @@ autoremove() {
   done
 }
 
-# ---------- queue UI ----------
+cmd_install_from() {
+  # Usage: adm install --from /path/to/pkg.tar.zst|tar.xz
+  local pkgfile="${1:-}"
+  local explicit="${2:-1}"
+  [[ -n "$pkgfile" ]] || die "Uso: adm install --from <arquivo.tar.zst|tar.xz>"
+  [[ -f "$pkgfile" ]] || die "Arquivo não encontrado: $pkgfile"
+
+  mkdirs
+  local stage="$STAGEDIR/.frompkg.$$"
+  LOG_CURRENT="$LOGDIR/install-from-$(date +%Y%m%d_%H%M%S).log"
+  ((DRYRUN)) || : >"$LOG_CURRENT"
+
+  info "Instalando pacote local: ${B}${pkgfile}${C0}"
+  stage_extract_pkg "$pkgfile" "$stage"
+
+  [[ -f "$stage/.adm/META" ]] || die "Pacote inválido (sem .adm/META)"
+  [[ -f "$stage/.adm/FILES" ]] || die "Pacote inválido (sem .adm/FILES)"
+
+  local pkg deps
+  pkg="$(awk -F= '$1=="pkgname"{print $2}' "$stage/.adm/META" | head -n1)"
+  [[ -n "$pkg" ]] || die "META sem pkgname"
+
+  deps="$(awk -F= '$1=="depends"{print substr($0,index($0,$2))}' "$stage/.adm/META" | head -n1 || true)"
+  if [[ -n "${deps:-}" ]]; then
+    info "Resolvendo dependências do pacote local: ${deps}"
+    local d r
+    for d in $deps; do
+      r="$(resolve_dep_name "$d")"
+      if [[ -n "$r" ]]; then
+        if is_installed "$r"; then
+          :
+        elif pkg_exists "$r"; then
+          cmd_install "$r"
+        else
+          warn "Dependência '$d' não encontrada no repo local; assumindo fornecida pelo sistema."
+        fi
+      else
+        warn "Dependência '$d' não encontrada; assumindo fornecida pelo sistema."
+      fi
+    done
+  fi
+
+  install_from_pkgfile_atomic "$pkg" "$pkgfile" "$explicit"
+  run_cmd rm -rf "$stage"
+  ok "✔ instalado (--from): $pkg"
+}
+
+cmd_verify() {
+  # Usage: adm verify <pkg> [--hash]
+  local pkg="${1:-}"
+  local mode="${2:-}"
+  [[ -n "$pkg" ]] || die "Uso: adm verify <pkg> [--hash]"
+  is_installed "$pkg" || die "Pacote não instalado: $pkg"
+  [[ -f "$DBDIR/$pkg/FILES" ]] || die "DB inconsistente: sem FILES para $pkg"
+
+  local do_hash=0
+  [[ "$mode" == "--hash" ]] && do_hash=1
+
+  info "Verify: ${B}${pkg}${C0} (hash=$( ((do_hash)) && echo on || echo off ))"
+
+  local missing=0 mismatch=0 checked=0
+
+  local cat="" pkgfile=""
+  if pkg_exists "$pkg"; then
+    cat="$(pkg_cat_of "$pkg" || true)"
+    if [[ -n "$cat" ]]; then
+      load_build "$cat" "$pkg" || true
+      pkgfile="$(pkg_file_path || true)"
+    fi
+  fi
+
+  local stage=""
+  if [[ -n "$pkgfile" && -f "$pkgfile" ]]; then
+    stage="$STAGEDIR/.verify.${pkg}.$$"
+    stage_extract_pkg "$pkgfile" "$stage"
+  else
+    warn "Pacote empacotado não encontrado no cache; verify será por existência (use upgrade/build para gerar pacote)."
+  fi
+
+  local f
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    ((checked++))
+    if [[ ! -e "/$f" && ! -L "/$f" ]]; then
+      warn "Faltando: /$f"
+      ((missing++))
+      continue
+    fi
+    if [[ -n "$stage" ]]; then
+      if [[ ! -e "$stage/$f" && ! -L "$stage/$f" ]]; then
+        warn "No pacote não existe (mas está no DB): $f"
+        ((mismatch++))
+        continue
+      fi
+      if ((do_hash)) && [[ -f "/$f" && -f "$stage/$f" ]]; then
+        local h1 h2
+        h1="$(sha256sum "/$f" | awk '{print $1}')" || true
+        h2="$(sha256sum "$stage/$f" | awk '{print $1}')" || true
+        if [[ -n "$h1" && -n "$h2" && "$h1" != "$h2" ]]; then
+          warn "Hash difere: /$f"
+          ((mismatch++))
+        fi
+      elif [[ -L "/$f" && -L "$stage/$f" ]]; then
+        local t1 t2
+        t1="$(readlink "/$f" || true)"
+        t2="$(readlink "$stage/$f" || true)"
+        [[ "$t1" == "$t2" ]] || { warn "Symlink difere: /$f"; ((mismatch++)); }
+      fi
+    fi
+  done <"$DBDIR/$pkg/FILES"
+
+  [[ -n "$stage" ]] && run_cmd rm -rf "$stage"
+
+  if ((missing==0 && mismatch==0)); then
+    ok "verify OK: arquivos checados=$checked"
+  else
+    err "verify falhou: checados=$checked faltando=$missing divergências=$mismatch"
+    return 1
+  fi
+}
+
+# ---------- queue UI (tabela simples por pacote) ----------
+queue_table_header() {
+  printf "%s\n" "${B}Fila de build/instalação${C0}"
+  printf "%-4s %-24s %-12s %-12s %-12s\n" "#" "PACOTE" "VERSÃO" "ETAPA" "STATUS"
+  printf "%-4s %-24s %-12s %-12s %-12s\n" "---" "------" "------" "-----" "------"
+}
+
+queue_table_row() {
+  local idx="$1" pkg="$2" ver="$3" step="$4" status="$5"
+  printf "%-4s %-24s %-12s %-12s %-12s\n" "$idx" "$pkg" "$ver" "$step" "$status"
+}
+
 print_queue() {
   local -a order=("$@")
   local total="${#order[@]}"
-  info "Fila: ${B}${total}${C0} pacote(s) | jobs=$JOBS | cache=$( ((USE_CACHE)) && echo on || echo off )"
+  queue_table_header
   local i=0 p
   for p in "${order[@]}"; do
     ((i++))
-    local mark=""
-    if is_installed "$p"; then mark=" ${G}[ ✔ ]${C0}"; fi
-    printf "  %s%2d/%d%s  %s%s%s%s\n" "$W" "$i" "$total" "$C0" "$B" "$p" "$C0" "$mark"
+    local ver="?"
+    if pkg_exists "$p"; then
+      local cat; cat="$(pkg_cat_of "$p" || true)"
+      if [[ -n "$cat" ]]; then
+        load_build "$cat" "$p" || true
+        ver="${pkgver:-?}-${pkgrel:-?}"
+      fi
+    elif is_installed "$p"; then
+      ver="$(db_ver "$p" || echo "?")"
+    fi
+    local step="pending"
+    local status="."
+    if is_installed "$p"; then status="${G}installed${C0}"; fi
+    queue_table_row "$i/$total" "$p" "$ver" "$step" "$status"
   done
 }
 
@@ -1002,6 +1182,7 @@ adm - gerenciador pessoal de programas (source-based)
 Uso:
   adm build <pkg...>                 Constrói (resolve deps)
   adm install <pkg...>               Instala (usa cache se existir; resolve deps)
+  adm install --from <arquivo>        Instala pacote local (tar.zst|tar.xz) resolvendo deps
   adm upgrade <pkg...>               Rebuild + install transacional
   adm remove <pkg...> [--cascade]    Remove com reverse-deps (ou em cascata)
   adm autoremove                     Remove orphans (deps não-explicit sem reverse-deps)
@@ -1011,6 +1192,7 @@ Uso:
   adm list-installed                 Lista instalados
   adm sync <git_url>                 Clona/atualiza recipes em $PKGROOT
   adm clean                          Limpa tmp/build/logs/caches antigos
+  adm verify <pkg> [--hash]          Verifica se arquivos batem com o sistema
   adm doctor                         Checagem de ferramentas
 
 Opções globais:
@@ -1025,7 +1207,7 @@ EOF
 }
 
 cmd_doctor() {
-  need bash; need tar; need patch; need find; need awk
+  need bash; need tar; need patch; need find; need awk; need flock
   need sha256sum; need md5sum
   if ! command -v curl >/dev/null && ! command -v wget >/dev/null; then
     warn "Recomendado instalar curl ou wget (downloads http/https/ftp)."
@@ -1153,7 +1335,6 @@ install_one_with_deps() {
   local cat; cat="$(pkg_cat_of "$pkg")" || die "Recipe não encontrado: $pkg"
   load_build "$cat" "$pkg"
 
-  # conflicts declared in recipe (installed)
   local c
   for c in "${conflicts[@]:-}"; do
     if is_installed "$c"; then
@@ -1161,10 +1342,6 @@ install_one_with_deps() {
     fi
   done
 
-  # replaces: if installed, remove after new installed OK (we keep simple: remove after)
-  # (handled after install)
-
-  # use cache package if exists and not forcing rebuild
   local pkgfile=""
   if ((USE_CACHE)); then
     pkgfile="$(pkg_file_path || true)"
@@ -1179,12 +1356,10 @@ install_one_with_deps() {
 
   install_from_pkgfile_atomic "$pkg" "$pkgfile" "$explicit"
 
-  # mark explicit if requested later
   if ((explicit)); then
     mark_explicit "$pkg"
   fi
 
-  # handle replaces (remove old packages that should be replaced)
   local r
   for r in "${replaces[@]:-}"; do
     if is_installed "$r" && [[ "$r" != "$pkg" ]]; then
@@ -1202,7 +1377,6 @@ cmd_install() {
   mapfile -t order < <(toposort "${targets[@]}")
   print_queue "${order[@]}"
 
-  # install dependencies as explicit=0, targets as explicit=1
   local p
   for p in "${order[@]}"; do
     local exp=0
@@ -1236,7 +1410,6 @@ cmd_upgrade() {
     local cat; cat="$(pkg_cat_of "$p")"
     load_build "$cat" "$p"
     info "Upgrade: rebuild obrigatório para $p"
-    # force rebuild by ignoring cache for this op (still keeps sources cache)
     local saved="$USE_CACHE"
     USE_CACHE=0
     install_one_with_deps "$p" "$exp"
@@ -1310,8 +1483,15 @@ main() {
     list-installed) cmd_list_installed ;;
     sync) cmd_sync "${args[1]:-}" ;;
     clean) cmd_clean ;;
+    verify) with_lock "db" cmd_verify "${args[1]:-}" "${args[2]:-}" ;;
     build) cmd_build "${args[@]:1}" ;;
-    install) with_lock "db" cmd_install "${args[@]:1}" ;;
+    install)
+      if [[ "${args[1]:-}" == "--from" ]]; then
+        with_lock "db" cmd_install_from "${args[2]:-}" "1"
+      else
+        with_lock "db" cmd_install "${args[@]:1}"
+      fi
+      ;;
     upgrade) with_lock "db" cmd_upgrade "${args[@]:1}" ;;
     remove) with_lock "db" cmd_remove "${args[@]:1}" ;;
     autoremove) with_lock "db" cmd_autoremove ;;
