@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+# /var/lib/adm/packages/core/busybox/build
+# BusyBox “completo” para sistema base (musl) com foco em:
+# - utilitários base suficientes para continuar bootstrap
+# - rede (udhcpc, ifupdown, wget com HTTPS quando possível)
+# - integração mínima com runit (skeleton em /etc/runit e /etc/service)
+# - compatibilidade com o adm (tar, sha256sum, gzip, etc via applets)
+#
+# IMPORTANTE (modelo do seu adm):
+# - Configurações/arquivos de sistema devem ir em:
+#     /var/lib/adm/packages/core/busybox/files/...
+#   O adm copia automaticamente files/ para DESTDIR.
+#
+# Sugestão de uso:
+#   adm build core/busybox
+#   adm install core/busybox
+
+set -Eeuo pipefail
+
+PKG_NAME="busybox"
+PKG_CAT="core"
+PKG_VER="1.36.1"
+PKG_DESC="BusyBox - Swiss Army Knife of Embedded Linux (base userland + networking)"
+PKG_URL="https://busybox.net/"
+PKG_LICENSE="GPL-2.0-only"
+
+# musl antes; runit pode vir depois, mas já deixamos skeleton em files/
+PKG_DEPS=( "core/musl" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://busybox.net/downloads/busybox-${PKG_VER}.tar.bz2"
+)
+
+# Seu adm exige checksum para fontes não-git, a menos que ALLOW_NO_CHECKSUM=1.
+# Recomenda-se fortemente substituir por SHA256 real assim que possível.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-busybox-${PKG_VER}.tar.bz2>"
+)
+
+# Opcional: compile BusyBox estático (útil em bootstraps iniciais).
+# Defina no ambiente antes do build:
+#   BUSYBOX_STATIC=1
+: "${BUSYBOX_STATIC:=0}"
+
+_bb_set(){
+  # _bb_set CONFIG_FOO y|n|"<value>"
+  # Opera em ${BUILD_DIR}/.config
+  local key="$1" val="$2" cfg="${BUILD_DIR}/.config"
+  [[ -f "$cfg" ]] || { echo "missing $cfg" >&2; return 1; }
+
+  if [[ "$val" == "y" || "$val" == "n" ]]; then
+    if grep -qE "^${key}=" "$cfg"; then
+      sed -i "s|^${key}=.*|${key}=${val}|" "$cfg"
+    else
+      # pode estar como "# CONFIG_X is not set"
+      sed -i "s|^# ${key} is not set|${key}=${val}|" "$cfg" || true
+      grep -qE "^${key}=" "$cfg" || echo "${key}=${val}" >> "$cfg"
+    fi
+    if [[ "$val" == "n" ]]; then
+      # normaliza para "# ... is not set" quando aplicável
+      sed -i "s|^${key}=n|# ${key} is not set|" "$cfg"
+    fi
+  else
+    # value
+    if grep -qE "^${key}=" "$cfg"; then
+      sed -i "s|^${key}=.*|${key}=${val}|" "$cfg"
+    else
+      sed -i "s|^# ${key} is not set|${key}=${val}|" "$cfg" || true
+      grep -qE "^${key}=" "$cfg" || echo "${key}=${val}" >> "$cfg"
+    fi
+  fi
+}
+
+do_configure(){
+  # Build out-of-tree usando O=...
+  export BUILD_DIR="${WORKDIR}/build"
+  mkdir -p "${BUILD_DIR}"
+
+  # Base defconfig
+  make -C "${SRCTOP}" O="${BUILD_DIR}" defconfig
+
+  # ---------------------------
+  # Política de instalação
+  # ---------------------------
+  _bb_set CONFIG_PREFIX "\"\""
+
+  # Instala applets como symlinks (menor) ou hardlinks (mais robusto em fs estranhos).
+  # Symlinks é ok.
+  _bb_set CONFIG_INSTALL_APPLET_SYMLINKS y
+  _bb_set CONFIG_INSTALL_APPLET_HARDLINKS n
+
+  # PATH padrão e shell
+  _bb_set CONFIG_ASH y
+  _bb_set CONFIG_FEATURE_SH_MATH y
+  _bb_set CONFIG_FEATURE_SH_MATH_64 y
+  _bb_set CONFIG_FEATURE_SH_STANDALONE y
+
+  # Suporte a utilitários “core” úteis para o adm
+  _bb_set CONFIG_TAR y
+  _bb_set CONFIG_FEATURE_TAR_LONG_OPTIONS y
+  _bb_set CONFIG_FEATURE_TAR_GNU_EXTENSIONS y
+  _bb_set CONFIG_GZIP y
+  _bb_set CONFIG_GUNZIP y
+  _bb_set CONFIG_BZIP2 y
+  _bb_set CONFIG_BUNZIP2 y
+  _bb_set CONFIG_UNZIP y
+  _bb_set CONFIG_SHA256SUM y
+  _bb_set CONFIG_MD5SUM y
+  _bb_set CONFIG_PATCH y
+  _bb_set CONFIG_FIND y
+  _bb_set CONFIG_XARGS y
+  _bb_set CONFIG_SED y
+  _bb_set CONFIG_GREP y
+  _bb_set CONFIG_AWK y
+  _bb_set CONFIG_LS y
+  _bb_set CONFIG_CP y
+  _bb_set CONFIG_MV y
+  _bb_set CONFIG_RM y
+  _bb_set CONFIG_LN y
+  _bb_set CONFIG_MKDIR y
+  _bb_set CONFIG_CHMOD y
+  _bb_set CONFIG_CHOWN y
+  _bb_set CONFIG_STAT y
+  _bb_set CONFIG_DD y
+  _bb_set CONFIG_MOUNT y
+  _bb_set CONFIG_UMOUNT y
+
+  # Console / login / getty (úteis com runit)
+  _bb_set CONFIG_GETTY y
+  _bb_set CONFIG_LOGIN y
+  _bb_set CONFIG_PASSWD y
+  _bb_set CONFIG_SU y
+  _bb_set CONFIG_ADDUSER y
+  _bb_set CONFIG_ADDGROUP y
+  _bb_set CONFIG_DELUSER y
+  _bb_set CONFIG_DELGROUP y
+
+  # /proc, /sys, ps/top
+  _bb_set CONFIG_PS y
+  _bb_set CONFIG_TOP y
+  _bb_set CONFIG_FREE y
+  _bb_set CONFIG_UPTIME y
+
+  # --------------------------------
+  # Rede (base + DHCP + troubleshooting)
+  # --------------------------------
+  _bb_set CONFIG_FEATURE_IPV6 y
+
+  # Ferramentas IP
+  _bb_set CONFIG_IP y
+  _bb_set CONFIG_FEATURE_IP_ADDRESS y
+  _bb_set CONFIG_FEATURE_IP_ROUTE y
+  _bb_set CONFIG_FEATURE_IP_LINK y
+  _bb_set CONFIG_FEATURE_IP_NEIGH y
+  _bb_set CONFIG_FEATURE_IP_RULE y
+  _bb_set CONFIG_FEATURE_IP_TUNNEL y
+
+  # ifconfig/route (legado, mas prático)
+  _bb_set CONFIG_IFCONFIG y
+  _bb_set CONFIG_ROUTE y
+  _bb_set CONFIG_NETSTAT y
+
+  # DHCP client (udhcpc) + script padrão
+  _bb_set CONFIG_UDHCPC y
+  _bb_set CONFIG_FEATURE_UDHCPC_ARPING y
+  _bb_set CONFIG_UDHCPC_DEFAULT_SCRIPT "\"/etc/udhcpc/default.script\""
+
+  # ifupdown usando /etc/network/interfaces (muito útil em sistemas mínimos)
+  _bb_set CONFIG_IFUPDOWN y
+  _bb_set CONFIG_FEATURE_IFUPDOWN_IPV4 y
+  _bb_set CONFIG_FEATURE_IFUPDOWN_IPV6 y
+
+  # ping, nslookup, wget, nc
+  _bb_set CONFIG_PING y
+  _bb_set CONFIG_PING6 y
+  _bb_set CONFIG_NSLOOKUP y
+  _bb_set CONFIG_WGET y
+  _bb_set CONFIG_FEATURE_WGET_LONG_OPTIONS y
+  _bb_set CONFIG_FEATURE_WGET_STATUSBAR y
+  _bb_set CONFIG_FEATURE_WGET_TIMEOUT y
+
+  # HTTPS via OpenSSL (requer openssl/libressl no sistema no runtime; build não precisa linkar sempre)
+  # Se você NÃO vai ter OpenSSL, deixe como 'n'.
+  _bb_set CONFIG_FEATURE_WGET_OPENSSL y
+
+  _bb_set CONFIG_NC y
+  _bb_set CONFIG_TELNET y
+  _bb_set CONFIG_FTPGET y
+  _bb_set CONFIG_FTPPUT y
+
+  # --------------------------------
+  # Init: você quer runit como init.
+  # Busybox init pode ficar desabilitado para evitar confusão (opcional).
+  # Aqui deixo DESABILITADO por padrão (runit vai fornecer /sbin/init).
+  # --------------------------------
+  _bb_set CONFIG_INIT n
+  _bb_set CONFIG_FEATURE_USE_INITTAB n
+
+  # mdev (útil em boot mínimo antes de udev/eudev)
+  _bb_set CONFIG_MDEV y
+  _bb_set CONFIG_FEATURE_MDEV_CONF y
+
+  # build estático (útil no começo; cuidado: perde NSS/dlopen, etc)
+  if [[ "${BUSYBOX_STATIC}" == "1" ]]; then
+    _bb_set CONFIG_STATIC y
+  else
+    _bb_set CONFIG_STATIC n
+  fi
+
+  # Aplica olddefconfig para normalizar dependências do Kconfig
+  make -C "${SRCTOP}" O="${BUILD_DIR}" olddefconfig
+}
+
+do_build(){
+  make -C "${SRCTOP}" O="${BUILD_DIR}" ${MAKEFLAGS}
+}
+
+do_install(){
+  # Instala no DESTDIR usando CONFIG_PREFIX
+  make -C "${SRCTOP}" O="${BUILD_DIR}" CONFIG_PREFIX="${DESTDIR}" install
+
+  # Garante dirs básicos (para overlay files/)
+  mkdir -p "${DESTDIR}"/{etc,proc,sys,dev,run,tmp,root,var,usr}
+  chmod 1777 "${DESTDIR}/tmp" || true
+
+  # Opcional: busybox como /usr/bin/busybox também (facilita alguns layouts)
+  mkdir -p "${DESTDIR}/usr/bin"
+  if [[ -x "${DESTDIR}/bin/busybox" ]]; then
+    ln -sf ../../bin/busybox "${DESTDIR}/usr/bin/busybox" 2>/dev/null || true
+  fi
+}
+
+################################################################################
+# ARQUIVOS DE CONFIGURAÇÃO (files/)
+#
+# O adm copia automaticamente /var/lib/adm/packages/core/busybox/files/* para DESTDIR.
+# Crie os arquivos abaixo (uma vez) no tree do pacote:
+#
+#   /var/lib/adm/packages/core/busybox/files/etc/...
+#   /var/lib/adm/packages/core/busybox/files/etc/runit/...
+#   /var/lib/adm/packages/core/busybox/files/etc/service/...
+#
+# Conteúdo recomendado (copie/cole criando os caminhos).
+################################################################################
+
+: <<'FILES_TREE_DOC'
+
+# 1) DHCP script padrão (udhcpc) – essencial para “internet rápida” no sistema mínimo
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/udhcpc/default.script
+#!/bin/sh
+# BusyBox udhcpc default script
+# Interface: $interface, IP: $ip, Router: $router, DNS: $dns, Domain: $domain
+RESOLV_CONF="/etc/resolv.conf"
+
+case "$1" in
+  deconfig)
+    ip addr flush dev "$interface" 2>/dev/null || true
+    ;;
+  bound|renew)
+    ip addr flush dev "$interface" 2>/dev/null || true
+    ip addr add "$ip/$subnet" dev "$interface" 2>/dev/null || true
+    ip link set "$interface" up 2>/dev/null || true
+
+    # default route
+    if [ -n "$router" ]; then
+      ip route replace default via "$router" dev "$interface" 2>/dev/null || true
+    fi
+
+    # resolv.conf
+    : > "$RESOLV_CONF"
+    [ -n "$domain" ] && echo "search $domain" >> "$RESOLV_CONF"
+    for ns in $dns; do
+      echo "nameserver $ns" >> "$RESOLV_CONF"
+    done
+    ;;
+esac
+
+exit 0
+
+# 2) /etc/network/interfaces (ifupdown) – DHCP em eth0 + loopback
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/network/interfaces
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+    udhcpc_opts -T 3 -t 5 -A 1 -b
+
+# 3) /etc/resolv.conf mínimo (será sobrescrito pelo udhcpc quando rodar)
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/resolv.conf
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+
+# 4) /etc/hostname
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/hostname
+admhost
+
+# 5) /etc/hosts
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/hosts
+127.0.0.1   localhost
+127.0.1.1   admhost
+::1         localhost ip6-localhost ip6-loopback
+
+# 6) /etc/profile (ambiente padrão)
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/profile
+export PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export HOME=/root
+export TERM=${TERM:-linux}
+umask 022
+
+# 7) /etc/fstab básico (para runit stage 1 montar mount -a)
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/fstab
+proc    /proc   proc    nosuid,noexec,nodev  0 0
+sysfs   /sys    sysfs   nosuid,noexec,nodev  0 0
+devtmpfs /dev   devtmpfs mode=0755,nosuid    0 0
+tmpfs   /run    tmpfs   mode=0755,nosuid,nodev 0 0
+tmpfs   /tmp    tmpfs   mode=1777,nosuid,nodev 0 0
+
+# 8) Runit skeleton (mínimo) – você pode mover isso para o pacote core/runit depois.
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/runit/1
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+
+mount -a 2>/dev/null || true
+ip link set lo up 2>/dev/null || true
+
+# sobe rede via ifupdown (DHCP em eth0 conforme interfaces)
+if command -v ifup >/dev/null 2>&1; then
+  ifup -a 2>/dev/null || true
+fi
+
+echo "runit stage 1 done."
+
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/runit/2
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+exec runsvdir -P /etc/service
+
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/runit/3
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+umount -a -r 2>/dev/null || true
+
+# 9) Serviço getty no tty1 (usa busybox getty)
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/service/getty-tty1/run
+#!/bin/sh
+exec getty 38400 tty1 linux
+
+# 10) passwd/group mínimos (opcional; depois você pode trocar por shadow)
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/passwd
+root:x:0:0:root:/root:/bin/sh
+
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/group
+root:x:0:
+
+FILES_TREE_DOC
