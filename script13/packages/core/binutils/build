@@ -1,66 +1,48 @@
 pkgname="binutils"
 pkgver="2.45.1"
 pkgrel=1
-category="core"
-pkgdesc="GNU assembler, linker and binary utilities"
-url="https://www.gnu.org/software/binutils/"
-license="GPL-3.0-or-later"
-arch="x86_64"
 
-# Dependências (mantidas simples; ajuste conforme seu sistema)
-depends=( "zlib" "zstd" )
+# Recomendado: binutils usa zlib para seções de debug comprimidas e outros recursos.
+# Se você ainda não tiver zlib no sistema, remova esta dependência e troque
+# --with-system-zlib por --without-zlib no configure.
+depends=(zlib)
 
 sources=(
   "https://ftp.gnu.org/gnu/binutils/binutils-${pkgver}.tar.xz::binutils-${pkgver}.tar.xz"
 )
+
 sha256sums=(
-  # SHA256 (binutils-2.45.1.tar.xz)
   "5fe101e6fe9d18fdec95962d81ed670fdee5f37e3f48f0bef87bddf862513aa5 binutils-2.45.1.tar.xz"
 )
 
 pre_build() {
-  : "${CC:=cc}"
-  : "${CXX:=c++}"
-  : "${AR:=ar}"
-  : "${RANLIB:=ranlib}"
-  : "${STRIP:=strip}"
-
-  # alvo/host para musl
-  : "${ADM_TRIPLET:=x86_64-linux-musl}"
+  : "${JOBS:=$(nproc 2>/dev/null || echo 4)}"
 }
 
 build() {
-  # O adm chama build() dentro do SRC_DIR
-  # Fazemos build out-of-tree para manter limpo
   rm -rf _build
   mkdir -p _build
   cd _build
 
-  # Para sistema musl nativo: host/target iguais
-  # --disable-gprofng: reduz dependências e evita build falhando em setups mínimos
-  # --disable-nls: reduz deps (gettext)
-  # --disable-werror: evita falhas por warnings
   ../configure \
     --prefix=/usr \
     --sysconfdir=/etc \
     --localstatedir=/var \
-    --build="$(${CC} -dumpmachine 2>/dev/null || echo ${ADM_TRIPLET})" \
-    --host="${ADM_TRIPLET}" \
-    --target="${ADM_TRIPLET}" \
+    --libdir=/usr/lib \
+    --enable-64-bit-bfd \
+    --enable-plugins \
+    --disable-multilib \
     --disable-nls \
     --disable-werror \
-    --disable-gprofng \
-    --enable-deterministic-archives \
-    --with-system-zlib \
-    --with-zstd
+    --with-system-zlib
 
-  make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+  make -j"$JOBS"
 }
 
 install() {
   cd _build
   make DESTDIR="$DESTDIR" install
 
-  # Opcional: manter layout enxuto (remova se você quiser tudo)
-  # rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man"
+  # opcional: enxugar docs (mantém o sistema mais limpo)
+  rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
 }
