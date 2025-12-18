@@ -4,6 +4,10 @@ OBJETIVO
 Construir um Linux do zero com musl, usando um cross-toolchain temporário,
 e depois transferir o controle completamente para o adm.
 
+# Garantir que existam
+mkdir -p /etc/mdev /etc/sv /etc/service /run /var/log
+chmod 1777 /tmp 2>/dev/null || true
+
 ARQUITETURA
 ===========
 Host/Target: x86_64-linux-musl
