@@ -1,0 +1,60 @@
+pkgname="expat"
+pkgver="2.6.4"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://launchpad.net/ubuntu/+source/expat/${pkgver}-1/+files/expat_${pkgver}.orig.tar.gz::expat-${pkgver}.tar.gz"
+)
+
+sha256sums=(
+  "372b18f6527d162fa9658f1c74d22a37429b82d822f5a1e1fc7e00f6045a06a2 expat-2.6.4.tar.gz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  local build_triplet
+  if [[ -x ../build-aux/config.guess ]]; then
+    build_triplet="$(../build-aux/config.guess)"
+  elif [[ -x ../config.guess ]]; then
+    build_triplet="$(../config.guess)"
+  else
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  rm -rf "$DESTDIR/usr/share/man" "$DESTDIR/usr/share/doc" 2>/dev/null || true
+}
