@@ -1,6 +1,7 @@
 #!/bin/sh
 exec 2>&1
 # Dar permissão de execução chmod +x
+# Habilitar serviço ln -sf /etc/sv/mdevd /etc/service/mdevd
 # garante sysfs/proc montados (se stage1 falhar, isso ainda tenta)
 mount -t proc  proc  /proc 2>/dev/null || true
 mount -t sysfs sys   /sys  2>/dev/null || true
