@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# core/openssl/build
+# OpenSSL - TLS/crypto (necessário para curl, git via https, Firefox, etc).
+#
+# Notas:
+# - OpenSSL usa seu próprio "Configure", não autotools/cmake.
+# - Em musl, geralmente funciona bem usando o target "linux-x86_64" (para x86_64).
+# - Instala em /usr, e coloca configs em /etc/ssl (via --openssldir=/etc/ssl).
+
+set -Eeuo pipefail
+
+PKG_NAME="openssl"
+PKG_CAT="core"
+PKG_VER="3.5.2"
+PKG_DESC="OpenSSL TLS/crypto library"
+PKG_URL="https://www.openssl.org/"
+PKG_LICENSE="Apache-2.0"
+
+PKG_DEPS=( "core/musl" "core/zlib" )
+PKG_BDEPS=( "core/perl" )  # OpenSSL precisa de perl para Configure
+
+SOURCES=(
+  "https://www.openssl.org/source/openssl-${PKG_VER}.tar.gz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-openssl-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){
+  # Helpers (opcional)
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # OpenSSL prefere build in-tree; para manter SRCTOP limpo, copiamos o source.
+  rm -rf "${WORKDIR}/src-copy"
+  cp -a "${SRCTOP}" "${WORKDIR}/src-copy"
+  export OPENSSL_SRCTOP="${WORKDIR}/src-copy"
+  cd "${OPENSSL_SRCTOP}"
+
+  # Target OpenSSL para x86_64 Linux (musl é ok aqui).
+  local os_target="linux-x86_64"
+
+  # Opções importantes:
+  # - --prefix=/usr
+  # - --openssldir=/etc/ssl
+  # - shared: gera libssl.so/libcrypto.so
+  # - zlib: habilita compressão via zlib (útil; dep já declarada)
+  # - no-tests: acelera em bootstrap; depois você pode ativar testes se quiser
+  #
+  # Se você quiser mais hardening, pode adicionar: -fstack-protector-strong etc em CFLAGS.
+  ./Configure "${os_target}" \
+    --prefix=/usr \
+    --libdir=lib \
+    --openssldir=/etc/ssl \
+    shared zlib \
+    no-tests
+
+  # Respeita flags do ambiente, se existirem:
+  # OpenSSL usa env CFLAGS/LDFLAGS normalmente.
+}
+
+do_build(){
+  cd "${OPENSSL_SRCTOP:-${SRCTOP}}"
+  make ${MAKEFLAGS}
+}
+
+do_install(){
+  cd "${OPENSSL_SRCTOP:-${SRCTOP}}"
+
+  # OpenSSL usa DESTDIR corretamente
+  make DESTDIR="${DESTDIR}" install_sw install_ssldirs
+
+  # Base minimalista (opcional): remover docs/man
+  rm -rf "${DESTDIR}/usr/share/doc" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+
+  # Garante diretórios esperados
+  mkdir -p "${DESTDIR}/etc/ssl/certs" "${DESTDIR}/etc/ssl/private"
+  chmod 0700 "${DESTDIR}/etc/ssl/private" 2>/dev/null || true
+}
