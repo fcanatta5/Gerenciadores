@@ -26,7 +26,8 @@ PKG_DEPS=(
   "core/zlib"
   "core/openssl"
   "core/curl"
-  "core/expat"
+  "extra/expat"
+  "extra/pcre2"
 )
 PKG_BDEPS=(
   "core/perl"
