@@ -35,24 +35,38 @@ JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
 # Queue (default). You can override by exporting PLAN="pkg1 pkg2 ..."
 DEFAULT_PLAN=(
+  # --- toolchain temporária ---
   "binutils-pass1"
   "gcc-pass1"
   "linux-headers"
   "musl"
   "gcc-final"
   "binutils-final"
-  # minimal runtime/build tools for adm inside chroot
+
+  # --- base mínima do chroot (shell + utilitários básicos) ---
   "busybox"
-  "make"
   "bash"
-  "tar"
-  "xz"
-  "gzip"
+
+  # --- ferramentas de build / patch / texto ---
+  "make"
   "patch"
   "sed"
   "gawk"
   "grep"
   "findutils"
+
+  # --- empacotamento/compressão (útil para adm e sources) ---
+  "tar"
+  "gzip"
+  "xz"
+  "zstd"
+
+  # --- libs necessárias para internet real e git ---
+  "zlib"
+  "openssl"
+  "expat"
+
+  # --- sync / download / scm ---
   "rsync"
   "curl"
   "git"
