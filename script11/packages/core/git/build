@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# core/git/build
+# Git (SCM) - build “lean” (sem docs pesados), com HTTPS via OpenSSL e HTTP(S) via libcurl.
+#
+# Requisitos principais:
+# - openssl (TLS)
+# - zlib (compressão)
+# - curl (http/https transport via libcurl)
+# - expat (parsing XML, usado em features do git)
+# - perl (scripts do git)
+#
+# Observação:
+# - Para manter simples no sistema base, desabilitamos gettext, tcl/tk e docs.
+
+set -Eeuo pipefail
+
+PKG_NAME="git"
+PKG_CAT="core"
+PKG_VER="2.52.0"
+PKG_DESC="Git distributed version control system"
+PKG_URL="https://git-scm.com/"
+PKG_LICENSE="GPL-2.0-only"
+
+PKG_DEPS=(
+  "core/musl"
+  "core/zlib"
+  "core/openssl"
+  "core/curl"
+  "core/expat"
+)
+PKG_BDEPS=(
+  "core/perl"
+  # "core/asciidoc" "core/xmlto" "core/docbook-xsl" ... (docs - não usados aqui)
+)
+
+SOURCES=(
+  "https://www.kernel.org/pub/software/scm/git/git-${PKG_VER}.tar.xz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-git-${PKG_VER}.tar.xz>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # Git normalmente é compilado in-tree; para manter SRCTOP limpo,
+  # copiamos o source e buildamos na cópia.
+  rm -rf "${WORKDIR}/src-copy"
+  cp -a "${SRCTOP}" "${WORKDIR}/src-copy"
+  export GIT_SRCTOP="${WORKDIR}/src-copy"
+  cd "${GIT_SRCTOP}"
+
+  # Gera ./configure (git tem script de autoconf opcional)
+  # Em releases, geralmente já vem pronto; se não vier, tentamos gerar.
+  if [[ ! -x "./configure" ]]; then
+    if [[ -x "./autogen.sh" ]]; then
+      ./autogen.sh
+    fi
+  fi
+
+  # Alguns knobs para simplificar e reduzir deps
+  export NO_TCLTK=YesPlease
+  export NO_GETTEXT=YesPlease
+  export NO_PYTHON=YesPlease
+
+  # Caminhos TLS/CA (o ca-certificates instala em /etc/ssl/certs/ca-certificates.crt)
+  export CURLDIR="/usr"
+  export OPENSSLDIR="/usr"
+
+  # Preferimos ./configure quando disponível
+  if [[ -x "./configure" ]]; then
+    mkdir -p "${BUILD_DIR}"
+    ( cd "${BUILD_DIR}" && "${GIT_SRCTOP}/configure" \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --with-openssl \
+        --with-curl \
+        --with-expat \
+        --with-zlib )
+  else
+    # fallback: sem configure, usamos make vars na build/install
+    : 
+  fi
+}
+
+do_build(){
+  # Se configuramos out-of-tree, build no BUILD_DIR; senão, build no source copy.
+  if [[ -x "${BUILD_DIR:-}/config.status" ]]; then
+    make -C "${BUILD_DIR}" ${MAKEFLAGS}
+  else
+    cd "${GIT_SRCTOP:-${SRCTOP}}"
+
+    # Build minimalista e previsível (sem docs)
+    make ${MAKEFLAGS} \
+      prefix=/usr \
+      sysconfdir=/etc \
+      NO_TCLTK=YesPlease \
+      NO_GETTEXT=YesPlease \
+      NO_PYTHON=YesPlease \
+      USE_LIBPCRE2=YesPlease \
+      CURLDIR=/usr \
+      OPENSSLDIR=/usr
+  fi
+}
+
+do_install(){
+  if [[ -x "${BUILD_DIR:-}/config.status" ]]; then
+    make -C "${BUILD_DIR}" DESTDIR="${DESTDIR}" install
+  else
+    cd "${GIT_SRCTOP:-${SRCTOP}}"
+
+    make DESTDIR="${DESTDIR}" install \
+      prefix=/usr \
+      sysconfdir=/etc \
+      NO_TCLTK=YesPlease \
+      NO_GETTEXT=YesPlease \
+      NO_PYTHON=YesPlease \
+      CURLDIR=/usr \
+      OPENSSLDIR=/usr
+  fi
+
+  # Base minimalista (opcional): remover docs/man
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/doc" 2>/dev/null || true
+}
