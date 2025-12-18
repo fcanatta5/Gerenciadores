@@ -1,0 +1,86 @@
+pkgname="busybox"
+pkgver="1.37.0"
+pkgrel=1
+
+# busybox vai para o sysroot (ROOTFS)
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://busybox.net/downloads/busybox-${pkgver}.tar.bz2::busybox-${pkgver}.tar.bz2"
+)
+
+sha256sums=(
+  "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4 busybox-1.37.0.tar.bz2"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+  : "${ARCH:=x86_64}"
+
+  export PATH="$TOOLS/bin:$PATH"
+  export CROSS_COMPILE="$TOOLS/bin/${TARGET}-"
+
+  # Alguns builds quebram com aceleração HW SHA1/SHA256 dependendo de toolchain/flags,
+  # então vamos forçar off (mantém simples e robusto).
+  _kcfg_set() {
+    local key="$1" val="$2"
+    if grep -qE "^${key}=" .config; then
+      sed -i "s|^${key}=.*|${key}=${val}|" .config
+    elif grep -qE "^# ${key} is not set" .config; then
+      sed -i "s|^# ${key} is not set|${key}=${val}|" .config
+    else
+      printf '%s=%s\n' "$key" "$val" >> .config
+    fi
+  }
+
+  _kcfg_unset() {
+    local key="$1"
+    if grep -qE "^${key}=" .config; then
+      sed -i "s|^${key}=.*|# ${key} is not set|" .config
+    elif ! grep -qE "^# ${key} is not set" .config; then
+      printf '# %s is not set\n' "$key" >> .config
+    fi
+  }
+}
+
+build() {
+  # Build limpo e determinístico
+  make distclean >/dev/null 2>&1 || true
+
+  # Config mínima funcional
+  make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" defconfig
+
+  # Tornar o busybox auto-suficiente no chroot: estático (sem depender de libs compartilhadas)
+  _kcfg_set CONFIG_STATIC y
+
+  # Garantir que /bin/sh exista via busybox (sh -> ash)
+  _kcfg_set CONFIG_ASH y
+  _kcfg_set CONFIG_SH_IS_ASH y
+
+  # Evitar problemas com aceleração SHA (robustez)
+  _kcfg_unset CONFIG_SHA1_HWACCEL
+  _kcfg_unset CONFIG_SHA256_HWACCEL
+
+  # Regerar config final
+  yes "" | make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" oldconfig >/dev/null
+
+  # Compilar
+  make -j"$JOBS" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE"
+}
+
+install() {
+  # O busybox NÃO usa DESTDIR padrão; ele usa CONFIG_PREFIX para "staging".
+  # Isso é 100% compatível com seu cross-toolchain.sh, porque ele rsync do staging -> ROOTFS.
+  make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" CONFIG_PREFIX="$DESTDIR" install
+
+  # Garantir /bin/sh (alguns configs criam apenas applet links; este garante explicitamente)
+  mkdir -p "$DESTDIR/bin"
+  ln -sf busybox "$DESTDIR/bin/sh"
+
+  # Diretórios básicos (ajuda o chroot a “subir” sem surpresas)
+  mkdir -p "$DESTDIR"/{dev,proc,sys,etc,tmp,root,var,usr/{bin,sbin,lib}}
+  chmod 1777 "$DESTDIR/tmp" 2>/dev/null || true
+}
