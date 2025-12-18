@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# core/mpc/build
+# MPC - Multiple Precision Complex Library (dep do GCC)
+
+set -Eeuo pipefail
+
+PKG_NAME="mpc"
+PKG_CAT="core"
+PKG_VER="1.3.1"
+PKG_DESC="MPC - complex arithmetic library with arbitrary precision"
+PKG_URL="https://www.multiprecision.org/"
+PKG_LICENSE="LGPL-3.0-or-later"
+
+PKG_DEPS=( "core/musl" "core/gmp" "core/mpfr" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://ftp.gnu.org/gnu/mpc/mpc-${PKG_VER}.tar.gz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-mpc-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --enable-shared \
+      --disable-static \
+      --disable-nls \
+      --with-gmp=/usr \
+      --with-mpfr=/usr )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  rm -rf "${DESTDIR}/usr/share/info" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/man"  2>/dev/null || true
+}
