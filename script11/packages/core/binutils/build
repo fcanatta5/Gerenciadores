@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # /var/lib/adm/packages/core/binutils/build
-# Binutils final (ld/as/objdump/strip etc) para o sistema musl.
-# Build out-of-tree, instala em /usr.
+# Binutils final (ld/as/objdump/strip etc) para sistema musl.
 #
-# Observações importantes:
-# - Para evitar “sujar” o host, o adm instala em DESTDIR.
-# - Se você estiver ainda no estágio pós-bootstrap usando /mnt/adm/tools,
-#   exporte PATH apontando para a toolchain temporária antes de rodar adm:
-#     export PATH=/mnt/adm/tools/bin:$PATH
+# Correções em relação ao script anterior:
+# - Dependência EXPLÍCITA de core/zlib (evita autodetecção frágil).
+# - Configure consistente e previsível (sem heurísticas).
+# - Build out-of-tree limpo.
+#
+# Recomendação de uso:
+#   adm build core/binutils
+#   adm install core/binutils
 
 set -Eeuo pipefail
 
@@ -18,8 +20,11 @@ PKG_DESC="GNU Binutils (assembler, linker, and related tools)"
 PKG_URL="https://www.gnu.org/software/binutils/"
 PKG_LICENSE="GPL-3.0-or-later"
 
-# musl + toolchain base antes do binutils final é o caminho normal
-PKG_DEPS=( "core/musl" )
+# Base: musl + zlib (para recursos que dependem de compressão) + headers já no sistema
+PKG_DEPS=(
+  "core/musl"
+  "core/zlib"
+)
 PKG_BDEPS=()
 
 SOURCES=(
@@ -28,13 +33,14 @@ SOURCES=(
 
 # IMPORTANTE:
 # Seu adm exige checksum para fontes não-git, a menos que ALLOW_NO_CHECKSUM=1.
-# Recomendo fortemente trocar por SHA256 real assim que você puder.
+# Recomendo fortemente trocar por SHA256 real assim que possível.
 ALLOW_NO_CHECKSUM=1
 SHA256SUMS=(
   # "<sha256-real-do-binutils-${PKG_VER}.tar.xz>"
 )
 
 do_configure(){
+  # Helpers (opcional)
   if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
     # shellcheck disable=SC1091
     source "/var/lib/adm/lib/adm-build-helpers.sh"
@@ -42,50 +48,45 @@ do_configure(){
     adm_clean_builddir
   else
     mkdir -p "${WORKDIR}/build"
-    cd "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
   fi
 
-  # Configuração “segura e comum” para binutils final:
-  # - --prefix=/usr
-  # - --disable-werror: evita falha por warnings tratados como erro
-  # - --enable-gold=no e --enable-ld=default: ld.bfd padrão (mais compatível)
-  # - --enable-plugins: LTO plugins e integração melhor com gcc
-  # - --with-system-zlib: usa zlib do sistema (melhor do que embedded)
-  #
-  # Observação: para sistemas *muito* mínimos, você pode remover --with-system-zlib
-  # e construir zlib antes. Aqui assumimos zlib já existe OU você aceitará o fallback.
-  #
-  # Se não tiver zlib ainda, comente --with-system-zlib e adicione core/zlib no world antes.
-  local with_zlib=()
-  if pkg-config --exists zlib 2>/dev/null || [[ -f "/usr/include/zlib.h" || -f "${SYSROOT:-}/usr/include/zlib.h" ]]; then
-    with_zlib+=(--with-system-zlib)
-  else
-    # fallback: deixa binutils usar a zlib interna se disponível
-    with_zlib+=(--without-system-zlib)
-  fi
+  # Para builds iniciais em chroot, você pode ainda estar usando toolchain temporária:
+  # export PATH=/mnt/adm/tools/bin:$PATH
+  # Aqui não forçamos, apenas respeitamos o ambiente.
 
-  ( cd "${WORKDIR}/build" && "${SRCTOP}/configure" \
+  # Configuração padrão robusta:
+  # --prefix=/usr              -> layout do sistema
+  # --disable-nls              -> reduz deps
+  # --disable-werror           -> evita falhas por warnings
+  # --enable-plugins           -> LTO plugins / integração melhor com gcc
+  # --with-system-zlib         -> usa zlib do sistema (dep já declarada)
+  # --enable-shared            -> libs compartilhadas
+  # --enable-gold=no           -> mantém ld.bfd como padrão (menos surpresas)
+  # --enable-ld=default        -> ld.bfd padrão
+  #
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
       --prefix=/usr \
       --disable-nls \
       --disable-werror \
       --enable-plugins \
       --enable-shared \
-      --enable-ld=default \
+      --with-system-zlib \
       --enable-gold=no \
-      "${with_zlib[@]}" )
+      --enable-ld=default )
 }
 
 do_build(){
-  make -C "${WORKDIR}/build" ${MAKEFLAGS}
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
 }
 
 do_install(){
-  make -C "${WORKDIR}/build" DESTDIR="${DESTDIR}" install
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
 
-  # Segurança: evita instalar docs/info muito cedo (opcional, mas reduz tamanho)
+  # Sistema base: reduzir tamanho (opcional)
   rm -rf "${DESTDIR}/usr/share/info" 2>/dev/null || true
   rm -rf "${DESTDIR}/usr/share/man"  2>/dev/null || true
 
-  # Em alguns setups, binutils instala ferramentas redundantes em /usr/${TARGET}/bin.
-  # Aqui não forçamos layout multilib/multitarget: mantemos o padrão /usr/bin.
+  # Garantias mínimas
+  mkdir -p "${DESTDIR}/usr/bin" "${DESTDIR}/usr/lib"
 }
