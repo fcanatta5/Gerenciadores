@@ -1,0 +1,231 @@
+
+OBJETIVO
+========
+Construir um Linux do zero com musl, usando um cross-toolchain temporário,
+e depois transferir o controle completamente para o adm.
+
+ARQUITETURA
+===========
+Host/Target: x86_64-linux-musl
+Libc: musl
+Layout final: /usr + /lib (ld-musl em /lib)
+
+----------------------------------------------------------------------
+FASE 0 — REQUISITOS DO HOST (apenas para bootstrap)
+----------------------------------------------------------------------
+
+Necessário NO HOST (qualquer distro serve):
+- bash
+- make
+- gcc
+- binutils
+- tar
+- xz
+- gzip
+- patch
+- curl ou wget
+- git
+- bison
+- flex
+- sed
+- awk
+- coreutils
+
+Nada disso entra no sistema final. É só para gerar o cross-toolchain.
+
+----------------------------------------------------------------------
+FASE 1 — DIRETÓRIO DO SISTEMA DESTINO
+----------------------------------------------------------------------
+
+Criar raiz do novo sistema:
+
+/mnt/adm-root
+├── bin
+├── lib
+├── usr
+│   ├── bin
+│   ├── lib
+│   ├── include
+│   └── share
+├── etc
+└── var
+
+Exportar:
+- ADM_SYSROOT=/mnt/adm-root
+- ADM_TARGET=x86_64-linux-musl
+- PATH=/tools/bin:$PATH
+
+----------------------------------------------------------------------
+FASE 2 — CROSS-TOOLCHAIN TEMPORÁRIO (SEM libc ainda)
+----------------------------------------------------------------------
+
+Instalar tudo em /tools (fora do sysroot).
+
+ORDEM OBRIGATÓRIA:
+
+1) binutils (cross)
+   configure:
+     --target=$ADM_TARGET
+     --prefix=/tools
+     --with-sysroot=$ADM_SYSROOT
+     --disable-nls
+     --disable-werror
+
+Resultado:
+- /tools/bin/x86_64-linux-musl-ld
+- /tools/bin/x86_64-linux-musl-as
+
+2) gcc (passo 1 — compilador C sem libc)
+   depends: gmp, mpfr, mpc (host)
+   configure:
+     --target=$ADM_TARGET
+     --prefix=/tools
+     --without-headers
+     --with-newlib
+     --disable-shared
+     --disable-threads
+     --disable-libatomic
+     --disable-libgomp
+     --disable-libquadmath
+     --disable-libssp
+     --disable-libvtv
+     --disable-libstdcxx
+     --enable-languages=c
+
+Resultado:
+- /tools/bin/x86_64-linux-musl-gcc
+
+----------------------------------------------------------------------
+FASE 3 — KERNEL HEADERS (DESTINO FINAL)
+----------------------------------------------------------------------
+
+3) linux-headers
+   install em:
+     $ADM_SYSROOT/usr/include
+
+Essencial para musl e gcc final.
+
+----------------------------------------------------------------------
+FASE 4 — MUSL (USANDO CROSS GCC)
+----------------------------------------------------------------------
+
+4) musl (cross)
+   CC=x86_64-linux-musl-gcc
+   configure:
+     --prefix=/usr
+     --syslibdir=/lib
+     --target=$ADM_TARGET
+
+Instalar em:
+- $ADM_SYSROOT
+
+Resultado:
+- /mnt/adm-root/lib/ld-musl-x86_64.so.1
+- headers libc em /usr/include
+
+----------------------------------------------------------------------
+FASE 5 — GCC FINAL (AGORA COM libc)
+----------------------------------------------------------------------
+
+5) gcc (final, nativo para o sistema)
+   CC=/tools/bin/x86_64-linux-musl-gcc
+   configure:
+     --target=$ADM_TARGET
+     --prefix=/usr
+     --with-sysroot=/
+     --enable-languages=c,c++
+     --disable-multilib
+     --disable-nls
+
+Instalar em:
+- $ADM_SYSROOT/usr
+
+Resultado:
+- /mnt/adm-root/usr/bin/gcc
+- toolchain nativo completo
+
+----------------------------------------------------------------------
+FASE 6 — BINUTILS FINAL
+----------------------------------------------------------------------
+
+6) binutils (final)
+   configure:
+     --target=$ADM_TARGET
+     --prefix=/usr
+     --with-sysroot=/
+
+Instalar em:
+- $ADM_SYSROOT/usr
+
+----------------------------------------------------------------------
+FASE 7 — FERRAMENTAS MÍNIMAS PARA O ADM ASSUMIR
+----------------------------------------------------------------------
+
+Instalar NO SISTEMA (com o gcc final):
+
+7) busybox
+   (fornece sh, cp, mv, rm, ln, mkdir, install, etc)
+
+8) make
+
+9) bash (opcional, mas recomendado)
+
+10) coreutils (opcional se usar busybox)
+
+11) tar
+12) xz
+13) gzip
+14) patch
+15) sed
+16) awk
+17) grep
+18) findutils
+19) rsync
+20) curl ou wget
+21) git
+
+----------------------------------------------------------------------
+FASE 8 — PREPARAR O ADM
+----------------------------------------------------------------------
+
+Criar diretórios:
+
+/var/lib/adm/
+├── packages
+├── cache
+│   ├── pkgs
+│   ├── sources
+│   └── backups
+├── build
+├── log
+├── db
+├── stage
+└── locks
+
+Instalar:
+- adm.sh → /usr/sbin/adm
+- chmod +x /usr/sbin/adm
+
+Testar:
+- adm doctor
+- adm search
+- adm build gmp
+
+----------------------------------------------------------------------
+FASE 9 — TRANSIÇÃO COMPLETA
+----------------------------------------------------------------------
+
+Quando tudo funcionar:
+
+- Remover /tools
+- Ajustar PATH para /usr/bin:/bin
+- Recompilar (via adm):
+  - musl
+  - binutils
+  - gcc
+
+A partir daqui:
+✔ O sistema é 100% gerenciado pelo adm
+✔ Nenhuma ferramenta do host é usada
+✔ Nenhum LFS book é necessário
+✔ Tudo é reproduzível e simples
