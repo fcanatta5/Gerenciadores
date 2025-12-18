@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# /var/lib/adm/packages/extra/python/build
+# CPython (Python 3) para o sistema (musl).
+#
+# Foco: Python funcional para builds (meson, ninja, etc) e ferramentas do sistema.
+# - shared libpython
+# - ssl habilitado (OpenSSL)
+# - ensurepip (pip incluído)
+#
+# Versão: Python 3.13.11 (source release). 0
+
+set -Eeuo pipefail
+
+PKG_NAME="python"
+PKG_CAT="extra"
+PKG_VER="3.13.11"
+PKG_DESC="CPython interpreter and standard library"
+PKG_URL="https://www.python.org/"
+PKG_LICENSE="PSF-2.0"
+
+# Dependências para um Python “completo” (módulos ssl, zlib, readline, sqlite, lzma, etc).
+# Se você ainda não tiver todos esses pacotes no tree, você pode temporariamente remover alguns,
+# mas vai perder módulos correspondentes.
+PKG_DEPS=(
+  "core/musl"
+  "core/zlib"
+  "core/openssl"
+  "extra/ca-certificates"
+  "extra/expat"
+  # recomendados (para módulos padrão):
+  # "extra/bzip2"
+  # "extra/xz"
+  # "extra/sqlite"
+  # "extra/readline"
+  # "extra/ncurses"
+  # "extra/libffi"
+  # "extra/gdbm"
+)
+PKG_BDEPS=(
+  # Python precisa de um python “host” para algumas etapas? Normalmente não em build nativo.
+  # "core/perl"  # não é necessário
+)
+
+SOURCES=(
+  "https://www.python.org/ftp/python/${PKG_VER}/Python-${PKG_VER}.tar.xz"
+)
+
+# Recomenda-se preencher SHA256SUMS e remover ALLOW_NO_CHECKSUM.
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-Python-${PKG_VER}.tar.xz>"
+)
+
+: "${JOBS:=4}"
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # CA bundle do sistema (para pip/https)
+  local cabundle="/etc/ssl/certs/ca-certificates.crt"
+
+  # Configure out-of-tree
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --enable-shared \
+      --with-ensurepip=install \
+      --with-system-expat \
+      --with-openssl=/usr \
+      --with-openssl-rpath=auto \
+      --with-system-ffi \
+      --with-platlibdir=lib \
+      --without-static-libpython \
+      --disable-test-modules \
+      ac_cv_file__dev_ptmx=yes \
+      ac_cv_file__dev_ptc=no \
+      PYTHON_FOR_REGEN=python3 \
+      SSL_CERT_FILE="${cabundle}" \
+  )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS:-"-j${JOBS}"}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # Symlinks úteis
+  if [[ -x "${DESTDIR}/usr/bin/python3" && ! -e "${DESTDIR}/usr/bin/python" ]]; then
+    ln -sf python3 "${DESTDIR}/usr/bin/python"
+  fi
+
+  # Garante que o CA bundle exista (pip/cert verification)
+  mkdir -p "${DESTDIR}/etc/ssl/certs"
+  if [[ ! -f "${DESTDIR}/etc/ssl/certs/ca-certificates.crt" ]]; then
+    # não falha; mas avisa em build logs
+    echo "WARN: ca-certificates.crt não encontrado no DESTDIR; instale extra/ca-certificates." >&2
+  fi
+
+  # Base minimalista (opcional): remover docs pesadas
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+}
+```1
