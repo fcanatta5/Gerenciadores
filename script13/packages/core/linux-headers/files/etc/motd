@@ -1,0 +1,4 @@
+Welcome to ADM Linux.
+
+This system is built from scratch using the adm package manager.
+musl libc + runit + busybox
