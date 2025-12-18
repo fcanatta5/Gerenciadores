@@ -1,64 +1,93 @@
 #!/usr/bin/env bash
-# extra/ca-certificates/build
-# CA bundle (Mozilla) para TLS no sistema (curl, git, firefox, etc).
+# /var/lib/adm/packages/extra/ca-certificates/build
+# CA certificates (Mozilla) via Debian source package (tar.xz) — compatível com o adm (archive).
 #
-# Estratégia simples e robusta:
-# - baixa o bundle PEM oficial mantido pelo projeto curl
-# - instala como /etc/ssl/certs/ca-certificates.crt
-# - gera hashes em /etc/ssl/certs (c_rehash) quando disponível
+# O seu adm NÃO suporta “single-file source” (ex.: cacert.pem direto). Por isso usamos um tarball.
+# Este script:
+# - instala os certificados .crt em /usr/share/ca-certificates/mozilla/
+# - instala um ca-certificates.conf em /etc/ca-certificates.conf
+# - gera um bundle PEM em /etc/ssl/certs/ca-certificates.crt (concat simples e determinístico)
+# - tenta gerar hashes em /etc/ssl/certs (c_rehash) se disponível (best-effort)
 
 set -Eeuo pipefail
 
 PKG_NAME="ca-certificates"
 PKG_CAT="extra"
-PKG_VER="2025.12.17"
-PKG_DESC="CA certificates bundle (Mozilla) for TLS verification"
-PKG_URL="https://curl.se/docs/caextract.html"
-PKG_LICENSE="MPL-2.0 (bundle derived from Mozilla)"
+PKG_VER="20250419"
+PKG_DESC="CA certificates bundle (Mozilla) for TLS verification (Debian source-based)"
+PKG_URL="https://packages.debian.org/ca-certificates"
+PKG_LICENSE="MPL-2.0 (cert bundle derived from Mozilla)"
 
 PKG_DEPS=( "core/openssl" )
 PKG_BDEPS=()
 
 SOURCES=(
-  "https://curl.se/ca/cacert.pem"
+  "https://ftp.debian.org/debian/pool/main/c/ca-certificates/ca-certificates_${PKG_VER}.tar.xz"
 )
 
+# Recomenda-se preencher SHA256SUMS e remover ALLOW_NO_CHECKSUM.
 ALLOW_NO_CHECKSUM=1
 SHA256SUMS=(
-  # "<sha256-real-do-cacert.pem>"
+  # "<sha256-real-do-ca-certificates_${PKG_VER}.tar.xz>"
 )
 
-do_configure(){
-  : # nada
-}
-
-do_build(){
-  : # nada
-}
+do_configure(){ :; }
+do_build(){ :; }
 
 do_install(){
-  mkdir -p "${DESTDIR}/etc/ssl/certs" "${DESTDIR}/etc/ssl/private"
+  mkdir -p "${DESTDIR}/usr/share/ca-certificates/mozilla"
+  mkdir -p "${DESTDIR}/etc/ssl/certs"
+  mkdir -p "${DESTDIR}/etc/ssl/private"
   chmod 0700 "${DESTDIR}/etc/ssl/private" 2>/dev/null || true
 
-  # O arquivo baixado fica no diretório de sources do adm; o SRCTOP pode ser um “pseudo-source”.
-  # O adm normalmente prepara SRCTOP apontando para o conteúdo da fonte.
-  # Para este caso (arquivo único), esperamos que SRCTOP contenha o cacert.pem diretamente,
-  # ou que ele esteja no diretório atual do SRCTOP.
-  local src=""
-  if [[ -f "${SRCTOP}/cacert.pem" ]]; then
-    src="${SRCTOP}/cacert.pem"
-  elif [[ -f "${SRCTOP}" ]]; then
-    # fallback: SRCTOP pode ser o próprio arquivo
-    src="${SRCTOP}"
-  else
-    # fallback final: procurar o arquivo no SRCTOP
-    src="$(find "${SRCTOP}" -maxdepth 2 -type f -name 'cacert.pem' 2>/dev/null | head -n1 || true)"
+  # Debian source normalmente contém os certs em algum subtree "mozilla/"
+  # Vamos localizar todos os .crt dentro de um diretório que contenha "mozilla".
+  mapfile -t certs < <(find "${SRCTOP}" -type f -name '*.crt' -path '*mozilla*' 2>/dev/null | LC_ALL=C sort || true)
+
+  if [[ "${#certs[@]}" -eq 0 ]]; then
+    echo "ERRO: não encontrei certificados '*.crt' no source (${SRCTOP})." >&2
+    exit 1
   fi
-  [[ -n "$src" && -f "$src" ]] || { echo "ERRO: cacert.pem não encontrado em SRCTOP=${SRCTOP}" >&2; exit 1; }
 
-  install -m 0644 "$src" "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
+  # Copia certs para um local padrão
+  for f in "${certs[@]}"; do
+    install -m 0644 "$f" "${DESTDIR}/usr/share/ca-certificates/mozilla/$(basename "$f")"
+  done
 
-  # Hash symlinks (opcional; útil para softwares que usam hashes em /etc/ssl/certs)
+  # Instala (ou gera) o ca-certificates.conf
+  # Debian costuma trazer debian/ca-certificates.conf
+  if [[ -f "${SRCTOP}/debian/ca-certificates.conf" ]]; then
+    install -m 0644 "${SRCTOP}/debian/ca-certificates.conf" "${DESTDIR}/etc/ca-certificates.conf"
+  else
+    # fallback: habilita todos os certs mozilla copiados
+    ( cd "${DESTDIR}/usr/share/ca-certificates" && \
+      find mozilla -type f -name '*.crt' -print | LC_ALL=C sort ) > "${DESTDIR}/etc/ca-certificates.conf"
+    chmod 0644 "${DESTDIR}/etc/ca-certificates.conf"
+  fi
+
+  # Gera bundle PEM (concat simples) em /etc/ssl/certs/ca-certificates.crt
+  # (O formato .crt dos arquivos é PEM; concatenar é a prática usual.)
+  : > "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
+
+  # Use ca-certificates.conf como lista “fonte de verdade”
+  # Linhas vazias e comentários são ignorados.
+  while IFS= read -r line; do
+    line="${line%%$'\r'}"
+    [[ -z "$line" ]] && continue
+    [[ "$line" == \#* ]] && continue
+
+    # Debian costuma listar caminhos relativos a /usr/share/ca-certificates
+    # Ex.: mozilla/ACCVRAIZ1.crt
+    src="${DESTDIR}/usr/share/ca-certificates/${line}"
+    if [[ -f "$src" ]]; then
+      cat "$src" >> "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
+      printf "\n" >> "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
+    fi
+  done < "${DESTDIR}/etc/ca-certificates.conf"
+
+  chmod 0644 "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
+
+  # Hashes OpenSSL (best-effort; útil para softwares que usam /etc/ssl/certs como dir)
   if command -v c_rehash >/dev/null 2>&1; then
     c_rehash "${DESTDIR}/etc/ssl/certs" >/dev/null 2>&1 || true
   fi
