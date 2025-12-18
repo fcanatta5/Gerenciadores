@@ -1,0 +1,95 @@
+pkgname="gcc"
+pkgver="15.2.0"
+pkgrel=1
+category="core"
+pkgdesc="GNU Compiler Collection (C/C++)"
+url="https://gcc.gnu.org/"
+license="GPL-3.0-or-later"
+arch="x86_64"
+
+# GCC precisa dessas libs para build (recomendo empacotar elas também no seu adm)
+depends=( "gmp" "mpfr" "mpc" "isl" "zlib" )
+
+# Tarball oficial
+sources=(
+  "https://gcc.gnu.org/pub/gcc/releases/gcc-${pkgver}/gcc-${pkgver}.tar.xz::gcc-${pkgver}.tar.xz"
+)
+
+sha256sums=(
+  "438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e gcc-15.2.0.tar.xz"
+)
+
+pre_build() {
+  : "${CC:=cc}"
+  : "${CXX:=c++}"
+  : "${AR:=ar}"
+  : "${RANLIB:=ranlib}"
+  : "${STRIP:=strip}"
+
+  # Triplet esperado no seu cenário
+  : "${ADM_TRIPLET:=x86_64-linux-musl}"
+
+  # Flags conservadoras (ajuste se você quiser otimizações específicas)
+  : "${CFLAGS:=-O2 -pipe}"
+  : "${CXXFLAGS:=-O2 -pipe}"
+  : "${LDFLAGS:=}"
+
+  # Evita builds “suplementares” que frequentemente dão dor de cabeça em musl
+  : "${GCC_LANGUAGES:=c,c++}"
+}
+
+build() {
+  # build out-of-tree
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # Em sistemas musl “do zero”, é comum o -dumpmachine não bater exatamente.
+  # Você pode exportar ADM_TRIPLET antes do build se precisar.
+  local build_triplet
+  build_triplet="$(${CC} -dumpmachine 2>/dev/null || echo "${ADM_TRIPLET}")"
+
+  # Importante:
+  # - --disable-multilib: simplifica e evita procurar libs 32-bit
+  # - --disable-nls: evita gettext
+  # - --disable-bootstrap: reduz tempo/complexidade (assumindo que já existe um compilador C funcional)
+  # - --disable-libsanitizer: em musl, sanitizers frequentemente exigem ajustes/patches e não são essenciais
+  # - --with-system-zlib: usa zlib do sistema
+  # - --with-native-system-header-dir: garante /usr/include (musl)
+  #
+  # Observação: você pode trocar --disable-bootstrap por --enable-bootstrap depois que seu sistema estiver maduro.
+  ../configure \
+    --prefix=/usr \
+    --libdir=/usr/lib \
+    --libexecdir=/usr/libexec \
+    --sysconfdir=/etc \
+    --localstatedir=/var \
+    --build="${build_triplet}" \
+    --host="${ADM_TRIPLET}" \
+    --target="${ADM_TRIPLET}" \
+    --enable-languages="${GCC_LANGUAGES}" \
+    --disable-multilib \
+    --disable-nls \
+    --disable-werror \
+    --disable-bootstrap \
+    --disable-libsanitizer \
+    --with-system-zlib \
+    --with-isl \
+    --with-native-system-header-dir=/usr/include
+
+  make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+}
+
+install() {
+  cd _build
+
+  # Instala em DESTDIR (obrigatório para o adm)
+  make DESTDIR="$DESTDIR" install
+
+  # Padroniza cc -> gcc (útil em sistemas “from scratch”)
+  mkdir -p "$DESTDIR/usr/bin"
+  ln -sf gcc "$DESTDIR/usr/bin/cc"
+
+  # Opcional (mantém enxuto): remova docs pesados se você quiser
+  # rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man"
+}
