@@ -1,0 +1,8 @@
+# 7) /etc/fstab básico (para runit stage 1 montar mount -a)
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/fstab
+proc    /proc   proc    nosuid,noexec,nodev  0 0
+sysfs   /sys    sysfs   nosuid,noexec,nodev  0 0
+devtmpfs /dev   devtmpfs mode=0755,nosuid    0 0
+tmpfs   /run    tmpfs   mode=0755,nosuid,nodev 0 0
+tmpfs   /tmp    tmpfs   mode=1777,nosuid,nodev 0 0
