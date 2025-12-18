@@ -2,7 +2,6 @@ pkgname="gcc-pass1"
 pkgver="15.2.0"
 pkgrel=1
 
-# Para o cross-toolchain.sh "commit" em /tools
 INSTALL_ROOT="tools"
 
 sources=(
@@ -19,33 +18,27 @@ pre_build() {
   : "${SYSROOT:=/mnt/adm/rootfs}"
   : "${JOBS:=4}"
 
-  # Para evitar que o GCC pegue includes/libs do host e “vaze” pro pass1:
   export PATH="$TOOLS/bin:$PATH"
   export CFLAGS="${CFLAGS:- -O2 -pipe}"
   export CXXFLAGS="${CXXFLAGS:- -O2 -pipe}"
 }
 
 build() {
-  # Baixa prereqs (gmp/mpfr/mpc/isl) de forma automática
-  # Nota: requer curl ou wget no host.
-  if [[ -x ./contrib/download_prerequisites ]]; then
-    ./contrib/download_prerequisites
-  else
-    echo "download_prerequisites não encontrado; source do GCC incompleto?"
-    return 1
-  fi
+  # Baixa GMP/MPFR/MPC/ISL dentro do source do GCC (evita múltiplos tarballs no extractor)
+  ./contrib/download_prerequisites
 
-  # build out-of-tree limpo
   rm -rf _build
   mkdir -p _build
   cd _build
 
-  # GCC pass1 (sem headers e sem libc):
-  # - instala em /tools
-  # - gera cross compiler $TARGET-gcc
-  # - desativa tudo que complica em bootstrap mínimo
+  # IMPORTANTE:
+  # prefix=/ para que o staging tenha bin/, lib/, libexec/ na raiz do DESTDIR,
+  # e o cross-toolchain.sh consiga rsync -> $TOOLS corretamente.
   ../configure \
-    --prefix="$TOOLS" \
+    --prefix=/ \
+    --libdir=/lib \
+    --libexecdir=/libexec \
+    --includedir=/include \
     --target="$TARGET" \
     --with-sysroot="$SYSROOT" \
     --with-newlib \
@@ -69,10 +62,8 @@ build() {
 
 install() {
   cd _build
-
-  # Instala o compilador e a libgcc mínima no DESTDIR do cross-toolchain.sh
   make DESTDIR="$DESTDIR" install-gcc install-target-libgcc
 
-  # Mantém o pass1 enxuto (opcional e seguro)
-  rm -rf "$DESTDIR/$TOOLS/share" 2>/dev/null || true
+  # Mantém enxuto
+  rm -rf "$DESTDIR/share" 2>/dev/null || true
 }
