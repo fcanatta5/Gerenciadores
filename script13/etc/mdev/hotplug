@@ -1,0 +1,4 @@
+#!/bin/sh
+# Chamado pelo kernel (via /proc/sys/kernel/hotplug) ou por mdev -d
+  # Dar permissão chmod +x
+exec /sbin/mdev "$@"
