@@ -1,0 +1,71 @@
+pkgname="git"
+pkgver="2.47.1"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://www.kernel.org/pub/software/scm/git/git-${pkgver}.tar.xz::git-${pkgver}.tar.xz"
+)
+
+sha256sums=(
+  "a5d26bf7b01b2f0571b5a99300c256e556bd89b2a03088accf7b81bfa4f8f2fd git-2.47.1.tar.xz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+
+  # Checagens “fail fast” (evita git semi-quebrado)
+  [[ -e "$SYSROOT/usr/include/zlib.h" ]] || { echo "ERRO: zlib não encontrado no sysroot ($SYSROOT/usr/include/zlib.h)"; return 1; }
+  [[ -e "$SYSROOT/usr/include/expat.h" ]] || { echo "ERRO: expat não encontrado no sysroot ($SYSROOT/usr/include/expat.h)"; return 1; }
+  [[ -e "$SYSROOT/usr/include/openssl/ssl.h" ]] || { echo "ERRO: openssl não encontrado no sysroot ($SYSROOT/usr/include/openssl/ssl.h)"; return 1; }
+  [[ -e "$SYSROOT/usr/include/curl/curl.h" ]] || { echo "ERRO: libcurl não encontrado no sysroot ($SYSROOT/usr/include/curl/curl.h)"; return 1; }
+}
+
+build() {
+  # Git usa Makefile; para cross, informe tools e sysroot
+  make -j"$JOBS" configure
+
+  # Configure para instalar em /usr e usar libs do sysroot
+  # (não instalar docs, nem perl/tcltk, para minimizar dependências externas)
+  ./configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --with-openssl="$SYSROOT/usr" \
+    --with-curl="$SYSROOT/usr" \
+    --with-expat="$SYSROOT/usr" \
+    --with-zlib="$SYSROOT/usr"
+
+  make -j"$JOBS" \
+    CC="$CC" AR="$AR" RANLIB="$RANLIB" \
+    CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
+    NO_PERL=YesPlease \
+    NO_TCLTK=YesPlease \
+    NO_GETTEXT=YesPlease \
+    NO_PYTHON=YesPlease \
+    NO_ICONV=YesPlease \
+    all
+}
+
+install() {
+  make DESTDIR="$DESTDIR" install \
+    NO_PERL=YesPlease \
+    NO_TCLTK=YesPlease \
+    NO_GETTEXT=YesPlease \
+    NO_PYTHON=YesPlease \
+    NO_ICONV=YesPlease
+
+  rm -rf "$DESTDIR/usr/share/man" "$DESTDIR/usr/share/doc" 2>/dev/null || true
+}
