@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# core/mpfr/build
+# MPFR - Multiple Precision Floating-Point Reliable Library (dep do GCC)
+
+set -Eeuo pipefail
+
+PKG_NAME="mpfr"
+PKG_CAT="core"
+PKG_VER="4.2.1"
+PKG_DESC="MPFR - multiple-precision floating-point computations with correct rounding"
+PKG_URL="https://www.mpfr.org/"
+PKG_LICENSE="LGPL-3.0-or-later"
+
+PKG_DEPS=( "core/musl" "core/gmp" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://ftp.gnu.org/gnu/mpfr/mpfr-${PKG_VER}.tar.xz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-mpfr-${PKG_VER}.tar.xz>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --enable-shared \
+      --disable-static \
+      --disable-nls \
+      --with-gmp=/usr )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  rm -rf "${DESTDIR}/usr/share/info" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/man"  2>/dev/null || true
+}
