@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# extra/perl/build
+# Perl (core) — necessário para OpenSSL, autotools, git scripts, etc.
+
+set -Eeuo pipefail
+
+PKG_NAME="perl"
+PKG_CAT="extra"
+PKG_VER="5.42.0"
+PKG_DESC="Perl programming language"
+PKG_URL="https://www.perl.org/"
+PKG_LICENSE="Artistic-1.0-Perl OR GPL-1.0-or-later"
+
+PKG_DEPS=( "core/musl" "core/zlib" )
+PKG_BDEPS=( "core/make" )
+
+SOURCES=(
+  "https://www.cpan.org/src/5.0/perl-${PKG_VER}.tar.gz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-perl-${PKG_VER}.tar.gz>"
+)
+
+do_configure(){
+  # Perl build é in-tree; copiamos para manter SRCTOP limpo
+  rm -rf "${WORKDIR}/src-copy"
+  cp -a "${SRCTOP}" "${WORKDIR}/src-copy"
+  export PERL_SRCTOP="${WORKDIR}/src-copy"
+  cd "${PERL_SRCTOP}"
+
+  # Configuração não-interativa, libs compartilhadas, paths em /usr
+  sh Configure -des \
+    -Dprefix=/usr \
+    -Dvendorprefix=/usr \
+    -Dsiteprefix=/usr \
+    -Dprivlib=/usr/lib/perl5/${PKG_VER} \
+    -Darchlib=/usr/lib/perl5/${PKG_VER} \
+    -Dscriptdir=/usr/bin \
+    -Dman1dir=none \
+    -Dman3dir=none \
+    -Duseshrplib \
+    -Duselargefiles \
+    -Dcc="${CC:-cc}" \
+    -Doptimize="${CFLAGS:--O2 -pipe}" \
+    -Dldflags="${LDFLAGS:-}"
+}
+
+do_build(){
+  cd "${PERL_SRCTOP:-${SRCTOP}}"
+  make ${MAKEFLAGS}
+}
+
+do_install(){
+  cd "${PERL_SRCTOP:-${SRCTOP}}"
+
+  # Perl respeita DESTDIR
+  make DESTDIR="${DESTDIR}" install
+
+  # Base minimalista (opcional)
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+}
