@@ -1,0 +1,78 @@
+pkgname="gcc-pass1"
+pkgver="15.2.0"
+pkgrel=1
+
+# Para o cross-toolchain.sh "commit" em /tools
+INSTALL_ROOT="tools"
+
+sources=(
+  "https://gcc.gnu.org/pub/gcc/releases/gcc-${pkgver}/gcc-${pkgver}.tar.xz::gcc-${pkgver}.tar.xz"
+)
+
+sha256sums=(
+  "438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e gcc-15.2.0.tar.xz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  # Para evitar que o GCC pegue includes/libs do host e “vaze” pro pass1:
+  export PATH="$TOOLS/bin:$PATH"
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export CXXFLAGS="${CXXFLAGS:- -O2 -pipe}"
+}
+
+build() {
+  # Baixa prereqs (gmp/mpfr/mpc/isl) de forma automática
+  # Nota: requer curl ou wget no host.
+  if [[ -x ./contrib/download_prerequisites ]]; then
+    ./contrib/download_prerequisites
+  else
+    echo "download_prerequisites não encontrado; source do GCC incompleto?"
+    return 1
+  fi
+
+  # build out-of-tree limpo
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # GCC pass1 (sem headers e sem libc):
+  # - instala em /tools
+  # - gera cross compiler $TARGET-gcc
+  # - desativa tudo que complica em bootstrap mínimo
+  ../configure \
+    --prefix="$TOOLS" \
+    --target="$TARGET" \
+    --with-sysroot="$SYSROOT" \
+    --with-newlib \
+    --without-headers \
+    --enable-languages=c \
+    --disable-shared \
+    --disable-threads \
+    --disable-multilib \
+    --disable-nls \
+    --disable-bootstrap \
+    --disable-libatomic \
+    --disable-libgomp \
+    --disable-libquadmath \
+    --disable-libssp \
+    --disable-libstdcxx \
+    --disable-libvtv \
+    --disable-werror
+
+  make -j"$JOBS" all-gcc all-target-libgcc
+}
+
+install() {
+  cd _build
+
+  # Instala o compilador e a libgcc mínima no DESTDIR do cross-toolchain.sh
+  make DESTDIR="$DESTDIR" install-gcc install-target-libgcc
+
+  # Mantém o pass1 enxuto (opcional e seguro)
+  rm -rf "$DESTDIR/$TOOLS/share" 2>/dev/null || true
+}
