@@ -1,0 +1,66 @@
+pkgname="binutils"
+pkgver="2.45.1"
+pkgrel=1
+category="core"
+pkgdesc="GNU assembler, linker and binary utilities"
+url="https://www.gnu.org/software/binutils/"
+license="GPL-3.0-or-later"
+arch="x86_64"
+
+# Dependências (mantidas simples; ajuste conforme seu sistema)
+depends=( "zlib" "zstd" )
+
+sources=(
+  "https://ftp.gnu.org/gnu/binutils/binutils-${pkgver}.tar.xz::binutils-${pkgver}.tar.xz"
+)
+sha256sums=(
+  # SHA256 (binutils-2.45.1.tar.xz)
+  "5fe101e6fe9d18fdec95962d81ed670fdee5f37e3f48f0bef87bddf862513aa5 binutils-2.45.1.tar.xz"
+)
+
+pre_build() {
+  : "${CC:=cc}"
+  : "${CXX:=c++}"
+  : "${AR:=ar}"
+  : "${RANLIB:=ranlib}"
+  : "${STRIP:=strip}"
+
+  # alvo/host para musl
+  : "${ADM_TRIPLET:=x86_64-linux-musl}"
+}
+
+build() {
+  # O adm chama build() dentro do SRC_DIR
+  # Fazemos build out-of-tree para manter limpo
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # Para sistema musl nativo: host/target iguais
+  # --disable-gprofng: reduz dependências e evita build falhando em setups mínimos
+  # --disable-nls: reduz deps (gettext)
+  # --disable-werror: evita falhas por warnings
+  ../configure \
+    --prefix=/usr \
+    --sysconfdir=/etc \
+    --localstatedir=/var \
+    --build="$(${CC} -dumpmachine 2>/dev/null || echo ${ADM_TRIPLET})" \
+    --host="${ADM_TRIPLET}" \
+    --target="${ADM_TRIPLET}" \
+    --disable-nls \
+    --disable-werror \
+    --disable-gprofng \
+    --enable-deterministic-archives \
+    --with-system-zlib \
+    --with-zstd
+
+  make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # Opcional: manter layout enxuto (remova se você quiser tudo)
+  # rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man"
+}
