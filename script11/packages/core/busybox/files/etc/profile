@@ -1,0 +1,7 @@
+# 6) /etc/profile (ambiente padrão)
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/profile
+export PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export HOME=/root
+export TERM=${TERM:-linux}
+umask 022
