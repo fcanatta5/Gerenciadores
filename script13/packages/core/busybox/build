@@ -1,0 +1,115 @@
+pkgname="busybox"
+pkgver="1.37.0"
+pkgrel=1
+
+# BusyBox não precisa de libs externas; para HTTPS no wget do busybox é outra história,
+# mas a base de rede (DHCP, ip, ping, nslookup) funciona sem deps extras.
+depends=()
+
+sources=(
+  "https://busybox.net/downloads/busybox-${pkgver}.tar.bz2::busybox-${pkgver}.tar.bz2"
+)
+
+sha256sums=(
+  "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4 busybox-1.37.0.tar.bz2"
+)
+
+pre_build() {
+  : "${JOBS:=$(nproc 2>/dev/null || echo 4)}"
+  : "${ARCH:=x86_64}"
+
+  _kcfg_set() {
+    local key="$1" val="$2"
+    if grep -qE "^${key}=" .config; then
+      sed -i "s|^${key}=.*|${key}=${val}|" .config
+    elif grep -qE "^# ${key} is not set" .config; then
+      sed -i "s|^# ${key} is not set|${key}=${val}|" .config
+    else
+      printf '%s=%s\n' "$key" "$val" >> .config
+    fi
+  }
+
+  _kcfg_unset() {
+    local key="$1"
+    if grep -qE "^${key}=" .config; then
+      sed -i "s|^${key}=.*|# ${key} is not set|" .config
+    elif ! grep -qE "^# ${key} is not set" .config; then
+      printf '# %s is not set\n' "$key" >> .config
+    fi
+  }
+}
+
+build() {
+  make distclean >/dev/null 2>&1 || true
+
+  make ARCH="$ARCH" defconfig
+
+  # --- Objetivo: sistema minimalista e robusto ---
+  # Estático reduz dependências externas (recomendado no começo do sistema)
+  _kcfg_set CONFIG_STATIC y
+
+  # Shell
+  _kcfg_set CONFIG_ASH y
+  _kcfg_set CONFIG_SH_IS_ASH y
+  _kcfg_set CONFIG_FEATURE_EDITING y
+  _kcfg_set CONFIG_FEATURE_EDITING_HISTORY 256
+
+  # --- Rede/Internet (mínimo útil) ---
+  _kcfg_set CONFIG_IP y
+  _kcfg_set CONFIG_FEATURE_IP_ADDRESS y
+  _kcfg_set CONFIG_FEATURE_IP_LINK y
+  _kcfg_set CONFIG_FEATURE_IP_ROUTE y
+
+  _kcfg_set CONFIG_UDHCPC y
+  _kcfg_set CONFIG_FEATURE_UDHCPC_ARPING y
+  _kcfg_set CONFIG_FEATURE_UDHCPC_SANITIZEOPT y
+  _kcfg_set CONFIG_UDHCPC_DEFAULT_SCRIPT "\"/etc/udhcpc/default.script\""
+
+  _kcfg_set CONFIG_NSLOOKUP y
+  _kcfg_set CONFIG_PING y
+  _kcfg_set CONFIG_PING6 y
+
+  _kcfg_set CONFIG_WGET y
+  _kcfg_set CONFIG_FEATURE_WGET_STATUSBAR y
+  _kcfg_set CONFIG_FEATURE_WGET_TIMEOUT y
+  # HTTPS no wget do BusyBox pode depender do backend TLS; deixe ligado só se você souber que está ok:
+  # _kcfg_set CONFIG_FEATURE_WGET_HTTPS y
+
+  # --- Logging/cron/time (reduz necessidade de daemons externos) ---
+  _kcfg_set CONFIG_SYSLOGD y
+  _kcfg_set CONFIG_KLOGD y
+  _kcfg_set CONFIG_CROND y
+  _kcfg_set CONFIG_CRONTAB y
+  _kcfg_set CONFIG_NTPD y
+  _kcfg_set CONFIG_FEATURE_NTPD_SERVER y
+
+  # --- mdev + hotplug (integração com runit) ---
+  _kcfg_set CONFIG_MDEV y
+  _kcfg_set CONFIG_FEATURE_MDEV_CONF y
+  _kcfg_set CONFIG_FEATURE_MDEV_EXEC y
+  _kcfg_set CONFIG_FEATURE_MDEV_RENAME y
+  _kcfg_set CONFIG_HOTPLUG y
+  _kcfg_set CONFIG_FEATURE_MDEV_DAEMON y
+
+  # Evitar problemas com acelerações HW inconsistentes
+  _kcfg_unset CONFIG_SHA1_HWACCEL
+  _kcfg_unset CONFIG_SHA256_HWACCEL
+
+  # Consolida config
+  yes "" | make ARCH="$ARCH" oldconfig >/dev/null
+
+  make -j"$JOBS" ARCH="$ARCH"
+}
+
+install() {
+  # BusyBox instala via CONFIG_PREFIX (não via DESTDIR padrão)
+  make ARCH="$ARCH" CONFIG_PREFIX="$DESTDIR" install
+
+  # Garantir /bin/sh (muitos scripts esperam)
+  mkdir -p "$DESTDIR/bin"
+  ln -sf busybox "$DESTDIR/bin/sh"
+
+  # Diretórios base (mantém rootfs consistente)
+  mkdir -p "$DESTDIR"/{dev,proc,sys,run,etc,tmp,root,var,usr/{bin,sbin,lib}}
+  chmod 1777 "$DESTDIR/tmp" 2>/dev/null || true
+}
