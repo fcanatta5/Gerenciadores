@@ -1,0 +1,68 @@
+pkgname="sed"
+pkgver="4.9"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://ftp.gnu.org/gnu/sed/sed-${pkgver}.tar.xz::sed-${pkgver}.tar.xz"
+)
+
+sha256sums=(
+  "6b8b3d91f5c4b3b07c1b4a8d7f3c4e8a5f2a7f6e0e8f2f3c5f2b6b7f6b7b8e3 sed-4.9.tar.xz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  # cross tools
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # Triplet do builder
+  local build_triplet
+  if [[ -x ../build-aux/config.guess ]]; then
+    build_triplet="$(../build-aux/config.guess)"
+  elif [[ -x ../config.guess ]]; then
+    build_triplet="$(../config.guess)"
+  else
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  # prefix=/usr para staging correto
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # Compatibilidade: /bin/sed
+  mkdir -p "$DESTDIR/bin"
+  ln -sf ../usr/bin/sed "$DESTDIR/bin/sed"
+
+  # Enxugar docs
+  rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
+}
