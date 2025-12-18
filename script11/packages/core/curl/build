@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# core/curl/build
+# curl + libcurl (TLS via OpenSSL), essencial para o adm (downloads HTTPS robustos).
+
+set -Eeuo pipefail
+
+PKG_NAME="curl"
+PKG_CAT="core"
+PKG_VER="8.17.0"
+PKG_DESC="Command line tool and library for transferring data with URLs (OpenSSL)"
+PKG_URL="https://curl.se/"
+PKG_LICENSE="curl"
+
+PKG_DEPS=(
+  "core/musl"
+  "core/zlib"
+  "core/openssl"
+  "extra/ca-certificates"
+)
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://curl.se/download/curl-${PKG_VER}.tar.xz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-curl-${PKG_VER}.tar.xz>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  # CA bundle do sistema (instalado pelo extra/ca-certificates)
+  local cabundle="/etc/ssl/certs/ca-certificates.crt"
+
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --disable-static \
+      --enable-shared \
+      --with-openssl \
+      --with-zlib \
+      --enable-ipv6 \
+      --disable-ldap \
+      --disable-ldaps \
+      --without-libidn2 \
+      --without-librtmp \
+      --without-zstd \
+      --with-ca-bundle="${cabundle}" \
+      --with-ca-path="/etc/ssl/certs" )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # Base minimalista (opcional)
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+
+  # Garantias mínimas
+  mkdir -p "${DESTDIR}/etc/ssl/certs"
+}
