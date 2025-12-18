@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# extra/pcre2/build
+# PCRE2 - regex (git pode usar pcre2; muitos projetos também).
+# Build autotools clássico (configure/make), com libs 8/16/32 e JIT em x86_64.
+
+set -Eeuo pipefail
+
+PKG_NAME="pcre2"
+PKG_CAT="extra"
+PKG_VER="10.47"
+PKG_DESC="PCRE2 - Perl Compatible Regular Expressions (new generation)"
+PKG_URL="https://www.pcre.org/"
+PKG_LICENSE="BSD-3-Clause"
+
+PKG_DEPS=( "core/musl" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PKG_VER}/pcre2-${PKG_VER}.tar.bz2"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-pcre2-${PKG_VER}.tar.bz2>"
+)
+
+do_configure(){
+  if [[ -r "/var/lib/adm/lib/adm-build-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "/var/lib/adm/lib/adm-build-helpers.sh"
+    adm_src_enter
+    adm_clean_builddir
+  else
+    mkdir -p "${WORKDIR}/build"
+    export BUILD_DIR="${WORKDIR}/build"
+  fi
+
+  ( cd "${BUILD_DIR}" && "${SRCTOP}/configure" \
+      --prefix=/usr \
+      --disable-static \
+      --enable-shared \
+      --enable-pcre2-8 \
+      --enable-pcre2-16 \
+      --enable-pcre2-32 \
+      --enable-jit \
+      --enable-unicode \
+      --enable-pcre2grep-libz \
+      --enable-pcre2grep-libbz2 )
+}
+
+do_build(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" ${MAKEFLAGS}
+}
+
+do_install(){
+  make -C "${BUILD_DIR:-${WORKDIR}/build}" DESTDIR="${DESTDIR}" install
+
+  # Base minimalista (opcional)
+  rm -rf "${DESTDIR}/usr/share/man" 2>/dev/null || true
+  rm -rf "${DESTDIR}/usr/share/doc" 2>/dev/null || true
+}
