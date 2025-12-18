@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# extra/ca-certificates/build
+# CA bundle (Mozilla) para TLS no sistema (curl, git, firefox, etc).
+#
+# Estratégia simples e robusta:
+# - baixa o bundle PEM oficial mantido pelo projeto curl
+# - instala como /etc/ssl/certs/ca-certificates.crt
+# - gera hashes em /etc/ssl/certs (c_rehash) quando disponível
+
+set -Eeuo pipefail
+
+PKG_NAME="ca-certificates"
+PKG_CAT="extra"
+PKG_VER="2025.12.17"
+PKG_DESC="CA certificates bundle (Mozilla) for TLS verification"
+PKG_URL="https://curl.se/docs/caextract.html"
+PKG_LICENSE="MPL-2.0 (bundle derived from Mozilla)"
+
+PKG_DEPS=( "core/openssl" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://curl.se/ca/cacert.pem"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-cacert.pem>"
+)
+
+do_configure(){
+  : # nada
+}
+
+do_build(){
+  : # nada
+}
+
+do_install(){
+  mkdir -p "${DESTDIR}/etc/ssl/certs" "${DESTDIR}/etc/ssl/private"
+  chmod 0700 "${DESTDIR}/etc/ssl/private" 2>/dev/null || true
+
+  # O arquivo baixado fica no diretório de sources do adm; o SRCTOP pode ser um “pseudo-source”.
+  # O adm normalmente prepara SRCTOP apontando para o conteúdo da fonte.
+  # Para este caso (arquivo único), esperamos que SRCTOP contenha o cacert.pem diretamente,
+  # ou que ele esteja no diretório atual do SRCTOP.
+  local src=""
+  if [[ -f "${SRCTOP}/cacert.pem" ]]; then
+    src="${SRCTOP}/cacert.pem"
+  elif [[ -f "${SRCTOP}" ]]; then
+    # fallback: SRCTOP pode ser o próprio arquivo
+    src="${SRCTOP}"
+  else
+    # fallback final: procurar o arquivo no SRCTOP
+    src="$(find "${SRCTOP}" -maxdepth 2 -type f -name 'cacert.pem' 2>/dev/null | head -n1 || true)"
+  fi
+  [[ -n "$src" && -f "$src" ]] || { echo "ERRO: cacert.pem não encontrado em SRCTOP=${SRCTOP}" >&2; exit 1; }
+
+  install -m 0644 "$src" "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
+
+  # Hash symlinks (opcional; útil para softwares que usam hashes em /etc/ssl/certs)
+  if command -v c_rehash >/dev/null 2>&1; then
+    c_rehash "${DESTDIR}/etc/ssl/certs" >/dev/null 2>&1 || true
+  fi
+}
