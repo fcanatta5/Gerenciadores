@@ -1,0 +1,66 @@
+pkgname="gawk"
+pkgver="5.3.0"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://ftp.gnu.org/gnu/gawk/gawk-${pkgver}.tar.xz::gawk-${pkgver}.tar.xz"
+)
+
+sha256sums=(
+  "ca9c16d3d11d0ff8c69d79dc0b47267e1329a69b39b799895604ed447d3ca90b gawk-5.3.0.tar.xz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  # cross tools
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  rm -rf _build
+  mkdir -p _build
+  cd _build
+
+  # Triplet do builder
+  local build_triplet
+  if [[ -x ../build-aux/config.guess ]]; then
+    build_triplet="$(../build-aux/config.guess)"
+  elif [[ -x ../config.guess ]]; then
+    build_triplet="$(../config.guess)"
+  else
+    build_triplet="$(uname -m)-unknown-linux-gnu"
+  fi
+
+  ../configure \
+    --prefix=/usr \
+    --host="$TARGET" \
+    --build="$build_triplet" \
+    --disable-nls
+
+  make -j"$JOBS"
+}
+
+install() {
+  cd _build
+  make DESTDIR="$DESTDIR" install
+
+  # Compatibilidade: /usr/bin/awk -> gawk (muitos scripts chamam "awk")
+  ln -sf gawk "$DESTDIR/usr/bin/awk"
+
+  # Enxugar docs (opcional)
+  rm -rf "$DESTDIR/usr/share/info" "$DESTDIR/usr/share/man" 2>/dev/null || true
+}
