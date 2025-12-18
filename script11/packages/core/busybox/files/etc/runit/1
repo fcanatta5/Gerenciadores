@@ -1,0 +1,6 @@
+# 8) Runit skeleton (mínimo) – você pode mover isso para o pacote core/runit depois.
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/runit/1
+#!/bin/sh
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
