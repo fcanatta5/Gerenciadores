@@ -1,0 +1,32 @@
+# 1) DHCP script padrão (udhcpc) – essencial para “internet rápida” no sistema mínimo
+# Path:
+#   /var/lib/adm/packages/core/busybox/files/etc/udhcpc/default.script
+#!/bin/sh
+# BusyBox udhcpc default script
+# Interface: $interface, IP: $ip, Router: $router, DNS: $dns, Domain: $domain
+RESOLV_CONF="/etc/resolv.conf"
+
+case "$1" in
+  deconfig)
+    ip addr flush dev "$interface" 2>/dev/null || true
+    ;;
+  bound|renew)
+    ip addr flush dev "$interface" 2>/dev/null || true
+    ip addr add "$ip/$subnet" dev "$interface" 2>/dev/null || true
+    ip link set "$interface" up 2>/dev/null || true
+
+    # default route
+    if [ -n "$router" ]; then
+      ip route replace default via "$router" dev "$interface" 2>/dev/null || true
+    fi
+
+    # resolv.conf
+    : > "$RESOLV_CONF"
+    [ -n "$domain" ] && echo "search $domain" >> "$RESOLV_CONF"
+    for ns in $dns; do
+      echo "nameserver $ns" >> "$RESOLV_CONF"
+    done
+    ;;
+esac
+
+exit 0
