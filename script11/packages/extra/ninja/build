@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# extra/ninja/build
+# Ninja build system (bootstrap via Python: configure.py --bootstrap)
+
+set -Eeuo pipefail
+
+PKG_NAME="ninja"
+PKG_CAT="extra"
+PKG_VER="1.13.1"
+PKG_DESC="Ninja build system"
+PKG_URL="https://ninja-build.org/"
+PKG_LICENSE="Apache-2.0"
+
+PKG_DEPS=( "core/musl" "extra/python" )
+PKG_BDEPS=()
+
+SOURCES=(
+  "https://github.com/ninja-build/ninja/archive/refs/tags/v${PKG_VER}.tar.gz"
+)
+
+ALLOW_NO_CHECKSUM=1
+SHA256SUMS=(
+  # "<sha256-real-do-v${PKG_VER}.tar.gz>"
+)
+
+do_configure(){ :; }
+
+do_build(){
+  cd "${SRCTOP}"
+  command -v python3 >/dev/null 2>&1 || { echo "ERRO: python3 ausente (dep: extra/python)" >&2; exit 1; }
+
+  # Gera binário ninja "standalone" (sem precisar de ninja pré-existente)
+  python3 configure.py --bootstrap
+}
+
+do_install(){
+  mkdir -p "${DESTDIR}/usr/bin"
+  install -m 0755 "${SRCTOP}/ninja" "${DESTDIR}/usr/bin/ninja"
+}
