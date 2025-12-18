@@ -1,0 +1,55 @@
+pkgname="openssl"
+pkgver="3.4.1"
+pkgrel=1
+
+INSTALL_ROOT="sysroot"
+
+sources=(
+  "https://www.openssl.org/source/old/3.4/openssl-${pkgver}.tar.gz::openssl-${pkgver}.tar.gz"
+)
+
+sha256sums=(
+  "002a2d6b30b58bf4bea46c43bdd96365aaf8daa6c428782aa4feee06da197df3 openssl-3.4.1.tar.gz"
+)
+
+pre_build() {
+  : "${TARGET:=x86_64-linux-musl}"
+  : "${TOOLS:=/mnt/adm/rootfs/tools}"
+  : "${SYSROOT:=/mnt/adm/rootfs}"
+  : "${JOBS:=4}"
+
+  export PATH="$TOOLS/bin:$PATH"
+
+  export CC="$TOOLS/bin/${TARGET}-gcc"
+  export AR="$TOOLS/bin/${TARGET}-ar"
+  export RANLIB="$TOOLS/bin/${TARGET}-ranlib"
+  export STRIP="$TOOLS/bin/${TARGET}-strip"
+
+  export CFLAGS="${CFLAGS:- -O2 -pipe}"
+  export LDFLAGS="${LDFLAGS:-}"
+}
+
+build() {
+  # OpenSSL usa ./Configure. Para x86_64, "linux-x86_64" é o target comum.
+  # Instalamos em /usr e mantemos openssldir em /etc/ssl dentro do sysroot.
+  #
+  # "shared" cria .so (útil para curl/git). Se você quiser estático, remova.
+  ./Configure linux-x86_64 \
+    --prefix=/usr \
+    --openssldir=/etc/ssl \
+    --libdir=lib \
+    shared \
+    no-tests
+
+  make -j"$JOBS" CC="$CC" AR="$AR" RANLIB="$RANLIB"
+}
+
+install() {
+  make DESTDIR="$DESTDIR" install_sw
+
+  # Certifique-se que diretórios básicos existam
+  mkdir -p "$DESTDIR/etc/ssl" "$DESTDIR/etc/ssl/certs" "$DESTDIR/etc/ssl/private"
+  chmod 700 "$DESTDIR/etc/ssl/private" 2>/dev/null || true
+
+  rm -rf "$DESTDIR/usr/share/man" "$DESTDIR/usr/share/doc" 2>/dev/null || true
+}
