@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# core/binutils 2.45.1 - build script para adm
+
+NAME="binutils"
+CATEGORY="core"
+VERSION="2.45.1"
+
+# Source oficial
+URL="https://sourceware.org/pub/binutils/releases/binutils-2.45.1.tar.xz"
+
+# Preferência: SHA256. Se você não tiver SHA256, use MD5 (seu adm valida MD5 se SHA256 estiver vazio).
+# SHA256="..."
+MD5="ff59f8dc1431edfa54a257851bea74e7"
+
+# Dependências (ajuste conforme seu sistema base)
+# zlib é recomendado para recursos/formatos que usam libz
+DEPENDS="zlib"
+# texinfo é necessário apenas se você quiser gerar documentação (makeinfo). Se não tiver, pode remover e/ou desabilitar docs.
+BUILD_DEPENDS="texinfo"
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+# Opções “base segura” para um sistema rolling
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --sysconfdir=/etc
+  --localstatedir=/var
+  --disable-nls
+  --disable-werror
+  --disable-gprofng
+  --enable-plugins
+  --enable-new-dtags
+  --enable-relro
+  --with-system-zlib
+"
+
+pkg_configure() {
+  # Build fora da árvore (recomendado para binutils)
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  # O adm já prepara CC/CXX/CFLAGS/LDFLAGS conforme toolchain/linker configurados globalmente
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+
+  # Instala em DESTDIR (staging do adm)
+  make DESTDIR="$DESTDIR" install
+
+  # Boa prática: remover libtool .la (normalmente desnecessário e pode causar ruído/colisões)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  # Em geral não precisa de pós-instalação para binutils base
+  :
+}
