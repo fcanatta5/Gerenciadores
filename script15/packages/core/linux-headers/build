@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# core/linux-headers 6.18.1 - build script para adm
+# Instala somente headers (não compila o kernel)
+
+NAME="linux-headers"
+CATEGORY="core"
+VERSION="6.18.1"
+
+URL="https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.18.1.tar.xz"
+SHA256="d0a78bf3f0d12aaa10af3b5adcaed5bc767b5b78705e5ef885d5e930b72e25d5"
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+# Kernel headers: não é autotools/meson/cmake
+BUILD_SYSTEM="make"
+PREFIX="/usr"
+
+pkg_prepare() {
+  # Não queremos “lixo” de build nem config prévia
+  make mrproper
+}
+
+pkg_build() {
+  # Prepara headers exportáveis (sanitização faz parte do fluxo)
+  # (o próprio headers_install também sanitiza, mas isso mantém o passo explícito)
+  make headers
+}
+
+pkg_install() {
+  # Instala headers sanitizados no DESTDIR
+  # O kernel coloca em $INSTALL_HDR_PATH/include
+  make headers_install INSTALL_HDR_PATH="$DESTDIR$PREFIX"
+
+  # Boa prática: garantir que apenas headers fiquem no include
+  # (algumas versões deixam artefatos extras)
+  find "$DESTDIR$PREFIX/include" \
+    \( -name '.install' -o -name '..install.cmd' -o -name '.check' \) -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
