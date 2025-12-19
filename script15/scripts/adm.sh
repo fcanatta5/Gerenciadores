@@ -2,17 +2,17 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
-ADM_VERSION="1.0.0"
-# Sync para o repo sudo REPO_URL="git@seu-host:seu-repo.git" adm sync
+ADM_VERSION="2.0.0"
 
 # ---------------- Paths / Policy ----------------
 ADM_ROOT="${ADM_ROOT:-/usr/local/adm}"
-PKGROOT="${PKGROOT:-$ADM_ROOT/packages}"         # packages/<cat>/<prog>/build (ou buildfile arbitrário passado por caminho)
+PKGROOT="${PKGROOT:-$ADM_ROOT/packages}"         # /usr/local/adm/packages/<cat>/<prog>/{build,patch,files}
 REPO_URL="${REPO_URL:-}"                         # opcional: repo git remoto com packages/
-REPO_DIR="${REPO_DIR:-$PKGROOT}"                 # destino do sync
+REPO_DIR="${REPO_DIR:-$ADM_ROOT/repo}"           # destino do sync
 STATE="${STATE:-/var/lib/adm}"
 DB="$STATE/db"
 WORLD="$STATE/world"
+FILEMAP="$STATE/filemap"                         # arquivo->dono (pkg)
 CACHE="${CACHE:-/var/cache/adm}"
 SRC_CACHE="$CACHE/sources"
 BIN_CACHE="$CACHE/bins"
@@ -26,6 +26,7 @@ DRYRUN=0
 KEEP_WORK=0
 CLEAN_BEFORE=1
 RESUME=0
+FORCE_FILES=0
 
 # ---------------- UI ----------------
 if [[ -t 2 ]]; then
@@ -40,13 +41,23 @@ warn(){printf '%b\n' "${Y}[ ! ]${Z} $*"; }
 die(){ printf '%b\n' "${R}[ x ]${Z} $*"; exit 1; }
 step(){ hr; printf '%b\n' "${B}▶${Z} ${M}$*${Z}"; hr; }
 
+# Sem eval: executa comando com quoting correto
 run(){
   if [[ "$DRYRUN" == "1" ]]; then
     printf '%b\n' "${D}DRY-RUN:${Z} $*"
-  else
-    eval "$@"
+    return 0
   fi
+  "$@"
 }
+run_sh(){
+  # para casos onde você precisa de shell (ex.: pipes). Use com cuidado.
+  if [[ "$DRYRUN" == "1" ]]; then
+    printf '%b\n' "${D}DRY-RUN(sh):${Z} $*"
+    return 0
+  fi
+  bash -lc "$*"
+}
+
 confirm(){
   [[ "$ASSUME_YES" == "1" ]] && return 0
   read -r -p "$1 [s/N]: " a || true
@@ -58,7 +69,6 @@ need(){
   for c in "$@"; do have "$c" || m+=("$c"); done
   ((${#m[@]}==0)) || die "Comandos ausentes: ${m[*]}"
 }
-
 need_root(){ [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Execute como root."; }
 
 lock(){
@@ -67,7 +77,7 @@ lock(){
 }
 
 log_init(){
-  run "mkdir -p '$LOGDIR'"
+  run mkdir -p "$LOGDIR"
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
   LOG="$LOGDIR/adm-$ts.log"
   exec > >(tee -a "$LOG") 2> >(tee -a "$LOG" >&2)
@@ -82,8 +92,9 @@ onerr(){
 trap onerr ERR
 
 init_dirs(){
-  run "mkdir -p '$ADM_ROOT' '$PKGROOT' '$STATE' '$DB' '$CACHE' '$SRC_CACHE' '$BIN_CACHE' '$WORK' '$LOGDIR'"
-  run "touch '$WORLD'"
+  run mkdir -p "$ADM_ROOT" "$PKGROOT" "$STATE" "$DB" "$CACHE" "$SRC_CACHE" "$BIN_CACHE" "$WORK" "$LOGDIR"
+  run touch "$WORLD"
+  run touch "$FILEMAP"
 }
 
 # ---------------- DB ----------------
@@ -94,23 +105,23 @@ db_list(){ find "$DB" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null
 
 db_record(){
   local name="$1" ver="$2" cat="$3" deps="$4" bdeps="$5" buildfile="$6"
-  run "mkdir -p '$(dbp "$name")'"
-  run "printf '%s\n' '$name' > '$(dbp "$name")/name'"
-  run "printf '%s\n' '$ver'  > '$(dbp "$name")/version'"
-  run "printf '%s\n' '$cat'  > '$(dbp "$name")/category'"
-  run "printf '%s\n' '$deps' > '$(dbp "$name")/depends'"
-  run "printf '%s\n' '$bdeps' > '$(dbp "$name")/build_depends'"
-  run "printf '%s\n' '$buildfile' > '$(dbp "$name")/buildfile'"
-  run "date -Is > '$(dbp "$name")/installed_at'"
+  run mkdir -p "$(dbp "$name")"
+  printf '%s\n' "$name" >"$(dbp "$name")/name"
+  printf '%s\n' "$ver"  >"$(dbp "$name")/version"
+  printf '%s\n' "$cat"  >"$(dbp "$name")/category"
+  printf '%s\n' "$deps" >"$(dbp "$name")/depends"
+  printf '%s\n' "$bdeps" >"$(dbp "$name")/build_depends"
+  printf '%s\n' "$buildfile" >"$(dbp "$name")/buildfile"
+  date -Is >"$(dbp "$name")/installed_at"
 }
 db_set_manifest(){
   local name="$1" mf="$2"
   [[ -s "$mf" ]] || die "$name: manifest ausente/vazio (obrigatório)."
-  run "cp -f '$mf' '$(dbp "$name")/manifest'"
+  run cp -f "$mf" "$(dbp "$name")/manifest"
 }
 db_set_pkgref(){
   local name="$1" pkg="$2"
-  run "printf '%s\n' '$pkg' > '$(dbp "$name")/package'"
+  printf '%s\n' "$pkg" >"$(dbp "$name")/package"
 }
 
 rdeps(){
@@ -122,17 +133,66 @@ rdeps(){
 }
 
 world_list(){ sed '/^\s*$/d' "$WORLD" | sort -u; }
-world_add(){ run "printf '%s\n' '$1' >> '$WORLD'"; run "sort -u -o '$WORLD' '$WORLD'"; }
+world_add(){ printf '%s\n' "$1" >>"$WORLD"; sort -u -o "$WORLD" "$WORLD"; }
 world_del(){
   if [[ "$DRYRUN" == "1" ]]; then echo "DRY-RUN: removeria $1 do world"; return 0; fi
-  grep -vx -- "$1" "$WORLD" > "$WORLD.tmp" || true
+  grep -vx -- "$1" "$WORLD" >"$WORLD.tmp" || true
   mv -f "$WORLD.tmp" "$WORLD"
+}
+
+# ---------------- Layout helpers (NOVO) ----------------
+# Agora: /usr/local/adm/packages/<cat>/<prog>/build (arquivo)
+buildfile_path_catprog(){
+  local cat="$1" prog="$2"
+  echo "$PKGROOT/$cat/$prog/build"
+}
+patch_dir_catprog(){
+  local cat="$1" prog="$2"
+  echo "$PKGROOT/$cat/$prog/patch"
+}
+files_dir_catprog(){
+  local cat="$1" prog="$2"
+  echo "$PKGROOT/$cat/$prog/files"
+}
+
+# Dado um buildfile, patch/files são irmãos no mesmo diretório do programa
+patch_dir_for_bf(){
+  local bf="$1"
+  echo "$(cd "$(dirname "$bf")" && pwd)/patch"
+}
+files_dir_for_bf(){
+  local bf="$1"
+  echo "$(cd "$(dirname "$bf")" && pwd)/files"
+}
+
+# ---------------- Buildfile discovery ----------------
+# Procura por arquivos chamados "build" diretamente em <cat>/<prog>/build
+find_buildfiles(){
+  find "$PKGROOT" -type f -name build -perm -111 2>/dev/null
+}
+find_buildfile_by_name(){
+  local needle="$1"
+  local bf=""
+  while IFS= read -r p; do
+    # evita executar: só parseia a linha NAME= (simples)
+    local n
+    n="$(grep -E '^NAME=' "$p" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs echo -n)"
+    [[ "$n" == "$needle" ]] && { bf="$p"; break; }
+  done < <(find_buildfiles)
+  [[ -n "$bf" ]] && echo "$bf" || true
+}
+find_buildfile_by_catprog(){
+  local cat="$1" prog="$2"
+  local bf; bf="$(buildfile_path_catprog "$cat" "$prog")"
+  [[ -f "$bf" ]] && echo "$bf" || true
 }
 
 # ---------------- Buildfile parsing ----------------
 # Buildfile é um shell script com variáveis:
-# NAME CATEGORY VERSION URL SHA256 DEPENDS BUILD_DEPENDS
-# Exemplo (como seu build.txt): 1
+# NAME CATEGORY VERSION URL/URLS/GIT SHA256/MD5 DEPENDS BUILD_DEPENDS
+# Multi-source real suportado por:
+#   URLS=(...); SHA256S=(...); MD5S=(...)
+# Se SHA256S/MD5S ausentes, usa SHA256/MD5 como "espelho".
 load_buildfile(){
   local bf="$1"
   [[ -f "$bf" ]] || die "Buildfile não encontrado: $bf"
@@ -142,10 +202,13 @@ load_buildfile(){
     declare -F "$fn" >/dev/null 2>&1 && unset -f "$fn" || true
   done
 
+  # limpa vars antigas
   unset NAME CATEGORY VERSION URL SHA256 MD5 DEPENDS BUILD_DEPENDS
-  unset URLS GIT GIT_REF
+  unset URLS SHA256S MD5S
+  unset GIT GIT_REF GIT_COMMIT
   unset PREFIX BUILD_SYSTEM CONFIGURE_OPTS MAKE_OPTS INSTALL_OPTS MESON_OPTS CMAKE_OPTS
-  unset TOOLCHAIN LINKER CFLAGS CXXFLAGS LDFLAGS RUSTFLAGS GOFLAGS
+  unset TOOLCHAIN LINKER
+  unset ALLOW_FILE_CONFLICTS
 
   # defaults
   PREFIX="/usr"
@@ -159,21 +222,32 @@ load_buildfile(){
   CMAKE_OPTS=""
   TOOLCHAIN="auto"
   LINKER="auto"
+  ALLOW_FILE_CONFLICTS=0
 
+  # carrega
   # shellcheck disable=SC1090
   source "$bf"
 
   [[ -n "${NAME:-}" ]] || die "Buildfile sem NAME: $bf"
   [[ -n "${CATEGORY:-}" ]] || CATEGORY="misc"
   [[ -n "${VERSION:-}" ]] || die "$NAME: VERSION obrigatório"
-  # fontes podem ser: URL (tarball), URLS (multi), ou GIT (repo)
+
   if [[ -z "${URL:-}" && -z "${URLS:-}" && -z "${GIT:-}" ]]; then
-    die "$NAME: defina URL ou URLS ou GIT"
+    die "$NAME: defina URL ou URLS[] ou GIT"
   fi
-  [[ -n "${SHA256:-}" || -n "${MD5:-}" ]] || die "$NAME: defina SHA256 (preferido) ou MD5"
+
+  # checksums: para git, exigimos pin em commit
+  if [[ -n "${GIT:-}" ]]; then
+    [[ -n "${GIT_COMMIT:-}" ]] || die "$NAME: para GIT, defina GIT_COMMIT=<hash> (pin obrigatório)"
+  else
+    if [[ -z "${SHA256:-}" && -z "${MD5:-}" && -z "${SHA256S:-}" && -z "${MD5S:-}" ]]; then
+      die "$NAME: defina SHA256/MD5 ou SHA256S[]/MD5S[]"
+    fi
+  fi
 }
 
-# ---------------- Source fetch + verify (SHA256 then MD5 fallback) ----------------
+# ---------------- Checksums (corrigido) ----------------
+# Regra: tenta SHA256; se falhar e houver MD5, tenta MD5 antes de declarar falha.
 verify_file(){
   local f="$1" sha="${2:-}" md5="${3:-}"
   need sha256sum md5sum awk
@@ -181,8 +255,14 @@ verify_file(){
   if [[ -n "$sha" ]]; then
     local got; got="$(sha256sum "$f" | awk '{print $1}')"
     [[ "$got" == "$sha" ]] && return 0
+    # fallback MD5 se fornecido
+    if [[ -n "$md5" ]]; then
+      got="$(md5sum "$f" | awk '{print $1}')"
+      [[ "$got" == "$md5" ]] && return 0
+    fi
     return 1
   fi
+
   if [[ -n "$md5" ]]; then
     local got; got="$(md5sum "$f" | awk '{print $1}')"
     [[ "$got" == "$md5" ]] && return 0
@@ -191,6 +271,7 @@ verify_file(){
   return 1
 }
 
+# ---------------- Source fetch + cache ----------------
 fetch_url(){
   local url="$1" sha="${2:-}" md5="${3:-}"
   need curl
@@ -203,15 +284,15 @@ fetch_url(){
       echo "$out"; return 0
     fi
     warn "checksum falhou no cache, removendo e baixando novamente: $base"
-    run "rm -f '$out'"
+    run rm -f "$out"
   fi
 
-  step "$NAME: download $(basename "$out")"
-  run "curl -fL --retry 3 --retry-delay 2 -o '$out.part' '$url'"
-  run "mv -f '$out.part' '$out'"
+  step "$NAME: download $base"
+  run curl -fL --retry 3 --retry-delay 2 -o "$out.part" "$url"
+  run mv -f "$out.part" "$out"
 
   if ! verify_file "$out" "$sha" "$md5"; then
-    run "rm -f '$out'"
+    run rm -f "$out"
     die "$NAME: checksum falhou após download. Arquivo removido."
   fi
   ok "checksum ok: $base"
@@ -219,35 +300,34 @@ fetch_url(){
 }
 
 fetch_git(){
-  local giturl="$1" ref="${2:-}"
+  local giturl="$1" ref="${2:-}" commit="$3"
   need git
   local dir="$SRC_CACHE/git-${NAME}"
   if [[ -d "$dir/.git" ]]; then
     step "$NAME: git fetch"
-    run "(cd '$dir' && git fetch --all --prune)"
+    run_sh "cd '$dir' && git fetch --all --prune"
   else
     step "$NAME: git clone"
-    run "rm -rf '$dir'"
-    run "git clone --recursive '$giturl' '$dir'"
+    run rm -rf "$dir"
+    run git clone --recursive "$giturl" "$dir"
   fi
+
+  # checkout ref (opcional), mas sempre valida commit pin
   if [[ -n "$ref" ]]; then
     step "$NAME: git checkout $ref"
-    run "(cd '$dir' && git checkout -f '$ref')"
-    run "(cd '$dir' && git submodule update --init --recursive)"
+    run_sh "cd '$dir' && git checkout -f '$ref' && git submodule update --init --recursive"
   fi
+
+  step "$NAME: git pin $commit"
+  run_sh "cd '$dir' && git checkout -f '$commit' && git submodule update --init --recursive"
+  local head
+  head="$(run_sh "cd '$dir' && git rev-parse HEAD" || true)"
+  [[ "$head" == "$commit" ]] || die "$NAME: pin inválido (HEAD=$head esperado=$commit)"
+
   echo "$dir"
 }
 
-# ---------------- Patch + files directories ----------------
-patch_dir_for(){
-  local bf="$1"
-  # patch/ ao lado do buildfile
-  echo "$(cd "$(dirname "$bf")" && pwd)/patch"
-}
-files_dir_for(){
-  echo "$(cd "$(dirname "$1")" && pwd)/files"
-}
-
+# ---------------- Patch/files ----------------
 apply_patches(){
   local src="$1" pdir="$2"
   [[ -d "$pdir" ]] || { ok "$NAME: sem patches"; return 0; }
@@ -275,14 +355,15 @@ apply_patches(){
 extract_tarball(){
   local tarball="$1" outdir="$2"
   need tar
-  run "rm -rf '$outdir' && mkdir -p '$outdir'"
+  run rm -rf "$outdir"
+  run mkdir -p "$outdir"
   local top; top="$(tar -tf "$tarball" | head -n1 | cut -d/ -f1)"
-  run "tar -xf '$tarball' -C '$outdir'"
+  run tar -xf "$tarball" -C "$outdir"
   [[ -d "$outdir/$top" ]] || die "$NAME: falha ao extrair"
   echo "$outdir/$top"
 }
 
-# ---------------- Build helper: detect system ----------------
+# ---------------- Build helper ----------------
 detect_build_system(){
   [[ "$BUILD_SYSTEM" != "auto" ]] && { echo "$BUILD_SYSTEM"; return; }
   [[ -f Cargo.toml ]] && { echo "cargo"; return; }
@@ -293,9 +374,7 @@ detect_build_system(){
   [[ -f Makefile || -f GNUmakefile || -f makefile ]] && { echo "make"; return; }
   echo "make"
 }
-
 pick_toolchain(){
-  # compilers
   case "${TOOLCHAIN:-auto}" in
     auto)
       if have clang; then export CC="${CC:-clang}" CXX="${CXX:-clang++}"
@@ -306,7 +385,7 @@ pick_toolchain(){
     gcc)   export CC="${CC:-gcc}"   CXX="${CXX:-g++}" ;;
     *) die "$NAME: TOOLCHAIN inválido: $TOOLCHAIN" ;;
   esac
-  # linker
+
   case "${LINKER:-auto}" in
     auto) : ;;
     lld)  export LDFLAGS="${LDFLAGS:-} -fuse-ld=lld" ;;
@@ -314,27 +393,13 @@ pick_toolchain(){
     bfd)  export LDFLAGS="${LDFLAGS:-} -fuse-ld=bfd" ;;
     *) die "$NAME: LINKER inválido: $LINKER" ;;
   esac
+
   export CFLAGS="${CFLAGS:-} -O2"
   export CXXFLAGS="${CXXFLAGS:-} -O2"
   export LC_ALL=C LANG=C
 }
 
 # ---------------- Dependency resolution with cycle detection ----------------
-# DEPENDS and BUILD_DEPENDS accept: "pkgA pkgB" (name) OR "cat/prog"
-# We resolve by NAME where possible: buildfile discovery uses PKGROOT.
-find_buildfile_by_name(){
-  local needle="$1"
-  # prefer: .../<cat>/<prog>/build/build
-  local bf
-  bf="$(find "$PKGROOT" -type f -name build -path "*/build/build" 2>/dev/null | while read -r p; do
-    # quick parse NAME=
-    local n
-    n="$(grep -E '^NAME=' "$p" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" )"
-    [[ "$n" == "$needle" ]] && { echo "$p"; break; }
-  done | head -n1)"
-  [[ -n "$bf" ]] && echo "$bf" || true
-}
-
 declare -A VIS=()
 declare -a ORDER=()
 
@@ -346,18 +411,20 @@ dfs_resolve(){
   [[ "${VIS[$key]:-}" == "temp" ]] && die "Ciclo de dependências detectado envolvendo: $key"
   VIS["$key"]="temp"
 
-  local d
+  local d depbf
   for d in $BUILD_DEPENDS $DEPENDS; do
     [[ -z "$d" ]] && continue
-    local depbf=""
+    depbf=""
     if [[ "$d" == */* ]]; then
-      # cat/prog
       local c="${d%%/*}" p="${d##*/}"
-      depbf="$PKGROOT/$c/$p/build/build"
-      [[ -f "$depbf" ]] || die "$NAME: dependência $d sem buildfile: $depbf"
+      depbf="$(find_buildfile_by_catprog "$c" "$p")"
+      [[ -n "$depbf" ]] || die "$NAME: dependência $d sem buildfile: $(buildfile_path_catprog "$c" "$p")"
     else
       depbf="$(find_buildfile_by_name "$d")"
-      [[ -n "$depbf" ]] || { installed "$d" && continue; die "$NAME: dependência '$d' não instalada e sem buildfile."; }
+      if [[ -z "$depbf" ]]; then
+        installed "$d" && continue
+        die "$NAME: dependência '$d' não instalada e sem buildfile."
+      fi
     fi
     dfs_resolve "$depbf"
   done
@@ -365,22 +432,34 @@ dfs_resolve(){
   VIS["$key"]="perm"
   ORDER+=("$bf")
 }
-
 resolve_order(){
   VIS=(); ORDER=()
   dfs_resolve "$1"
   printf '%s\n' "${ORDER[@]}"
 }
 
-# ---------------- Packaging: tar.zst fallback tar.xz ----------------
-pkg_path(){
-  local name="$1" ver="$2"
-  echo "$BIN_CACHE/${name}-${ver}.tar"
+# ---------------- Resume checkpoints ----------------
+ckdir(){ echo "$STATE/checkpoints/$1"; }
+ck_has(){ [[ -f "$(ckdir "$1")/$2" ]]; }
+ck_set(){ run mkdir -p "$(ckdir "$1")"; printf '%s\n' "1" >"$(ckdir "$1")/$2"; }
+
+# ---------------- Packaging: tar.zst fallback tar.xz + meta ----------------
+write_meta(){
+  local stagedir="$1"
+  run mkdir -p "$stagedir/.adm"
+  cat >"$stagedir/.adm/meta" <<META
+NAME=$NAME
+VERSION=$VERSION
+CATEGORY=$CATEGORY
+DEPENDS=$DEPENDS
+BUILD_DEPENDS=$BUILD_DEPENDS
+META
 }
 pack_stage(){
   local stagedir="$1" name="$2" ver="$3"
   need tar
-  run "mkdir -p '$BIN_CACHE'"
+  run mkdir -p "$BIN_CACHE"
+
   local base="$BIN_CACHE/${name}-${ver}.tar"
   local out=""
   if have zstd; then
@@ -404,13 +483,60 @@ pack_stage(){
   echo "$out"
 }
 
+# ---------------- File ownership (corrigido) ----------------
+# FILEMAP: "path<TAB>pkg"
+file_owner(){
+  local p="$1"
+  awk -v p="$p" -F'\t' '$1==p{print $2; exit}' "$FILEMAP" 2>/dev/null || true
+}
+filemap_remove_pkg(){
+  local pkg="$1"
+  if [[ "$DRYRUN" == "1" ]]; then
+    echo "DRY-RUN: removeria entradas do filemap para $pkg"
+    return 0
+  fi
+  awk -F'\t' -v pkg="$pkg" '$2!=pkg{print}' "$FILEMAP" >"$FILEMAP.tmp" || true
+  mv -f "$FILEMAP.tmp" "$FILEMAP"
+}
+filemap_add_manifest(){
+  local pkg="$1" mf="$2"
+  if [[ "$DRYRUN" == "1" ]]; then
+    echo "DRY-RUN: adicionaria filemap para $pkg"
+    return 0
+  fi
+  # remove entradas antigas desse pkg e adiciona novas
+  filemap_remove_pkg "$pkg"
+  while IFS= read -r p; do
+    [[ -z "$p" || "$p" == "/" ]] && continue
+    printf '%s\t%s\n' "$p" "$pkg"
+  done <"$mf" >>"$FILEMAP"
+}
+
+check_collisions(){
+  local mf="$1"
+  local allow="${ALLOW_FILE_CONFLICTS:-0}"
+  [[ "$FORCE_FILES" == "1" ]] && return 0
+  [[ "$allow" == "1" ]] && return 0
+
+  local bad=0
+  while IFS= read -r p; do
+    [[ -z "$p" || "$p" == "/" ]] && continue
+    local owner; owner="$(file_owner "$p")"
+    if [[ -n "$owner" && "$owner" != "$NAME" ]]; then
+      warn "colisão: $p já pertence a $owner"
+      bad=1
+    fi
+  done <"$mf"
+
+  [[ "$bad" -eq 0 ]] || die "$NAME: colisões detectadas (use --force-files ou ALLOW_FILE_CONFLICTS=1 no buildfile)."
+}
+
 # ---------------- Install / Uninstall by manifest ----------------
 manifest_from_stage(){
   local stagedir="$1" out="$2"
   (cd "$stagedir" && find . -mindepth 1 -print | sed 's|^\./|/|' | sort) > "$out"
   [[ -s "$out" ]] || die "$NAME: manifest vazio"
 }
-
 commit_stage(){
   local stagedir="$1"
   need tar
@@ -422,16 +548,17 @@ commit_stage(){
   (cd "$stagedir" && tar -cpf - .) | (cd / && tar -xpf -)
   ok "commit OK"
 }
-
-remove_by_manifest(){
-  local mf="$1"
+remove_by_manifest_owned(){
+  local pkg="$1" mf="$2"
   [[ -f "$mf" ]] || die "manifest não encontrado: $mf"
   if [[ "$DRYRUN" == "1" ]]; then
-    echo "DRY-RUN: removeria $(wc -l < "$mf") paths"
+    echo "DRY-RUN: removeria paths de $pkg (somente os que pertencem ao pacote)"
     return 0
   fi
   tac "$mf" | while IFS= read -r p; do
     [[ -z "$p" || "$p" == "/" ]] && continue
+    local owner; owner="$(file_owner "$p")"
+    [[ "$owner" == "$pkg" ]] || continue
     if [[ -e "$p" || -L "$p" ]]; then
       rm -f -- "$p" 2>/dev/null || true
       rmdir --ignore-fail-on-non-empty -p -- "$(dirname "$p")" 2>/dev/null || true
@@ -439,205 +566,28 @@ remove_by_manifest(){
   done
 }
 
-# ---------------- Build pipeline per package ----------------
-build_one(){
-  local bf="$1"
-  load_buildfile "$bf"
-  pick_toolchain
+# ---------------- Install package file (bin cache) ----------------
+read_meta_from_pkg(){
+  local pkgfile="$1"
+  local tmp="$WORK/.adm-meta.$$"
+  run rm -rf "$tmp"
+  run mkdir -p "$tmp"
 
-  local pdir; pdir="$(patch_dir_for "$bf")"
-  local fdir; fdir="$(files_dir_for "$bf")"
-
-  local wdir="$WORK/${NAME}-${VERSION}"
-  local srcdir="$wdir/src"
-  local staged="$wdir/stage"
-  local mf="$wdir/manifest.txt"
-
-  # Limpar sempre antes de construir (default) — mas permitir retomada com --resume/--keep-work
-  if [[ "$CLEAN_BEFORE" == "1" && "$RESUME" == "0" ]]; then
-    step "$NAME: clean before build"
-    run "rm -rf '$wdir'"
-    ok "limpo"
-  fi
-  run "mkdir -p '$wdir' '$staged'"
-
-  # Obtém fontes
-  local source_root=""
-  if [[ -n "${GIT:-}" ]]; then
-    source_root="$(fetch_git "$GIT" "${GIT_REF:-}")"
-    # build a partir do clone (não extraí)
-    run "rm -rf '$srcdir' && cp -a '$source_root' '$srcdir'"
-  else
-    # URLS múltiplas: baixa todas; a primeira é “principal” para extrair; as demais ficam disponíveis em $wdir/distfiles
-    run "mkdir -p '$wdir/distfiles'"
-    local primary=""
-    if [[ -n "${URLS:-}" ]]; then
-      local u
-      for u in $URLS; do
-        local f; f="$(fetch_url "$u" "${SHA256:-}" "${MD5:-}")"
-        run "cp -f '$f' '$wdir/distfiles/'"
-        [[ -z "$primary" ]] && primary="$f"
-      done
-    else
-      primary="$(fetch_url "$URL" "${SHA256:-}" "${MD5:-}")"
-      run "cp -f '$primary' '$wdir/distfiles/'"
-    fi
-    source_root="$(extract_tarball "$primary" "$wdir/unpack")"
-    run "rm -rf '$srcdir' && cp -a '$source_root' '$srcdir'"
-  fi
-
-  apply_patches "$srcdir" "$pdir"
-
-  # hooks opcionais no buildfile:
-  declare -F pkg_env >/dev/null 2>&1 && (cd "$srcdir" && pkg_env) || true
-  declare -F pkg_prepare >/dev/null 2>&1 && (cd "$srcdir" && pkg_prepare) || true
-
-  # configure/build/install helper
-  local sys
-  sys="$(cd "$srcdir" && detect_build_system)"
-  step "$NAME: build-system=$sys"
-
-  # out-of-tree for meson/cmake
-  local bld="$wdir/builddir"
-
-  if declare -F pkg_configure >/dev/null 2>&1; then
-    (cd "$srcdir" && pkg_configure)
-  else
-    case "$sys" in
-      autotools)
-        if [[ ! -x "$srcdir/configure" && ( -f "$srcdir/configure.ac" || -f "$srcdir/configure.in" ) ]]; then
-          have autoreconf || die "$NAME: precisa autoreconf (autoconf/automake/libtool)"
-          (cd "$srcdir" && autoreconf -fi)
-        fi
-        (cd "$srcdir" && ./configure --prefix="$PREFIX" $CONFIGURE_OPTS)
-        ;;
-      meson)
-        need meson ninja
-        run "rm -rf '$bld' && mkdir -p '$bld'"
-        (cd "$srcdir" && meson setup "$bld" --prefix="$PREFIX" --buildtype=release $MESON_OPTS)
-        ;;
-      cmake)
-        need cmake
-        run "rm -rf '$bld' && mkdir -p '$bld'"
-        (cd "$srcdir" && cmake -S . -B "$bld" -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release $CMAKE_OPTS)
-        ;;
-      *)
-        : ;;
-    esac
-  fi
-
-  if declare -F pkg_build >/dev/null 2>&1; then
-    (cd "$srcdir" && pkg_build)
-  else
-    case "$sys" in
-      autotools|make) (cd "$srcdir" && make -j"$JOBS" $MAKE_OPTS) ;;
-      meson)          (cd "$srcdir" && ninja -C "$bld" -j"$JOBS") ;;
-      cmake)          (cd "$srcdir" && cmake --build "$bld" -- -j"$JOBS") ;;
-      cargo)          need cargo; (cd "$srcdir" && cargo build --release) ;;
-      go)             need go; (cd "$srcdir" && go build ./...) ;;
-      *)              (cd "$srcdir" && make -j"$JOBS" $MAKE_OPTS) ;;
-    esac
-  fi
-
-  # install to DESTDIR staging
-  step "$NAME: install DESTDIR"
-  run "rm -rf '$staged' && mkdir -p '$staged'"
-
-  if declare -F pkg_install >/dev/null 2>&1; then
-    (cd "$srcdir" && DESTDIR="$staged" pkg_install)
-  else
-    case "$sys" in
-      autotools|make) (cd "$srcdir" && make install DESTDIR="$staged" $INSTALL_OPTS) ;;
-      meson)          need ninja; (cd "$srcdir" && DESTDIR="$staged" ninja -C "$bld" install) ;;
-      cmake)
-        # cmake respects DESTDIR env
-        (cd "$srcdir" && DESTDIR="$staged" cmake --install "$bld")
-        ;;
-      cargo)
-        need cargo
-        (cd "$srcdir" && cargo install --path . --root "$staged$PREFIX" --locked --force)
-        ;;
-      go)
-        die "$NAME: go install default é ambíguo. Defina pkg_install no buildfile."
-        ;;
-      *)
-        (cd "$srcdir" && make install DESTDIR="$staged" $INSTALL_OPTS) ;;
-    esac
-  fi
-
-  # copy files/ into staging (always)
-  if [[ -d "$fdir" ]]; then
-    step "$NAME: apply files/"
-    (cd "$fdir" && tar -cpf - .) | (cd "$staged" && tar -xpf -)
-  fi
-
-  # manifest + package
-  step "$NAME: manifest + package"
-  manifest_from_stage "$staged" "$mf"
-  local pkg; pkg="$(pack_stage "$staged" "$NAME" "$VERSION")"
-
-  # upgrade inteligente: remove obsoletos (arquivos antigos que não estão mais no novo manifest)
-  if installed "$NAME"; then
-    local oldm="$(dbp "$NAME")/manifest"
-    if [[ -f "$oldm" && "$DRYRUN" == "0" ]]; then
-      step "$NAME: remove obsolete files"
-      comm -23 <(sort "$oldm") <(sort "$mf") | tac | while IFS= read -r p; do
-        [[ -z "$p" || "$p" == "/" ]] && continue
-        if [[ -e "$p" || -L "$p" ]]; then
-          rm -f -- "$p" 2>/dev/null || true
-          rmdir --ignore-fail-on-non-empty -p -- "$(dirname "$p")" 2>/dev/null || true
-        fi
-      done
-      ok "obsoletos removidos"
-    fi
-  fi
-
-  # commit install
-  commit_stage "$staged"
-
-  # DB record
-  db_record "$NAME" "$VERSION" "$CATEGORY" "$DEPENDS" "$BUILD_DEPENDS" "$bf"
-  db_set_manifest "$NAME" "$mf"
-  db_set_pkgref "$NAME" "$pkg"
-
-  ok "instalado/atualizado: $NAME-$VERSION"
-  if [[ "$KEEP_WORK" != "1" ]]; then
-    run "rm -rf '$wdir'"
-  else
-    warn "KEEP_WORK=1 mantendo workdir: $wdir"
-  fi
+  case "$pkgfile" in
+    *.zst) need zstd tar; run_sh "zstd -dc '$pkgfile' | tar -xpf - -C '$tmp' ./.adm/meta" ;;
+    *.xz)  need xz tar;  run_sh "xz -dc '$pkgfile' | tar -xpf - -C '$tmp' ./.adm/meta" ;;
+    *) die "Pacote desconhecido: $pkgfile" ;;
+  esac
+  [[ -f "$tmp/.adm/meta" ]] || die "Pacote sem meta: $pkgfile"
+  cat "$tmp/.adm/meta"
+  run rm -rf "$tmp"
 }
 
-# build with deps
-cmd_build(){
-  local arg="$1"
-  [[ -n "$arg" ]] || die "Uso: adm build <nome|buildfile>"
-
-  local bf=""
-  if [[ -f "$arg" ]]; then
-    bf="$arg"
-  else
-    # arg é NAME do pacote (ex.: zlib)
-    bf="$(find_buildfile_by_name "$arg")"
-    [[ -n "$bf" && -f "$bf" ]] || die "Não encontrei buildfile para '$arg' em $PKGROOT"
-  fi
-
-  mapfile -t order < <(resolve_order "$bf")
-  step "Build order"
-  for x in "${order[@]}"; do
-    load_buildfile "$x"
-    local mark=" "
-    installed "$NAME" && mark="✔️"
-    printf '%b\n' " - [$mark] $NAME ($CATEGORY) from $(dirname "$x")"
-  done
-  for x in "${order[@]}"; do build_one "$x"; done
-}
-
-# install from binary cache (package) with deps (must be installed deps already or build them)
 install_pkgfile(){
   local pkgfile="$1"
   [[ -f "$pkgfile" ]] || die "Pacote não encontrado: $pkgfile"
   need tar
+
   step "install package: $(basename "$pkgfile")"
   if [[ "$DRYRUN" == "1" ]]; then
     echo "DRY-RUN: extrairia pacote em /"
@@ -651,14 +601,313 @@ install_pkgfile(){
   ok "pacote instalado"
 }
 
-cmd_install(){
-  # instala um pacote já construído pelo nome (usa db/package)
-  local name="$1"
-  [[ -n "$name" ]] || die "Uso: adm install <nome>"
-  installed "$name" && { ok "$name já está instalado"; return 0; }
-  die "Sem metadados para instalar '$name'. Use 'build' ou construa primeiro para gerar pacote."
+# ---------------- Build pipeline per package ----------------
+build_one(){
+  local bf="$1"
+  load_buildfile "$bf"
+  pick_toolchain
+
+  local pdir; pdir="$(patch_dir_for_bf "$bf")"
+  local fdir; fdir="$(files_dir_for_bf "$bf")"
+
+  local wdir="$WORK/${NAME}-${VERSION}"
+  local srcdir="$wdir/src"
+  local staged="$wdir/stage"
+  local mf="$wdir/manifest.txt"
+
+  # Clean sempre antes (default); resume pula
+  if [[ "$CLEAN_BEFORE" == "1" && "$RESUME" == "0" ]]; then
+    step "$NAME: clean before build"
+    run rm -rf "$wdir"
+    ok "limpo"
+  fi
+  run mkdir -p "$wdir" "$staged"
+
+  # fontes
+  if [[ "$RESUME" == "1" && -d "$srcdir" ]]; then
+    ok "$NAME: resume (srcdir existente)"
+  else
+    run rm -rf "$srcdir"
+
+    if [[ -n "${GIT:-}" ]]; then
+      local gitroot
+      gitroot="$(fetch_git "$GIT" "${GIT_REF:-}" "$GIT_COMMIT")"
+      run cp -a "$gitroot" "$srcdir"
+    else
+      run mkdir -p "$wdir/distfiles"
+      local primary=""
+      # multi-source real (arrays) ou espelhos (URLS string)
+      if declare -p URLS >/dev/null 2>&1; then
+        # URLS é array
+        local i=0
+        while true; do
+          local u
+          u="$(eval "printf '%s' \"\${URLS[$i]:-}\"")"
+          [[ -n "$u" ]] || break
+          local sha md5
+          sha="$(eval "printf '%s' \"\${SHA256S[$i]:-${SHA256:-}}\"")"
+          md5="$(eval "printf '%s' \"\${MD5S[$i]:-${MD5:-}}\"")"
+          local f; f="$(fetch_url "$u" "$sha" "$md5")"
+          run cp -f "$f" "$wdir/distfiles/"
+          [[ -z "$primary" ]] && primary="$f"
+          i=$((i+1))
+        done
+      elif [[ -n "${URLS:-}" ]]; then
+        # URLS é lista (espelhos)
+        local u
+        for u in $URLS; do
+          local f; f="$(fetch_url "$u" "${SHA256:-}" "${MD5:-}")"
+          run cp -f "$f" "$wdir/distfiles/"
+          [[ -z "$primary" ]] && primary="$f"
+        done
+      else
+        primary="$(fetch_url "$URL" "${SHA256:-}" "${MD5:-}")"
+        run cp -f "$primary" "$wdir/distfiles/"
+      fi
+
+      [[ -n "$primary" ]] || die "$NAME: sem source principal para extrair"
+      local unpacked
+      unpacked="$(extract_tarball "$primary" "$wdir/unpack")"
+      run cp -a "$unpacked" "$srcdir"
+    fi
+  fi
+
+  # patch
+  if [[ "$RESUME" == "1" && ck_has "$NAME" "patched" ]]; then
+    ok "$NAME: resume (patched)"
+  else
+    apply_patches "$srcdir" "$pdir"
+    ck_set "$NAME" "patched"
+  fi
+
+  # hooks opcionais
+  declare -F pkg_env >/dev/null 2>&1 && (cd "$srcdir" && pkg_env) || true
+  declare -F pkg_prepare >/dev/null 2>&1 && (cd "$srcdir" && pkg_prepare) || true
+
+  # configure/build/install helper
+  local sys
+  sys="$(cd "$srcdir" && detect_build_system)"
+  step "$NAME: build-system=$sys"
+
+  local bld="$wdir/builddir"
+
+  if [[ "$RESUME" == "1" && ck_has "$NAME" "configured" ]]; then
+    ok "$NAME: resume (configured)"
+  else
+    if declare -F pkg_configure >/dev/null 2>&1; then
+      (cd "$srcdir" && pkg_configure)
+    else
+      case "$sys" in
+        autotools)
+          if [[ ! -x "$srcdir/configure" && ( -f "$srcdir/configure.ac" || -f "$srcdir/configure.in" ) ]]; then
+            have autoreconf || die "$NAME: precisa autoreconf (autoconf/automake/libtool)"
+            (cd "$srcdir" && autoreconf -fi)
+          fi
+          (cd "$srcdir" && ./configure --prefix="$PREFIX" $CONFIGURE_OPTS)
+          ;;
+        meson)
+          need meson ninja
+          run rm -rf "$bld"
+          run mkdir -p "$bld"
+          (cd "$srcdir" && meson setup "$bld" --prefix="$PREFIX" --buildtype=release $MESON_OPTS)
+          ;;
+        cmake)
+          need cmake
+          run rm -rf "$bld"
+          run mkdir -p "$bld"
+          (cd "$srcdir" && cmake -S . -B "$bld" -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release $CMAKE_OPTS)
+          ;;
+        *) : ;;
+      esac
+    fi
+    ck_set "$NAME" "configured"
+  fi
+
+  if [[ "$RESUME" == "1" && ck_has "$NAME" "built" ]]; then
+    ok "$NAME: resume (built)"
+  else
+    if declare -F pkg_build >/dev/null 2>&1; then
+      (cd "$srcdir" && pkg_build)
+    else
+      case "$sys" in
+        autotools|make) (cd "$srcdir" && make -j"$JOBS" $MAKE_OPTS) ;;
+        meson)          (cd "$srcdir" && ninja -C "$bld" -j"$JOBS") ;;
+        cmake)          (cd "$srcdir" && cmake --build "$bld" -- -j"$JOBS") ;;
+        cargo)          need cargo; (cd "$srcdir" && cargo build --release) ;;
+        go)             need go; (cd "$srcdir" && go build ./...) ;;
+        *)              (cd "$srcdir" && make -j"$JOBS" $MAKE_OPTS) ;;
+      esac
+    fi
+    ck_set "$NAME" "built"
+  fi
+
+  # install to DESTDIR staging
+  step "$NAME: install DESTDIR"
+  run rm -rf "$staged"
+  run mkdir -p "$staged"
+
+  if declare -F pkg_install >/dev/null 2>&1; then
+    (cd "$srcdir" && DESTDIR="$staged" pkg_install)
+  else
+    case "$sys" in
+      autotools|make) (cd "$srcdir" && make install DESTDIR="$staged" $INSTALL_OPTS) ;;
+      meson)          need ninja; (cd "$srcdir" && DESTDIR="$staged" ninja -C "$bld" install) ;;
+      cmake)          (cd "$srcdir" && DESTDIR="$staged" cmake --install "$bld") ;;
+      cargo)
+        need cargo
+        (cd "$srcdir" && cargo install --path . --root "$staged$PREFIX" --locked --force)
+        ;;
+      go)
+        die "$NAME: go install default é ambíguo. Defina pkg_install no buildfile."
+        ;;
+      *) (cd "$srcdir" && make install DESTDIR="$staged" $INSTALL_OPTS) ;;
+    esac
+  fi
+
+  # files/ sempre
+  if [[ -d "$fdir" ]]; then
+    step "$NAME: apply files/"
+    (cd "$fdir" && tar -cpf - .) | (cd "$staged" && tar -xpf -)
+  fi
+
+  # meta + manifest
+  write_meta "$staged"
+  manifest_from_stage "$staged" "$mf"
+
+  # colisões antes do commit
+  check_collisions "$mf"
+
+  # pacote binário
+  local pkg; pkg="$(pack_stage "$staged" "$NAME" "$VERSION")"
+
+  # upgrade inteligente: remover obsoletos SOMENTE se pertencem ao pacote
+  if installed "$NAME"; then
+    local oldm="$(dbp "$NAME")/manifest"
+    if [[ -f "$oldm" && "$DRYRUN" == "0" ]]; then
+      step "$NAME: remove obsolete files (owned)"
+      comm -23 <(sort "$oldm") <(sort "$mf") | tac | while IFS= read -r p; do
+        [[ -z "$p" || "$p" == "/" ]] && continue
+        local owner; owner="$(file_owner "$p")"
+        [[ "$owner" == "$NAME" ]] || continue
+        if [[ -e "$p" || -L "$p" ]]; then
+          rm -f -- "$p" 2>/dev/null || true
+          rmdir --ignore-fail-on-non-empty -p -- "$(dirname "$p")" 2>/dev/null || true
+        fi
+      done
+      ok "obsoletos removidos"
+    fi
+  fi
+
+  # commit
+  commit_stage "$staged"
+
+  # pós (corrigido: agora executa)
+  declare -F pkg_post >/dev/null 2>&1 && (cd "$srcdir" && pkg_post) || true
+
+  # DB + file ownership
+  db_record "$NAME" "$VERSION" "$CATEGORY" "$DEPENDS" "$BUILD_DEPENDS" "$bf"
+  db_set_manifest "$NAME" "$mf"
+  db_set_pkgref "$NAME" "$pkg"
+  filemap_add_manifest "$NAME" "$mf"
+
+  ok "instalado/atualizado: $NAME-$VERSION"
+  if [[ "$KEEP_WORK" != "1" ]]; then
+    run rm -rf "$wdir"
+  else
+    warn "KEEP_WORK=1 mantendo workdir: $wdir"
+  fi
 }
 
+# ---------------- Build command (corrigido) ----------------
+# Agora aceita:
+#   adm build zlib
+#   adm build cat prog
+#   adm build /caminho/para/build
+cmd_build(){
+  local a1="${1:-}" a2="${2:-}"
+  [[ -n "$a1" ]] || die "Uso: adm build <nome|cat prog|buildfile>"
+
+  local bf=""
+  if [[ -f "$a1" ]]; then
+    bf="$a1"
+  elif [[ -n "$a2" ]]; then
+    bf="$(find_buildfile_by_catprog "$a1" "$a2")"
+    [[ -n "$bf" ]] || die "Não encontrei buildfile para $a1/$a2 em $PKGROOT"
+  else
+    bf="$(find_buildfile_by_name "$a1")"
+    [[ -n "$bf" ]] || die "Não encontrei buildfile para '$a1' em $PKGROOT"
+  fi
+
+  mapfile -t order < <(resolve_order "$bf")
+  step "Build order"
+  for x in "${order[@]}"; do
+    load_buildfile "$x"
+    local mark=" "
+    installed "$NAME" && mark="✔️"
+    printf '%b\n' " - [$mark] $NAME ($CATEGORY) from $(dirname "$x")"
+  done
+  for x in "${order[@]}"; do build_one "$x"; done
+}
+
+# ---------------- Install (bin cache) com deps ----------------
+pkgfile_for(){
+  local name="$1"
+  if installed "$name"; then
+    # se já instalado, ainda pode ter package no DB
+    local p; p="$(db_get "$name" package)"
+    [[ -n "$p" && -f "$p" ]] && { echo "$p"; return 0; }
+  fi
+  # tenta achar no bin cache (pega o mais novo)
+  ls -1t "$BIN_CACHE/${name}-"*.tar.* 2>/dev/null | head -n1 || true
+}
+
+install_name(){
+  local name="$1"
+  [[ -n "$name" ]] || die "Uso: adm install <nome>"
+  if installed "$name"; then
+    ok "$name já está instalado"
+    return 0
+  fi
+
+  # precisa do buildfile para deps
+  local bf; bf="$(find_buildfile_by_name "$name")"
+  [[ -n "$bf" ]] || die "Sem buildfile para '$name' em $PKGROOT"
+
+  load_buildfile "$bf"
+
+  # instala deps primeiro
+  local d
+  for d in $DEPENDS; do
+    [[ -z "$d" ]] && continue
+    # dependências nomeadas: assume NAME
+    if [[ "$d" == */* ]]; then
+      local c="${d%%/*}" p="${d##*/}"
+      local dbf; dbf="$(find_buildfile_by_catprog "$c" "$p")"
+      [[ -n "$dbf" ]] || die "$NAME: dep $d sem buildfile"
+      load_buildfile "$dbf"
+      install_name "$NAME"
+    else
+      install_name "$d"
+    fi
+  done
+
+  # tenta instalar binário do cache; senão constrói
+  local pkg; pkg="$(pkgfile_for "$name")"
+  if [[ -n "$pkg" ]]; then
+    # para instalar via pacote, precisamos gerar manifest+filemap também:
+    # preferimos construir se não há DB ainda. Aqui fazemos build se não tiver DB.
+    warn "$name: pacote binário encontrado, mas DB/manifest são gerados no build. Construindo para registro correto."
+    cmd_build "$bf"
+  else
+    cmd_build "$bf"
+  fi
+}
+
+cmd_install(){
+  install_name "${1:-}"
+}
+
+# ---------------- Remove (corrigido com filemap) ----------------
 cmd_remove(){
   local name="$1" force="${2:-0}"
   [[ -n "$name" ]] || die "Uso: adm remove <nome> [--force]"
@@ -670,46 +919,42 @@ cmd_remove(){
   fi
 
   local mf="$(dbp "$name")/manifest"
-  confirm "Remover $name pelo manifest?" || die "Cancelado."
+  confirm "Remover $name pelo manifest (somente arquivos pertencentes ao pacote)?" || die "Cancelado."
   step "$name: uninstall"
-  remove_by_manifest "$mf"
-  run "rm -rf '$(dbp "$name")'"
+  remove_by_manifest_owned "$name" "$mf"
+  filemap_remove_pkg "$name"
+  run rm -rf "$(dbp "$name")"
   ok "removido: $name"
 }
 
+# ---------------- Upgrade/Rebuild ----------------
 cmd_upgrade(){
-  # upgrade inteligente: rebuild world
   step "upgrade (world)"
   mapfile -t wl < <(world_list)
   ((${#wl[@]})) || die "World vazio. Use: adm world add <nome>"
   local n
   for n in "${wl[@]}"; do
-    local bf
-    bf="$(find_buildfile_by_name "$n")"
-    [[ -n "$bf" ]] || die "World item '$n' sem buildfile em $PKGROOT"
-    cmd_build "$bf"
+    cmd_build "$n"
   done
   ok "upgrade concluído"
 }
-
 cmd_rebuild(){
-  # rebuild do sistema inteiro (world) — remove e build novamente em ordem
   step "rebuild world"
   confirm "Isso vai rebuildar TODO o world. Continuar?" || die "Cancelado."
   cmd_upgrade
 }
 
+# ---------------- Sync ----------------
 cmd_sync(){
-  [[ -n "$REPO_URL" ]] || die "Defina REPO_URL no ambiente ou /etc para usar sync."
-  need git
+  [[ -n "$REPO_URL" ]] || die "Defina REPO_URL para usar sync."
+  need git rsync
   step "sync repo"
   if [[ -d "$REPO_DIR/.git" ]]; then
-    run "(cd '$REPO_DIR' && git fetch --all --prune && git pull --rebase)"
+    run_sh "cd '$REPO_DIR' && git fetch --all --prune && git pull --rebase"
   else
-    run "rm -rf '$REPO_DIR'"
-    run "git clone '$REPO_URL' '$REPO_DIR'"
+    run rm -rf "$REPO_DIR"
+    run git clone "$REPO_URL" "$REPO_DIR"
   fi
-  # opcional: linkar packages do repo para PKGROOT
   if [[ -d "$REPO_DIR/packages" ]]; then
     step "sync packages -> $PKGROOT"
     if [[ "$DRYRUN" == "0" ]]; then
@@ -721,12 +966,14 @@ cmd_sync(){
   ok "sync ok"
 }
 
+# ---------------- Clean/Info/Search ----------------
 cmd_clean(){
   step "clean"
-  confirm "Limpar workdir ($WORK)?" && run "rm -rf '$WORK'/*" || true
-  confirm "Limpar cache de sources ($SRC_CACHE)?" && run "rm -rf '$SRC_CACHE'/*" || true
-  confirm "Limpar cache de bins ($BIN_CACHE)?" && run "rm -rf '$BIN_CACHE'/*" || true
-  confirm "Limpar logs ($LOGDIR)?" && run "find '$LOGDIR' -type f -name 'adm-*.log' -delete" || true
+  confirm "Limpar workdir ($WORK)?" && run_sh "rm -rf '$WORK'/*" || true
+  confirm "Limpar cache de sources ($SRC_CACHE)?" && run_sh "rm -rf '$SRC_CACHE'/*" || true
+  confirm "Limpar cache de bins ($BIN_CACHE)?" && run_sh "rm -rf '$BIN_CACHE'/*" || true
+  confirm "Limpar checkpoints ($STATE/checkpoints)?" && run_sh "rm -rf '$STATE/checkpoints'/*" || true
+  confirm "Limpar logs ($LOGDIR)?" && run_sh "find '$LOGDIR' -type f -name 'adm-*.log' -delete" || true
   ok "clean concluído"
 }
 
@@ -741,6 +988,7 @@ cmd_info(){
     echo "depends=$(db_get "$name" depends)"
     echo "build_depends=$(db_get "$name" build_depends)"
     echo "installed_at=$(db_get "$name" installed_at)"
+    echo "buildfile=$(db_get "$name" buildfile)"
     echo "manifest=$(dbp "$name")/manifest"
     echo "package=$(db_get "$name" package)"
   else
@@ -752,16 +1000,15 @@ cmd_search(){
   local q="${1:-}"
   [[ -n "$q" ]] || die "Uso: adm search <texto>"
   step "search: $q"
-  # busca em buildfiles no PKGROOT e sinaliza se instalado
-  find "$PKGROOT" -type f -name build -path "*/build/build" 2>/dev/null | while read -r bf; do
+  find_buildfiles | while IFS= read -r bf; do
     local n
-    n="$(grep -E '^NAME=' "$bf" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+    n="$(grep -E '^NAME=' "$bf" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs echo -n)"
     [[ -z "$n" ]] && continue
     if echo "$n" | grep -qi -- "$q"; then
       if installed "$n"; then
-        printf '%b\n' "[$(printf '✔️')] $n  (build: $bf)"
+        printf '%b\n' "[✔️] $n  (build: $bf)"
       else
-        printf '%b\n' "[ ] $n  (build: $bf)"
+        printf '%b\n' "[ ]  $n  (build: $bf)"
       fi
     fi
   done
@@ -771,35 +1018,35 @@ usage(){
   cat <<USAGE
 adm $ADM_VERSION
 
+Layout:
+  $PKGROOT/<categoria>/<programa>/{build,patch/,files/}
+
 Comandos:
-  build <buildfile>           Constrói (deps + ciclo) e instala (DESTDIR+manifest), empacota e cacheia
-  remove <nome> [--force]     Uninstall inteligente (manifest + reverse-deps)
-  info <nome>                Info (mostra [ ✔️] se instalado)
-  search <texto>             Procura programa (mostra [✔️] se instalado)
-  world add|del|list <nome>  Controla rolling (upgrade rebuilda world)
-  upgrade                    Rebuild inteligente do world
-  rebuild                    Rebuild do world (atalho)
-  sync                       Atualiza scripts do seu repo git (REPO_URL)
-  clean                      Limpeza total (work/cache/logs)
+  build <nome|cat prog|buildfile>   Constrói (deps+ciclo) e instala, empacota e cacheia
+  install <nome>                   Instala por nome (resolve deps; build para registrar corretamente)
+  remove <nome> [--force]          Uninstall inteligente (manifest+reverse-deps+filemap)
+  info <nome>                      Info (mostra [ ✔️] se instalado)
+  search <texto>                   Procura programa (mostra [✔️] se instalado)
+  world add|del|list <nome>        Controla rolling
+  upgrade                          Rebuild inteligente do world
+  rebuild                          Rebuild do world
+  sync                             Atualiza scripts do seu repo git (REPO_URL)
+  clean                            Limpeza total (work/cache/logs/checkpoints)
 
 Opções globais:
-  -y|--yes       assume sim
-  -n|--dry-run   simula tudo
-  --keep-work    mantém workdir
-  --resume       tenta retomar (não limpa workdir)
-  --no-clean     não limpa antes de construir
-  -j N           paralelismo
-
-Notas:
-- Patches: pasta patch/ ao lado do buildfile.
-- Files: pasta files/ ao lado do buildfile (copiado para staging sempre).
+  -y|--yes         assume sim
+  -n|--dry-run     simula tudo
+  --keep-work      mantém workdir
+  --resume         tenta retomar (não limpa workdir)
+  --no-clean       não limpa antes de construir
+  --force-files    ignora colisões de arquivos
+  -j N             paralelismo
 USAGE
 }
 
 main(){
   local cmd="${1:-help}"; shift || true
 
-  # opções
   while [[ "$cmd" == -* ]]; do
     case "$cmd" in
       -y|--yes) ASSUME_YES=1 ;;
@@ -807,6 +1054,7 @@ main(){
       --keep-work) KEEP_WORK=1 ;;
       --resume) RESUME=1 ;;
       --no-clean) CLEAN_BEFORE=0 ;;
+      --force-files) FORCE_FILES=1 ;;
       -j) JOBS="${1:-}"; shift ;;
       *) die "Opção desconhecida: $cmd" ;;
     esac
@@ -824,15 +1072,16 @@ main(){
   init_dirs
 
   case "$cmd" in
-    build)   cmd_build "${1:-}" ;;
+    build)    cmd_build "${1:-}" "${2:-}" ;;
+    install)  cmd_install "${1:-}" ;;
     remove)
       local name="${1:-}"; shift || true
       local force=0
       [[ "${1:-}" == "--force" ]] && force=1
       cmd_remove "$name" "$force"
       ;;
-    info)    cmd_info "${1:-}" ;;
-    search)  cmd_search "${1:-}" ;;
+    info)     cmd_info "${1:-}" ;;
+    search)   cmd_search "${1:-}" ;;
     world)
       local sub="${1:-list}" name="${2:-}"
       case "$sub" in
@@ -842,10 +1091,10 @@ main(){
         *) die "Uso: adm world [list|add|del] <nome>" ;;
       esac
       ;;
-    upgrade) cmd_upgrade ;;
-    rebuild) cmd_rebuild ;;
-    sync)    cmd_sync ;;
-    clean)   cmd_clean ;;
+    upgrade)  cmd_upgrade ;;
+    rebuild)  cmd_rebuild ;;
+    sync)     cmd_sync ;;
+    clean)    cmd_clean ;;
     *) die "Comando desconhecido: $cmd (use: adm help)" ;;
   esac
 }
