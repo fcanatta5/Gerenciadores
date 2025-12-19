@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# core/grub 2.12 - build script para adm
+# BIOS (pc) por padrão; se detectar headers EFI, tenta também build EFI x86_64.
+
+NAME="grub"
+CATEGORY="core"
+VERSION="2.12"
+
+URL="https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz"
+SHA256="f3c97391f7c4eaa677a78e090c7e97e6dc47b16f655f04683ebd37bef7fe0faa"
+
+# toolchain de build do grub
+DEPENDS=""
+BUILD_DEPENDS="flex bison gettext automake autoconf libtool texinfo"
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_COMMON_OPTS="
+  --prefix=$PREFIX
+  --sysconfdir=/etc
+  --disable-werror
+"
+
+pkg_prepare() {
+  make distclean >/dev/null 2>&1 || true
+}
+
+build_one() {
+  local bdir="$1"
+  shift
+  rm -rf "$bdir"
+  mkdir -p "$bdir"
+  cd "$bdir"
+  ../configure $CONFIGURE_COMMON_OPTS "$@"
+  make -j"${JOBS:-1}"
+  make DESTDIR="$DESTDIR" install
+  cd ..
+}
+
+pkg_build() {
+  : # build é feito no pkg_install (porque são 1 ou 2 builds)
+}
+
+pkg_install() {
+  # 1) Build BIOS/PC (sempre)
+  build_one build-pc --with-platform=pc
+
+  # 2) Build EFI x86_64 (opcional)
+  # Heurística simples: se houver headers/artefatos de EFI no sistema,
+  # tenta build EFI também. Se falhar, não aborta o pacote inteiro.
+  if [[ -d /usr/include/efi ]] || [[ -d /usr/include/gnu-efi ]] || command -v objcopy >/dev/null 2>&1; then
+    if ! build_one build-efi --with-platform=efi --target=x86_64 ; then
+      echo "grub: build EFI não disponível (faltando gnu-efi/headers). Prosseguindo apenas com build PC."
+    fi
+  fi
+
+  # limpeza de .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
