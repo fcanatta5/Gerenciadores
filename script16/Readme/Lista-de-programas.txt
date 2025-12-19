@@ -1,0 +1,7 @@
+1. core/base: musl, linux-headers, busybox, runit, ca-certificates
+
+2. core/toolchain: binutils, gcc, make, pkgconf, m4, bison, flex, awk/sed/grep/find/patch, perl, python, ninja, meson, cmake, git
+
+3. devel/lang: rust, nodejs (e talvez clang)
+
+4. graphics/wayland: wayland, protocols, libdrm, mesa, libxkbcommon, libinput, seatd, compositor
