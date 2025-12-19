@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# extra/libuv 1.51.0 - build script para adm
+# Bootstrap-friendly (autotools), sem depender de cmake.
+
+NAME="libuv"
+CATEGORY="extra"
+VERSION="1.51.0"
+
+# Usando tarball "refs/tags" do GitHub (com SHA256 conhecido)
+URL="https://github.com/libuv/libuv/archive/refs/tags/v1.51.0.tar.gz"
+SHA256="27e55cf7083913bfb6826ca78cde9de7647cded648d35f24163f2d31bb9f51cd"
+
+DEPENDS=""
+BUILD_DEPENDS="autoconf automake libtool"
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+"
+
+pkg_prepare() {
+  # BLFS usa autogen.sh; garante ./configure gerado
+  make distclean >/dev/null 2>&1 || true
+  sh autogen.sh
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() { :; }
