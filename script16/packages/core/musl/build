@@ -1,0 +1,51 @@
+# musl libc
+PKGNAME=musl
+PKGVER=1.2.5
+PKGREL=1
+SECTION=core
+ARCH=x86_64
+
+PKGDESC="musl libc (C standard library implementation)"
+PKGURL="https://musl.libc.org/"
+LICENSE="MIT"
+
+# Tarball oficial do release
+SOURCES="musl-1.2.5.tar.gz::https://musl.libc.org/releases/musl-1.2.5.tar.gz"
+SUMTYPE=sha256
+SUMS="a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4"
+
+DEPENDS=""
+BUILD_DEPENDS="make"
+
+# IMPORTANT:
+# Não use o default_build do adm-pkg para musl, porque ele passa flags
+# (--sysconfdir/--localstatedir) que não são apropriadas aqui.
+# Mantemos build/install minimalistas e determinísticos.
+
+pkg_prepare() {
+  cd "$WORKSRC" || exit 1
+  # Garantir árvore limpa (evita sujeira caso ADM_RESUME esteja ligado)
+  make clean >/dev/null 2>&1 || true
+}
+
+pkg_build() {
+  cd "$WORKSRC" || exit 1
+
+  # musl geralmente deve instalar libs em /lib em sistemas 64-bit minimalistas.
+  # Se você preferir /usr/lib, remova --syslibdir=/lib.
+  ./configure \
+    --prefix=/usr \
+    --syslibdir=/lib || exit 1
+
+  make -j"$ADM_JOBS" || exit 1
+}
+
+pkg_install() {
+  cd "$WORKSRC" || exit 1
+
+  # Staged install
+  make DESTDIR="$DESTDIR" install || exit 1
+
+  # Opcional: remover arquivos inúteis/temporários (musl costuma ser limpo)
+  true
+}
