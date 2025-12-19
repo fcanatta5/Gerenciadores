@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# extra/texinfo 7.2 - build script para adm
+
+NAME="texinfo"
+CATEGORY="extra"
+VERSION="7.2"
+
+URL="https://ftp.gnu.org/gnu/texinfo/texinfo-7.2.tar.xz"
+SHA256="0329d7788fbef113fa82cb80889ca197a344ce0df7646fe000974c5d714363a6"
+
+# texinfo/texi2any usa perl em runtime
+DEPENDS="perl"
+BUILD_DEPENDS="perl"
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+  --disable-nls
+"
+
+pkg_prepare() {
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() { :; }
