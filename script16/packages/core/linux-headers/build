@@ -1,0 +1,54 @@
+# linux-headers (kernel headers for userspace)
+PKGNAME=linux-headers
+PKGVER=6.18.1
+PKGREL=1
+SECTION=core
+ARCH=x86_64
+
+PKGDESC="Linux kernel UAPI headers for userspace"
+PKGURL="https://www.kernel.org/"
+LICENSE="GPL-2.0-only"
+
+SOURCES="linux-6.18.1.tar.xz::https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.1.tar.xz"
+SUMTYPE=sha256
+SUMS="d0a78bf3f0d12aaa10af3b5adcaed5bc767b5b78705e5ef885d5e930b72e25d5"
+
+# Em geral não há runtime deps.
+DEPENDS=""
+
+# headers_install compila pequenas ferramentas host (precisa de um compilador C e make).
+# Se seu sistema já tem cc no base, basta "make". Se você empacota toolchain, adicione aqui.
+BUILD_DEPENDS="make"
+
+pkg_prepare() {
+  # Garante árvore limpa antes de instalar headers (sem depender do estado do cache/build).
+  # "mrproper" é o target recomendado para limpar completamente a árvore.
+  cd "$WORKSRC" || exit 1
+  make mrproper || exit 1
+}
+
+pkg_install() {
+  cd "$WORKSRC" || exit 1
+
+  # Kernel usa ARCH=x86 para x86_64 também.
+  # headers_install instala apenas headers UAPI para userspace.
+  mkdir -p "$DESTDIR/usr" || exit 1
+
+  make \
+    ARCH=x86 \
+    INSTALL_HDR_PATH="$DESTDIR/usr" \
+    headers_install || exit 1
+
+  # Limpeza padrão pós headers_install (arquivos auxiliares gerados pelo Kbuild)
+  # Remove comandos/markers que não devem ir para o sistema.
+  find "$DESTDIR/usr/include" \
+    -name '.install' -o -name '..install.cmd' -o -name '.check*' -o -name '.tmp*' \
+    2>/dev/null | while IFS= read -r f; do
+      rm -f "$f" 2>/dev/null || true
+    done
+
+  # Algumas árvores podem deixar headers backup; mantém minimalista.
+  find "$DESTDIR/usr/include" -name '*~' -o -name '*.orig' -o -name '*.rej' 2>/dev/null | while IFS= read -r f; do
+    rm -f "$f" 2>/dev/null || true
+  done
+}
