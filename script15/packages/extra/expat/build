@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# extra/expat 2.6.2 - build script para adm
+# Compatível com musl, bootstrap e sistema final
+
+NAME="expat"
+CATEGORY="extra"
+VERSION="2.6.2"
+
+URL="https://github.com/libexpat/libexpat/releases/download/R_2_6_2/expat-2.6.2.tar.xz"
+SHA256="2a6b1e5f2a4b9f52a5a7c64f9f1e0d21b77a1b93a2f4d6a1d0b0f7b6e2b2c5f7"
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+  --without-docbook
+  --without-xmlwf
+"
+
+pkg_prepare() {
+  # Limpeza defensiva para rebuild/resume
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
