@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# core/m4 1.4.20 - build script para adm
+
+NAME="m4"
+CATEGORY="core"
+VERSION="1.4.20"
+
+URL="https://ftp.gnu.org/gnu/m4/m4-1.4.20.tar.xz"
+SHA256="bf35f0e68f94ab14d5a1744f2b8b36aef0b3a3d0b4f2de3f9d5fa1d3a8e8f0a6"
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+# m4 é usado cedo no sistema → evitar surpresas
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-nls
+  --disable-rpath
+"
+
+pkg_configure() {
+  # build fora da árvore é mais limpo
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove .la (boa prática em musl/minimal)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
