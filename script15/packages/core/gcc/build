@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# core/gcc 15.2.0 (x86_64 + musl) - build script para adm
+# Build nativo (host=target). Para cross, ajuste TARGET_TRIPLET/--target/--with-sysroot.
+
+NAME="gcc"
+CATEGORY="core"
+VERSION="15.2.0"
+
+URL="https://ftp.gnu.org/gnu/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz"
+SHA256="438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e"
+
+# GCC requer GMP/MPFR/MPC; ISL é opcional mas recomendado; zlib é usada em algumas features.
+# Ajuste nomes/categorias conforme seus pacotes reais (se você usa core/xyz, troque para "core/xyz").
+DEPENDS="gmp mpfr mpc isl zlib"
+# bison/flex/texinfo são tipicamente necessários na construção (dependendo do ambiente/targets).
+BUILD_DEPENDS="bison flex texinfo"
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+# Triplet musl (nativo). Se seu sistema usa outro, exporte TARGET_TRIPLET antes do build:
+#   TARGET_TRIPLET=x86_64-linux-musl sudo adm build gcc
+TARGET_TRIPLET="${TARGET_TRIPLET:-x86_64-linux-musl}"
+
+# Opções “base segura” para musl, nativo e sem multilib.
+# Observação: --disable-bootstrap reduz tempo e complexidade (você pode remover se quiser bootstrap).
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --libdir=$PREFIX/lib
+  --libexecdir=$PREFIX/lib
+  --with-native-system-header-dir=$PREFIX/include
+  --build=$TARGET_TRIPLET
+  --host=$TARGET_TRIPLET
+  --disable-multilib
+  --disable-nls
+  --disable-werror
+  --disable-bootstrap
+  --enable-languages=c,c++
+  --enable-shared
+  --enable-threads=posix
+  --enable-__cxa_atexit
+  --enable-default-pie
+  --enable-default-ssp
+  --with-system-zlib
+"
+
+pkg_prepare() {
+  # Garante árvore limpa e sem resíduos de build anterior
+  rm -rf build
+}
+
+pkg_configure() {
+  # GCC deve ser construído fora da árvore
+  mkdir -p build
+  cd build
+
+  # Importante: GCC recomenda configurar no builddir
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Boa prática: remover libtool .la (reduz ruído e riscos de colisão)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
