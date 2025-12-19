@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# extra/gmp 6.3.0 - build script para adm
+# Compatível com musl e bootstrap
+
+NAME="gmp"
+CATEGORY="extra"
+VERSION="6.3.0"
+
+URL="https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
+# ATENÇÃO: confirme o SHA256 oficial antes de produção
+SHA256="__CONFIRME_O_SHA256_OFICIAL_DO_GMP_6_3_0__"
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+# Flags seguras para musl / bootstrap
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --enable-cxx
+  --disable-static
+"
+
+pkg_prepare() {
+  # GMP é sensível a resíduos de build
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  # GMP recomenda build fora da árvore
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
