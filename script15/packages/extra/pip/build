@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# extra/pip - pip 25.3 (instala via wheel no distfiles do adm)
+
+NAME="pip"
+CATEGORY="extra"
+VERSION="25.3"
+
+URL="https://files.pythonhosted.org/packages/py3/p/pip/pip-25.3-py3-none-any.whl"
+SHA256="9655943313a94722b7774661c21049070f6bbb0a1516bf02f7c8d5d9201514cd"
+
+PREFIX="/usr"
+BUILD_SYSTEM="make"
+
+DEPENDS="extra/python"
+
+pkg_install() {
+  # o adm copia o download para: $wdir/distfiles/
+  # e executa pkg_install dentro de: $wdir/src
+  local wheel="../distfiles/$(basename "${URL%%\?*}")"
+  [[ -f "$wheel" ]] || die "$NAME: wheel não encontrado em $wheel (distfiles)"
+
+  # purelib do python (ex: /usr/lib/python3.13/site-packages)
+  local purelib
+  purelib="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+
+  mkdir -p "$DESTDIR$purelib"
+
+  # wheel é zip: extrai direto no site-packages do DESTDIR
+  python3 - <<PY
+import os, zipfile
+wheel = os.environ["WHEEL"]
+destdir = os.environ["DESTDIR"]
+purelib = os.environ["PURELIB"]
+
+out = os.path.join(destdir, purelib.lstrip("/"))
+os.makedirs(out, exist_ok=True)
+
+with zipfile.ZipFile(wheel) as z:
+    z.extractall(out)
+PY
+}
+
+pkg_env() {
+  export WHEEL="../distfiles/$(basename "${URL%%\?*}")"
+  export PURELIB="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+}
+
+pkg_post() {
+  install -d "$DESTDIR$PREFIX/bin"
+
+  cat >"$DESTDIR$PREFIX/bin/pip" <<'SH'
+#!/usr/bin/env sh
+exec python3 -m pip "$@"
+SH
+  chmod 0755 "$DESTDIR$PREFIX/bin/pip"
+
+  ln -sf pip "$DESTDIR$PREFIX/bin/pip3"
+  pyver="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+  ln -sf pip "$DESTDIR$PREFIX/bin/pip${pyver}"
+}
