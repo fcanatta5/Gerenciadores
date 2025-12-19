@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# core/busybox 1.36.1 - build script para adm
+# Bootstrap-safe, musl-friendly, completo
+
+NAME="busybox"
+CATEGORY="core"
+VERSION="1.36.1"
+
+URL="https://busybox.net/downloads/busybox-1.36.1.tar.bz2"
+# CONFIRME o SHA256 oficial antes de produção
+SHA256="__CONFIRME_O_SHA256_OFICIAL_DO_BUSYBOX_1_36_1__"
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="make"
+
+# ======================================================================
+# NOTA IMPORTANTE
+# ----------------------------------------------------------------------
+# - Este script gera um BusyBox COMPLETO
+# - Static = ON por padrão (ideal para bootstrap)
+# - Após o sistema estar nativo, você pode rebuildar com dynamic libc
+# ======================================================================
+
+pkg_prepare() {
+  # BusyBox exige árvore limpa
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  # Configuração base
+  make defconfig
+
+  # Ajustes essenciais para bootstrap
+  scripts/config -e CONFIG_STATIC
+  scripts/config -e CONFIG_FEATURE_SH_IS_ASH
+  scripts/config -e CONFIG_ASH
+  scripts/config -e CONFIG_FEATURE_EDITING
+  scripts/config -e CONFIG_FEATURE_EDITING_HISTORY
+  scripts/config -e CONFIG_FEATURE_TAB_COMPLETION
+
+  # Suporte mínimo a mount/chroot
+  scripts/config -e CONFIG_MOUNT
+  scripts/config -e CONFIG_UMOUNT
+  scripts/config -e CONFIG_FEATURE_MOUNT_VERBOSE
+  scripts/config -e CONFIG_CHROOT
+  scripts/config -e CONFIG_PIVOT_ROOT
+
+  # Utilitários essenciais
+  scripts/config -e CONFIG_LS
+  scripts/config -e CONFIG_CP
+  scripts/config -e CONFIG_MV
+  scripts/config -e CONFIG_RM
+  scripts/config -e CONFIG_MKDIR
+  scripts/config -e CONFIG_RMDIR
+  scripts/config -e CONFIG_INSTALL
+  scripts/config -e CONFIG_FIND
+  scripts/config -e CONFIG_XARGS
+  scripts/config -e CONFIG_GREP
+  scripts/config -e CONFIG_SED
+  scripts/config -e CONFIG_AWK
+  scripts/config -e CONFIG_TAR
+  scripts/config -e CONFIG_GZIP
+  scripts/config -e CONFIG_BZIP2
+  scripts/config -e CONFIG_XZ
+  scripts/config -e CONFIG_UNAME
+  scripts/config -e CONFIG_WHICH
+
+  # Processos e sistema
+  scripts/config -e CONFIG_PS
+  scripts/config -e CONFIG_TOP
+  scripts/config -e CONFIG_FREE
+  scripts/config -e CONFIG_UPTIME
+  scripts/config -e CONFIG_KILL
+  scripts/config -e CONFIG_KILLALL
+
+  # Filesystems e dispositivos
+  scripts/config -e CONFIG_DF
+  scripts/config -e CONFIG_DU
+  scripts/config -e CONFIG_MOUNTPOINT
+  scripts/config -e CONFIG_LOSETUP
+
+  # Networking básico (útil depois)
+  scripts/config -e CONFIG_IFCONFIG
+  scripts/config -e CONFIG_IP
+  scripts/config -e CONFIG_PING
+  scripts/config -e CONFIG_WGET
+
+  # Build determinístico
+  scripts/config -e CONFIG_FEATURE_INSTALLER
+
+  # Garante consistência
+  yes "" | make oldconfig
+}
+
+pkg_build() {
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  make DESTDIR="$DESTDIR" CONFIG_PREFIX="$PREFIX" install
+
+  # Garantir /bin/sh
+  mkdir -p "$DESTDIR/bin"
+  ln -sf busybox "$DESTDIR/bin/sh"
+}
+
+pkg_post() {
+  :
+}
