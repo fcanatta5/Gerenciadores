@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# extra/nghttp2 1.68.0 - build script para adm
+
+NAME="nghttp2"
+CATEGORY="extra"
+VERSION="1.68.0"
+
+URL="https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz"
+SHA256="5511d3128850e01b5b26ec92bf39df15381c767a63441438b25ad6235def902c"
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+  --disable-examples
+  --disable-python-bindings
+"
+
+pkg_prepare() {
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() { :; }
