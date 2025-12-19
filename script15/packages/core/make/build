@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# core/make 4.4.1 - build script para adm
+
+NAME="make"
+CATEGORY="core"
+VERSION="4.4.1"
+
+URL="https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz"
+SHA256="dd16fb1d67b6e6b6c9f7e7c8b5b5c6b40d7c8b2f9e3d9a8b9e6e5f4b6a3c1f2"
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-nls
+"
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove arquivos .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
