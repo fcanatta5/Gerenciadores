@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# extra/ncurses 6.5 - build script para adm
+
+NAME="ncurses"
+CATEGORY="extra"
+VERSION="6.5"
+
+URL="https://ftp.gnu.org/gnu/ncurses/ncurses-6.5.tar.gz"
+SHA256="136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6"
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+# widec + shared + pkg-config + terminfo em /usr/share/terminfo
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --mandir=$PREFIX/share/man
+  --with-shared
+  --without-static
+  --without-debug
+  --without-ada
+  --enable-widec
+  --enable-pc-files
+  --with-pkg-config-libdir=$PREFIX/lib/pkgconfig
+  --with-termlib
+  --with-terminfo-dirs=$PREFIX/share/terminfo
+  --with-default-terminfo-dir=$PREFIX/share/terminfo
+"
+
+pkg_prepare() {
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Symlinks compatíveis (muitos pacotes esperam libncurses.so e libtinfo.so)
+  # Em widec, as libs reais são *w (ex.: libncursesw.so).
+  ln -sf libncursesw.so "$DESTDIR$PREFIX/lib/libncurses.so" 2>/dev/null || true
+  ln -sf libtinfow.so   "$DESTDIR$PREFIX/lib/libtinfo.so"   2>/dev/null || true
+
+  # Remove .la
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() { :; }
