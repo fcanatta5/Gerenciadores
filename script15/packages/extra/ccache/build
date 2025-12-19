@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# extra/ccache 4.12.2 - build script para adm
+# Build via CMake (ccache >= 4.12 requer CMake >= 3.18)
+
+NAME="ccache"
+CATEGORY="extra"
+VERSION="4.12.2"
+
+URL="https://github.com/ccache/ccache/releases/download/v4.12.2/ccache-4.12.2.tar.gz"
+SHA256="2a087efb66b62d4c66d4eb276748bbfa797ff3bde20adf44c53e5a8b9f3679af"
+
+# Dependências típicas (usadas por várias distros/receitas):
+# - zstd: compressão do cache
+# - fmt/xxhash: libs usadas internamente pelo ccache moderno
+DEPENDS="zstd fmt xxhash"
+BUILD_DEPENDS="cmake"
+
+PREFIX="/usr"
+BUILD_SYSTEM="cmake"
+
+# Opções CMake conservadoras e “bootstrap-friendly”
+CMAKE_OPTS="
+  -DCMAKE_INSTALL_PREFIX=$PREFIX
+  -DCMAKE_BUILD_TYPE=Release
+  -DENABLE_TESTING=OFF
+  -DCCACHE_DEV_MODE=OFF
+"
+
+pkg_prepare() {
+  # Limpeza defensiva para rebuild/resume
+  rm -rf build
+}
+
+pkg_configure() {
+  mkdir -p build
+  cd build
+  cmake .. $CMAKE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+}
+
+pkg_post() { :; }
