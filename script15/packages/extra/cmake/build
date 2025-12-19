@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# extra/cmake 4.2.1 - build script para adm
+# Build via ./bootstrap + make, com fallback automático para libs bundled.
+
+NAME="cmake"
+CATEGORY="extra"
+VERSION="4.2.1"
+
+# Fonte oficial (também referenciada pelo BLFS)
+URL="https://cmake.org/files/v4.2/cmake-4.2.1.tar.gz"
+SHA256="414aacfac54ba0e78e64a018720b64ed6bfca14b587047b8b3489f407a14a070"
+
+# Recomendadas (BLFS): curl, libarchive, libuv, nghttp2
+# Mas o script faz fallback para bundled se não estiverem disponíveis.
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="make"
+
+have_pkg() {
+  # retorna 0 se o pacote existe no pkg-config
+  command -v pkg-config >/dev/null 2>&1 && pkg-config --exists "$1"
+}
+
+pkg_prepare() {
+  # evita /usr/lib64 em algumas detecções/installs geradas
+  sed -i '/"lib64"/s/64//' Modules/GNUInstallDirs.cmake || true
+
+  # limpeza defensiva para rebuild/resume
+  rm -rf build
+  make clean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  # Opções base (BLFS)
+  BOOTSTRAP_OPTS="
+    --prefix=$PREFIX
+    --mandir=/share/man
+    --docdir=/share/doc/cmake-$VERSION
+    --no-system-jsoncpp
+    --no-system-cppdap
+    --no-system-librhash
+  "
+
+  # Preferir usar libs do sistema, mas cair para bundled se necessário.
+  USE_SYSTEM_LIBS=0
+
+  # Se houver pkg-config, tentamos validar libs recomendadas.
+  if command -v pkg-config >/dev/null 2>&1; then
+    # nomes comuns de .pc
+    if have_pkg libcurl && have_pkg libarchive && have_pkg libuv && have_pkg libnghttp2; then
+      USE_SYSTEM_LIBS=1
+    fi
+  fi
+
+  if [[ "$USE_SYSTEM_LIBS" -eq 1 ]]; then
+    BOOTSTRAP_OPTS="$BOOTSTRAP_OPTS --system-libs"
+  else
+    # Fallback conforme BLFS: usa libs bundled para o que estiver faltando
+    # (ou tudo, se não temos como detectar)
+    BOOTSTRAP_OPTS="$BOOTSTRAP_OPTS \
+      --no-system-curl \
+      --no-system-libarchive \
+      --no-system-libuv \
+      --no-system-nghttp2"
+  fi
+
+  # Alguns boots preferem explicitar paralelismo aqui
+  if [[ -n "${JOBS:-}" ]]; then
+    BOOTSTRAP_OPTS="$BOOTSTRAP_OPTS --parallel=$JOBS"
+  fi
+
+  ./bootstrap $BOOTSTRAP_OPTS
+}
+
+pkg_build() {
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  make DESTDIR="$DESTDIR" install
+}
+
+    pkg_post() { :; }
