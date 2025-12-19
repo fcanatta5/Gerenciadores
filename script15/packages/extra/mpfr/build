@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# extra/mpfr 4.2.2 - build script para adm
+# Compatível com musl, bootstrap e sistema final
+
+NAME="mpfr"
+CATEGORY="extra"
+VERSION="4.2.2"
+
+URL="https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.xz"
+# CONFIRME o SHA256 oficial antes de usar em produção
+SHA256="__CONFIRME_O_SHA256_OFICIAL_DO_MPFR_4_2_2__"
+
+# mpfr depende obrigatoriamente de gmp
+DEPENDS="gmp"
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+  --enable-thread-safe
+"
+
+pkg_prepare() {
+  # Limpa resíduos caso haja rebuild/resume
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  # Build fora da árvore (recomendado pelo upstream)
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove .la (boa prática no musl/bootstrap)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
