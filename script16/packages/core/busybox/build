@@ -1,0 +1,58 @@
+# busybox
+PKGNAME=busybox
+PKGVER=1.36.1
+PKGREL=1
+SECTION=core
+ARCH=x86_64
+
+PKGDESC="BusyBox: multi-call binary providing minimal UNIX utilities"
+PKGURL="https://busybox.net/"
+LICENSE="GPL-2.0-only"
+
+SOURCES="busybox-1.36.1.tar.bz2::https://busybox.net/downloads/busybox-1.36.1.tar.bz2"
+SUMTYPE=sha256
+SUMS="b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314"
+
+# BusyBox em si não precisa de deps de runtime obrigatórias (fora do kernel + libc).
+DEPENDS=""
+
+# Build: make + um compilador C (cc) + linker já existentes no sistema.
+BUILD_DEPENDS="make"
+
+pkg_prepare() {
+  cd "$WORKSRC" || exit 1
+
+  # Sempre começar limpo (importante com ADM_RESUME=1)
+  make distclean >/dev/null 2>&1 || true
+
+  # Config padrão upstream (confiável para bootstrapping)
+  make defconfig || exit 1
+
+  # Ajustes mínimos para sistema musl:
+  # - Nada “extra” por padrão.
+  # Se você quiser instalar links “-s” (symlinks) e evitar hardlinks, isso costuma ser mais portável:
+  # (normalmente já é default, mas deixamos explícito para evitar surpresa)
+  if grep -q '^# CONFIG_INSTALL_APPLET_SYMLINKS is not set' .config 2>/dev/null; then
+    sed -i 's/^# CONFIG_INSTALL_APPLET_SYMLINKS is not set/CONFIG_INSTALL_APPLET_SYMLINKS=y/' .config || exit 1
+  fi
+}
+
+pkg_build() {
+  cd "$WORKSRC" || exit 1
+
+  # Respeitar toolchain do ambiente (musl) e paralelismo do adm-pkg
+  make -j"$ADM_JOBS" || exit 1
+}
+
+pkg_install() {
+  cd "$WORKSRC" || exit 1
+
+  # Instala binário + links de applets dentro do staging
+  # BusyBox usa CONFIG_PREFIX para DESTDIR-like install.
+  make CONFIG_PREFIX="$DESTDIR" install || exit 1
+
+  # Política comum em sistemas “minimalistas”:
+  # se você quiser garantir que o binário principal esteja em /bin também,
+  # você pode criar um symlink em files/ depois (recomendado) ao invés de aqui.
+  true
+}
