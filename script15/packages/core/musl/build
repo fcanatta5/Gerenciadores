@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# core/musl 1.2.5 - build script para adm (musl libc)
+# Inclui patches de segurança para CVE-2025-26519 via patch/ (aplicação automática do adm)
+
+NAME="musl"
+CATEGORY="core"
+VERSION="1.2.5"
+
+# Upstream release tarball
+URL="https://musl.libc.org/releases/musl-1.2.5.tar.gz"  # anunciado na lista musl 1
+
+# SHA256 do tarball (mesmo conteúdo do orig.tar.gz usado por distros)
+SHA256="a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4"  # 2
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+# musl é build system próprio (configure + make)
+BUILD_SYSTEM="make"
+PREFIX="/usr"
+
+# Nota: syslibdir define onde vão libc/ld-musl-*.so.1
+# Para sistema musl “padrão”, /lib é o mais comum.
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --syslibdir=/lib
+"
+
+pkg_prepare() {
+  # garante árvore limpa
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  ./configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  make DESTDIR="$DESTDIR" install
+}
+
+pkg_post() {
+  :
+}
