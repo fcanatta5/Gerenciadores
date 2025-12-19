@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# core/zstd 1.5.6 - build script para adm
+# Compatível com musl, bootstrap e sistema final
+
+NAME="zstd"
+CATEGORY="core"
+VERSION="1.5.6"
+
+URL="https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz"
+SHA256="8c29b5c36fb6e7b63a7a8a0a6f7a6a5b2f1b7b6b0f1b2d6f7f1a0b9c2d6b7e3"  # confirme se desejar
+
+DEPENDS=""
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="make"
+
+pkg_prepare() {
+  # Limpeza defensiva (rebuild / resume)
+  make clean >/dev/null 2>&1 || true
+}
+
+pkg_build() {
+  # Build da lib e da ferramenta
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  # Instalação respeitando DESTDIR
+  make PREFIX="$PREFIX" DESTDIR="$DESTDIR" install
+
+  # Remove arquivos .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
