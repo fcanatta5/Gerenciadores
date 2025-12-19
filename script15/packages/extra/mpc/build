@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# extra/mpc 1.3.1 - build script para adm
+# Compatível com musl, bootstrap e sistema final
+
+NAME="mpc"
+CATEGORY="extra"
+VERSION="1.3.1"
+
+URL="https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz"
+# CONFIRME o SHA256 oficial antes de usar em produção
+SHA256="__CONFIRME_O_SHA256_OFICIAL_DO_MPC_1_3_1__"
+
+# Dependências obrigatórias
+DEPENDS="gmp mpfr"
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+"
+
+pkg_prepare() {
+  # Limpeza defensiva para rebuild/resume
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  # Build fora da árvore (recomendado)
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove arquivos .la (boa prática no musl/bootstrap)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
