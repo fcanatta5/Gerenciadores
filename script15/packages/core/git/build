@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# core/git 2.52.0 - build script para adm
+# Build "bootstrap-friendly": sem gettext/tcltk por padrão (pode rebuildar depois).
+
+NAME="git"
+CATEGORY="core"
+VERSION="2.52.0"
+
+URL="https://www.kernel.org/pub/software/scm/git/git-2.52.0.tar.xz"
+SHA256="3cd8fee86f69a949cb610fee8cd9264e6873d07fa58411f6060b3d62729ed7c5"
+
+# Dependências principais (ajuste conforme seus pacotes):
+# - curl/openssl/zlib: HTTPS, transferências e compressão
+# - expat: parsing XML
+DEPENDS="curl openssl zlib expat"
+BUILD_DEPENDS="perl"
+
+PREFIX="/usr"
+BUILD_SYSTEM="make"
+
+pkg_prepare() {
+  # árvore limpa em rebuild/resume
+  make distclean >/dev/null 2>&1 || true
+
+  # Alguns tarballs já vêm com configure; se não vier, gera.
+  if [[ ! -x ./configure ]] && [[ -x ./autogen.sh ]]; then
+    ./autogen.sh
+  fi
+}
+
+pkg_configure() {
+  # Configure do Git existe nos tarballs oficiais.
+  if [[ -x ./configure ]]; then
+    ./configure --prefix="$PREFIX"
+  fi
+}
+
+pkg_build() {
+  # Flags importantes:
+  # - NO_GETTEXT: evita depender de gettext no bootstrap (rebuild depois se quiser i18n)
+  # - NO_TCLTK: evita gitk/tcltk no bootstrap
+  # - CURL/OPENSSL/EXPAT/ZLIB: garante link contra libs do sistema
+  make -j"${JOBS:-1}" \
+    NO_GETTEXT=YesPlease \
+    NO_TCLTK=YesPlease \
+    USE_OPENSSL=1 \
+    CURLDIR="$PREFIX" \
+    ZLIB_PATH="$PREFIX" \
+    EXPATDIR="$PREFIX"
+}
+
+pkg_install() {
+  # Instalação respeitando DESTDIR
+  make DESTDIR="$DESTDIR" install
+
+  # Instala manpages/html só se você quiser; no bootstrap costuma ser opcional.
+  # Para habilitar:
+  # make DESTDIR="$DESTDIR" install-man
+  # make DESTDIR="$DESTDIR" install-html
+}
+
+pkg_post() {
+  :
+}
