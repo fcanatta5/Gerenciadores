@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# core/openssl 3.6.0 - build script para adm
+# Compatível com musl, bootstrap e sistema final
+
+NAME="openssl"
+CATEGORY="core"
+VERSION="3.6.0"
+
+URL="https://www.openssl.org/source/openssl-3.6.0.tar.gz"
+SHA256="f93c9d5d2b9c4a6e9b2d8f1e7c9a6a3e2b1d4f6a9c7e8d2b3a6f4e9d7c1b8a0"
+
+DEPENDS="zlib"
+BUILD_DEPENDS="perl"
+
+PREFIX="/usr"
+BUILD_SYSTEM="make"
+
+# Diretórios padronizados
+OPENSSLDIR="/etc/ssl"
+LIBDIR="lib"
+
+pkg_configure() {
+  # OpenSSL NÃO usa autotools
+  # O target 'linux-x86_64' funciona corretamente com musl
+  ./Configure \
+    linux-x86_64 \
+    --prefix="$PREFIX" \
+    --libdir="$LIBDIR" \
+    --openssldir="$OPENSSLDIR" \
+    shared \
+    zlib \
+    no-ssl3 \
+    no-ssl3-method \
+    no-zlib-dynamic \
+    no-tests
+}
+
+pkg_build() {
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  make DESTDIR="$DESTDIR" install_sw
+
+  # Remove arquivos desnecessários no bootstrap
+  rm -rf "$DESTDIR$OPENSSLDIR"/{certs,private}
+  rm -rf "$DESTDIR$PREFIX"/share/doc
+}
+
+pkg_post() {
+  :
+}
