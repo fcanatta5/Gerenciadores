@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# extra/python 3.13.11 - build script para adm (musl-friendly)
+
+NAME="python"
+CATEGORY="extra"
+VERSION="3.13.11"
+
+URL="https://www.python.org/ftp/python/3.13.11/Python-3.13.11.tar.xz"
+# Python.org mostra SHA256 como "n/a" na página do release; use MD5 (adm suporta fallback)
+MD5="4c3517dd8b1fd76377dcb3e5e8f71ad6"
+
+# Mínimo recomendável para seu cenário (módulos adicionais são opcionais)
+DEPENDS="core/zlib core/openssl"
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+pkg_prepare() {
+  make distclean >/dev/null 2>&1 || true
+  rm -rf builddir
+  mkdir -p builddir
+}
+
+pkg_configure() {
+  cd builddir
+
+  # Opções conservadoras para bootstrap e rolling release
+  ../configure \
+    --prefix="$PREFIX" \
+    --enable-shared \
+    --with-openssl="$PREFIX" \
+    --with-ensurepip=no \
+    --without-static-libpython
+}
+
+pkg_build() {
+  cd builddir
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd builddir
+  make DESTDIR="$DESTDIR" install
+
+  # Evitar lixo estático, se existir
+  rm -f "$DESTDIR$PREFIX/lib/libpython"*.a 2>/dev/null || true
+}
+
+pkg_post() { :; }
