@@ -1,0 +1,140 @@
+ORDEM DE CONSTRUÇÃO — CROSS-TOOLCHAIN TEMPORÁRIO (musl) + BASE MÍNIMA PARA CHROOT
+===============================================================================
+
+Objetivo:
+- Construir um toolchain temporário (cross) e um root mínimo que permita entrar em chroot
+  e continuar a construção do sistema usando o adm sem “surpresas”.
+- Lista em ordem lógica (LFS-like), adaptável para musl.
+- Observação: alguns itens são “host tools” (na máquina build host) e não entram no target.
+
+Convenções:
+- “PASSO T” = toolchain temporário (cross/target).
+- “PASSO R” = root mínimo do target (ferramentas para chroot).
+- Ajuste o TRIPLET conforme sua arquitetura (ex.: x86_64-linux-musl).
+
+-------------------------------------------------------------------------------
+PASSO 0 — HOST TOOLS (no host, pré-requisitos)
+-------------------------------------------------------------------------------
+0.1  bash
+0.2  coreutils
+0.3  binutils (host)
+0.4  gcc/g++ (host) + libstdc++
+0.5  make
+0.6  patch
+0.7  tar
+0.8  xz, zstd (opcional mas recomendado)
+0.9  gzip, bzip2
+0.10 sed, grep, gawk
+0.11 findutils
+0.12 diffutils
+0.13 file
+0.14 perl, python (muitos upstreams exigem)
+0.15 git, curl
+
+-------------------------------------------------------------------------------
+PASSO T — TOOLCHAIN TEMPORÁRIO (cross para o target)
+-------------------------------------------------------------------------------
+T1)  linux-headers (target headers)
+     - Instala somente headers em $SYSROOT/usr/include (headers_install).
+
+T2)  binutils (cross) — “pass1”
+     - Configure com --target=$TRIPLET e --with-sysroot=$SYSROOT
+     - Produz: $TRIPLET-as/ld etc (cross binutils)
+
+T3)  gcc (cross) — “pass1” (somente compilador C)
+     - --target=$TRIPLET --with-sysroot=$SYSROOT
+     - --without-headers (ainda não existe libc no sysroot)
+     - --enable-languages=c --disable-shared --disable-threads (típico de pass1)
+     - Produz um “gcc mínimo” para compilar libc e demais estágios.
+
+T4)  musl (sysroot libc) — “bootstrap libc”
+     - Instala em $SYSROOT (principalmente /lib e /usr/include do sysroot)
+     - Certifique-se de instalar o loader/ldso correto no sysroot.
+
+T5)  gcc (cross) — “pass2” (C e C++)
+     - Agora com libc disponível: remova --without-headers
+     - --enable-languages=c,c++
+     - --enable-shared --enable-threads=posix (se desejar)
+     - Instala toolchain mais completo no prefixo temporário (ex.: /tools) ou em $SYSROOT/usr
+
+T6)  binutils (cross) — “pass2” (opcional)
+     - Rebuild com libc presente (opcional, mas deixa o conjunto consistente).
+
+-------------------------------------------------------------------------------
+PASSO R — ROOT MÍNIMO DO TARGET (para entrar em chroot)
+-------------------------------------------------------------------------------
+R1)  musl (no root final do target)  [se você instalou só em sysroot no T4]
+     - Instala libc/ldso no root do target.
+
+R2)  busybox (recomendado para root mínimo)
+     - Fornece /bin/sh, utilitários básicos (ls, cp, mv, mkdir, mount etc)
+     - Configure com applets mínimos necessários.
+
+R3)  bash (opcional se busybox já fornece sh, mas recomendado para compatibilidade)
+R4)  coreutils (se você não quiser depender só do busybox)
+R5)  findutils
+R6)  gawk
+R7)  grep
+R8)  sed
+R9)  diffutils
+R10) make
+R11) patch
+R12) tar
+R13) xz (+ zstd opcional)
+R14) gzip
+R15) bzip2
+R16) file
+R17) util-linux (mínimo: mount/umount, login/setsid se necessário)
+R18) gettext/texinfo (apenas se você for construir pacotes que exijam)
+R19) pkgconf (para builds que usam pkg-config)
+R20) zlib (base)
+R21) openssl (se você pretende baixar via HTTPS dentro do chroot e/ou compilar coisas modernas)
+
+-------------------------------------------------------------------------------
+PASSO R2.1 — DIRETÓRIOS E DISPOSITIVOS MÍNIMOS PARA O CHROOT
+-------------------------------------------------------------------------------
+- Crie (no root do target):
+  /dev /proc /sys /run /tmp /var /etc /root /home
+  /usr/{bin,lib,sbin,include,share}
+  /bin /sbin /lib (e /lib64 se necessário no seu layout)
+
+- Monte antes do chroot:
+  mount -t proc proc  $ROOT/proc
+  mount -t sysfs sys  $ROOT/sys
+  mount -t devtmpfs dev $ROOT/dev   (ou bind-mount de /dev)
+  mount -t tmpfs tmpfs $ROOT/run    (opcional)
+
+-------------------------------------------------------------------------------
+PASSO R2.2 — “ADM READY” (para usar o adm dentro do chroot)
+-------------------------------------------------------------------------------
+- Garanta dentro do chroot:
+  - /usr/sbin/adm (o script)
+  - /usr/local/adm/packages (seus buildfiles)
+  - Ferramentas de build mínimas: sh, make, tar, xz/zstd, patch, sed, grep, awk, find.
+  - Se seus builds baixam fontes: curl + certificados (ca-certificates) ou método offline.
+  - git (se você usa fontes git).
+
+-------------------------------------------------------------------------------
+PASSO PÓS-CHROOT — BASE PARA CONTINUAR O SISTEMA “NORMAL” (sugestão)
+-------------------------------------------------------------------------------
+P1)  m4
+P2)  autoconf
+P3)  automake
+P4)  libtool
+P5)  bison
+P6)  flex
+P7)  gmp
+P8)  mpfr
+P9)  mpc
+P10) isl (opcional)
+P11) gcc (rebuild nativo final, se quiser remover traços do toolchain temporário)
+P12) binutils (rebuild nativo final)
+
+-------------------------------------------------------------------------------
+Notas finais
+-------------------------------------------------------------------------------
+1) “Cross-toolchain temporário correto” depende de como você organiza prefixos:
+   - /tools (clássico LFS) ou sysroot + /usr.
+2) Em musl, atenção especial ao loader e paths (/lib vs /usr/lib).
+3) Se você quiser, eu posso gerar uma versão “exata” desta lista já com os nomes/categorias
+   exatamente como você está usando no seu PKGROOT, e com um TRIPLET fixo.
