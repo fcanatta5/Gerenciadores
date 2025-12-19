@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# extra/autoconf 2.72 - build script para adm
+# Compatível com musl, bootstrap e sistema final
+
+NAME="autoconf"
+CATEGORY="extra"
+VERSION="2.72"
+
+URL="https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz"
+SHA256="ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"
+
+# autoconf precisa de m4 (runtime) e normalmente usa perl durante a construção.
+DEPENDS="m4"
+BUILD_DEPENDS="perl"
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-nls
+"
+
+pkg_prepare() {
+  # Limpeza defensiva para rebuild/resume
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
