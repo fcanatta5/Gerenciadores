@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# extra/isl 0.27 - build script para adm
+# Compatível com musl, bootstrap e sistema final
+
+NAME="isl"
+CATEGORY="extra"
+VERSION="0.27"
+
+URL="https://libisl.sourceforge.io/isl-0.27.tar.xz"
+# CONFIRME o SHA256 oficial antes de usar em produção
+SHA256="__CONFIRME_O_SHA256_OFICIAL_DO_ISL_0_27__"
+
+# Dependência obrigatória
+DEPENDS="gmp"
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+"
+
+pkg_prepare() {
+  # Limpeza defensiva (rebuild / resume)
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  # Build fora da árvore (recomendado)
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove arquivos .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
