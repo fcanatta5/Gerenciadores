@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# extra/ninja 1.12.1 - build script para adm
+
+NAME="ninja"
+CATEGORY="extra"
+VERSION="1.12.1"
+
+URL="https://ftp.debian.org/debian/pool/main/n/ninja-build/ninja-build_1.12.1.orig.tar.gz"
+SHA256="821bdff48a3f683bc4bb3b6f0b5fe7b2d647cf65d52aeb63328c91a6c6df285a"
+
+DEPENDS="extra/python"
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="make"
+
+pkg_prepare() {
+  rm -f ninja 2>/dev/null || true
+}
+
+pkg_build() {
+  python3 configure.py --bootstrap
+}
+
+pkg_install() {
+  install -d "$DESTDIR$PREFIX/bin"
+  install -m0755 ninja "$DESTDIR$PREFIX/bin/ninja"
+
+  # utilitário de sintaxe (útil e leve)
+  install -d "$DESTDIR$PREFIX/share/ninja"
+  install -m0644 misc/ninja_syntax.py "$DESTDIR$PREFIX/share/ninja/ninja_syntax.py"
+}
+
+pkg_post() { :; }
