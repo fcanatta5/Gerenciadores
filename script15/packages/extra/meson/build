@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# extra/meson 1.10.0 - build script para adm
+# Instala Meson via Python (pip se disponível; fallback setup.py)
+
+NAME="meson"
+CATEGORY="extra"
+VERSION="1.10.0"
+
+URL="https://files.pythonhosted.org/packages/source/m/meson/meson-1.10.0.tar.gz"
+SHA256="8071860c1f46a75ea34801490fd1c445c9d75147a65508cd3a10366a7006cc1c"
+
+DEPENDS=""
+BUILD_DEPENDS="python3"
+
+PREFIX="/usr"
+BUILD_SYSTEM="make"
+
+pkg_build() {
+  : # puro Python; nada a compilar aqui
+}
+
+pkg_install() {
+  set -e
+
+  # Preferir pip (mais correto em PEP517/pyproject). Sem deps para evitar puxar rede.
+  if command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+    python3 -m pip install . \
+      --no-deps \
+      --no-build-isolation \
+      --no-compile \
+      --prefix="$PREFIX" \
+      --root="$DESTDIR"
+    return 0
+  fi
+
+  # Fallback: setup.py (caso exista no sdist)
+  if command -v python3 >/dev/null 2>&1 && [[ -f setup.py ]]; then
+    python3 setup.py install \
+      --root="$DESTDIR" \
+      --prefix="$PREFIX" \
+      --optimize=1
+    return 0
+  fi
+
+  echo "meson: não encontrei pip (python3 -m pip) nem setup.py no source."
+  echo "Instale python3-pip (recomendado) ou forneça um sdist com setup.py."
+  exit 1
+}
+
+pkg_post() {
+  :
+}
