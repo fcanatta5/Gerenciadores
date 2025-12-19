@@ -624,32 +624,98 @@ srcdir() { [ -n "${WORKSRC:-}" ] && [ -d "$WORKSRC" ] && echo "$WORKSRC" || echo
 detect_build_system() {
   d="$(srcdir)"
 
+  # Forçar por hint elimina qualquer heurística
   forced="$(hint_get "system:")"
-  [ -n "$forced" ] && { echo "$forced"; return 0; }
+  if [ -n "$forced" ]; then
+    echo "$forced"
+    return 0
+  fi
 
-  # hint shorthand
-  [ -n "$(hint_get "cargo")" ] && { echo "cargo"; return 0; }
-  [ -n "$(hint_get "go")" ] && { echo "go"; return 0; }
-  [ -n "$(hint_get "python")" ] && { echo "python"; return 0; }
-  [ -n "$(hint_get "npm")" ] && { echo "npm"; return 0; }
-  [ -n "$(hint_get "perl")" ] && { echo "perl"; return 0; }
-  [ -n "$(hint_get "ruby")" ] && { echo "ruby"; return 0; }
-  [ -n "$(hint_get "scons")" ] && { echo "scons"; return 0; }
-  [ -n "$(hint_get "waf")" ] && { echo "waf"; return 0; }
+  # Flags simples (AUTOBUILD_HINT="cargo go python ...")
+  # E hints com valor também implicam o sistema correspondente.
+  if hint_has cargo || [ -n "$(hint_get "cargo-bin:")" ]; then
+    echo "cargo"; return 0
+  fi
+  if hint_has go || [ -n "$(hint_get "go-bin:")" ]; then
+    echo "go"; return 0
+  fi
+  if hint_has python; then
+    echo "python"; return 0
+  fi
+  if hint_has npm || [ -n "$(hint_get "npm-build:")" ] || [ -n "$(hint_get "npm-out:")" ] || [ -n "$(hint_get "npm-bin:")" ]; then
+    echo "npm"; return 0
+  fi
+  if hint_has perl; then
+    echo "perl"; return 0
+  fi
+  if hint_has ruby; then
+    echo "ruby"; return 0
+  fi
+  if hint_has scons; then
+    echo "scons"; return 0
+  fi
+  if hint_has waf || [ -n "$(hint_get "waf-subdir:")" ]; then
+    echo "waf"; return 0
+  fi
 
-  [ -x "$d/waf" ] || [ -f "$d/wscript" ] && { echo "waf"; return 0; }
-  [ -f "$d/SConstruct" ] || [ -f "$d/SConscript" ] && { echo "scons"; return 0; }
-  [ -f "$d/pyproject.toml" ] || [ -f "$d/setup.py" ] || [ -f "$d/setup.cfg" ] && { echo "python"; return 0; }
-  [ -f "$d/package.json" ] && { echo "npm"; return 0; }
-  [ -f "$d/Makefile.PL" ] || [ -f "$d/Build.PL" ] && { echo "perl"; return 0; }
-  ls "$d"/*.gemspec >/dev/null 2>&1 || [ -f "$d/Rakefile" ] || [ -f "$d/Gemfile" ] && { echo "ruby"; return 0; }
-  [ -f "$d/Cargo.toml" ] && { echo "cargo"; return 0; }
-  [ -f "$d/go.mod" ] || ls "$d"/*.go >/dev/null 2>&1 && { echo "go"; return 0; }
-  [ -f "$d/meson.build" ] && { echo "meson"; return 0; }
-  [ -f "$d/CMakeLists.txt" ] && { echo "cmake"; return 0; }
-  [ -x "$d/configure" ] && { echo "autotools"; return 0; }
-  [ -f "$d/configure.ac" ] || [ -f "$d/configure.in" ] || [ -f "$d/Makefile.am" ] && { echo "autotools_bootstrap"; return 0; }
-  [ -f "$d/Makefile" ] || [ -f "$d/makefile" ] || [ -f "$d/GNUmakefile" ] && { echo "make"; return 0; }
+  # Heurísticas por arquivos (SEM misturar || e && na mesma linha)
+  if [ -x "$d/waf" ] || [ -f "$d/wscript" ]; then
+    echo "waf"; return 0
+  fi
+
+  if [ -f "$d/SConstruct" ] || [ -f "$d/SConscript" ]; then
+    echo "scons"; return 0
+  fi
+
+  if [ -f "$d/pyproject.toml" ] || [ -f "$d/setup.py" ] || [ -f "$d/setup.cfg" ]; then
+    echo "python"; return 0
+  fi
+
+  if [ -f "$d/package.json" ]; then
+    echo "npm"; return 0
+  fi
+
+  if [ -f "$d/Makefile.PL" ] || [ -f "$d/Build.PL" ]; then
+    echo "perl"; return 0
+  fi
+
+  if ls "$d"/*.gemspec >/dev/null 2>&1; then
+    echo "ruby"; return 0
+  fi
+  if [ -f "$d/Rakefile" ] || [ -f "$d/Gemfile" ]; then
+    echo "ruby"; return 0
+  fi
+
+  if [ -f "$d/Cargo.toml" ]; then
+    echo "cargo"; return 0
+  fi
+
+  if [ -f "$d/go.mod" ]; then
+    echo "go"; return 0
+  fi
+  if ls "$d"/*.go >/dev/null 2>&1; then
+    echo "go"; return 0
+  fi
+
+  if [ -f "$d/meson.build" ]; then
+    echo "meson"; return 0
+  fi
+
+  if [ -f "$d/CMakeLists.txt" ]; then
+    echo "cmake"; return 0
+  fi
+
+  if [ -x "$d/configure" ]; then
+    echo "autotools"; return 0
+  fi
+
+  if [ -f "$d/configure.ac" ] || [ -f "$d/configure.in" ] || [ -f "$d/Makefile.am" ]; then
+    echo "autotools_bootstrap"; return 0
+  fi
+
+  if [ -f "$d/Makefile" ] || [ -f "$d/makefile" ] || [ -f "$d/GNUmakefile" ]; then
+    echo "make"; return 0
+  fi
 
   echo "unknown"
 }
