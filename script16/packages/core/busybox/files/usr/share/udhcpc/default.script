@@ -1,0 +1,22 @@
+#!/bin/sh
+[ -n "$interface" ] || exit 0
+
+case "$1" in
+  deconfig)
+    ip addr flush dev "$interface" 2>/dev/null || true
+    ;;
+  renew|bound)
+    ip addr flush dev "$interface" 2>/dev/null || true
+    ip addr add "$ip/$mask" dev "$interface" 2>/dev/null || true
+    [ -n "$router" ] && ip route add default via "$router" dev "$interface" 2>/dev/null || true
+
+    # DNS
+    : > /etc/resolv.conf
+    [ -n "$domain" ] && echo "search $domain" >> /etc/resolv.conf
+    for ns in $dns; do
+      echo "nameserver $ns" >> /etc/resolv.conf
+    done
+    ;;
+esac
+
+exit 0
