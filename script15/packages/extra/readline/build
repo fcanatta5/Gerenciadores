@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# extra/readline 8.3 - build script para adm
+# Linka contra ncurses (tinfo/curses)
+
+NAME="readline"
+CATEGORY="extra"
+VERSION="8.3"
+
+URL="https://ftp.gnu.org/gnu/readline/readline-8.3.tar.gz"
+SHA256="fe5383204467828cd495ee8d1d3c037a7eba1389c22bc6a041f627976f9061cc"
+
+DEPENDS="ncurses"
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+  --with-curses
+"
+
+pkg_prepare() {
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  # Readline detecta termcap/curses; --with-curses força ncurses.
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove .la
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() { :; }
