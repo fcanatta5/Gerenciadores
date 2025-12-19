@@ -187,19 +187,43 @@ is_installed() { [ -f "$(db_installed_marker)" ]; }
 : "${AUTOBUILD_HINT:=}"
 
 hint_lines() {
-  # Normalize to one token per line (split on whitespace)
-  printf '%s\n' "$AUTOBUILD_HINT" | "$ADM_SED" 's/[[:space:]]\+/ /g; s/^ *//; s/ *$//' \
-    | "$ADM_TR" ' ' '\n' | "$ADM_SED" '/^[[:space:]]*$/d'
+  # Normaliza AUTOBUILD_HINT em 1 token por linha.
+  # Aceita tokens com ou sem ":" (ex: "cargo" e "cargo-bin:foo")
+  printf '%s\n' "${AUTOBUILD_HINT:-}" \
+    | "$ADM_SED" 's/[[:space:]]\+/ /g; s/^ *//; s/ *$//' \
+    | "$ADM_TR" ' ' '\n' \
+    | "$ADM_SED" '/^[[:space:]]*$/d'
 }
 
 hint_get() {
+  # Uso:
+  #   hint_get "system:" -> retorna o valor após "system:"
+  #   hint_get "cargo-bin:" -> retorna foo
+  #   hint_get "cargo" -> retorna "1" se existir token "cargo" (sem ":")
   pfx="$1"
   hint_lines | while IFS= read -r h; do
-    case "$h" in
-      "$pfx"*) echo "${h#"$pfx"}"; return 0 ;;
+    case "$pfx" in
+      *:)
+        case "$h" in
+          "$pfx"*) printf '%s\n' "${h#"$pfx"}"; return 0 ;;
+        esac
+        ;;
+      *)
+        case "$h" in
+          "$pfx") printf '%s\n' "1"; return 0 ;;
+        esac
+        ;;
     esac
   done
-  echo ""
+  printf '%s\n' ""
+}
+
+hint_has() {
+  # Retorna 0 se existe, 1 se não existe (estilo "test")
+  # Aceita prefixos com ":" e flags sem ":"
+  pfx="$1"
+  v="$(hint_get "$pfx")"
+  [ -n "$v" ]
 }
 
 ###############################################################################
@@ -361,18 +385,54 @@ unpack_one() {
   return 0
 }
 
+is_archive() {
+  case "$1" in
+    *.tar|*.tar.gz|*.tgz|*.tar.bz2|*.tbz2|*.tar.xz|*.txz|*.tar.zst) return 0 ;;
+  esac
+  return 1
+}
+
+unpack_one() {
+  f="$1"
+  [ -f "$f" ] || return 1
+
+  case "$f" in
+    *.tar.zst)
+      command -v "$ADM_ZSTD" >/dev/null 2>&1 || die "need zstd to unpack: $f"
+      "$ADM_ZSTD" -dc "$f" | (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf -) || return 1
+      ;;
+    *.tar.xz|*.txz)
+      command -v "$ADM_XZ" >/dev/null 2>&1 || die "need xz to unpack: $f"
+      "$ADM_XZ" -dc "$f" | (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf -) || return 1
+      ;;
+    *.tar.gz|*.tgz)
+      command -v gzip >/dev/null 2>&1 || die "need gzip to unpack: $f"
+      gzip -dc "$f" | (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf -) || return 1
+      ;;
+    *.tar.bz2|*.tbz2)
+      command -v bzip2 >/dev/null 2>&1 || die "need bzip2 to unpack: $f"
+      bzip2 -dc "$f" | (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf -) || return 1
+      ;;
+    *.tar)
+      (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf "$f") || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
 default_unpack() {
   WORKSRCROOT="$WORKDIR/srcroot"
   ensure_dir "$WORKSRCROOT"
   export WORKSRCROOT
 
-  # hint: unpack:a,b,c (files staged in WORKDIR)
+  # Se o pacote fornecer hint "unpack:a.tar.xz,b.tar.gz", usa essa ordem
   ulist="$(hint_get "unpack:")"
   if [ -n "$ulist" ]; then
     oldIFS=$IFS; IFS=,
     for n in $ulist; do
       IFS=$oldIFS
-      n=$(printf '%s' "$n" | "$ADM_SED" 's/^ *//;s/ *$//')
+      n=$(printf '%s' "$n" | "$ADM_SED" 's/^ *//; s/ *$//')
       [ -n "$n" ] || continue
       log "unpack (hint): $n"
       unpack_one "$WORKDIR/$n" || die "unpack failed: $n"
@@ -380,6 +440,7 @@ default_unpack() {
     done
     IFS=$oldIFS
   else
+    # Caso padrão: extrai todos os arquivos-archive em WORKDIR
     "$ADM_FIND" "$WORKDIR" -maxdepth 1 -type f 2>/dev/null | "$ADM_SORT" | while IFS= read -r f; do
       if is_archive "$f"; then
         log "unpack: $(basename "$f")"
@@ -388,7 +449,7 @@ default_unpack() {
     done
   fi
 
-  # Determine WORKSRC
+  # Determina WORKSRC
   sdh="$(hint_get "srcdir:")"
   if [ -n "$sdh" ]; then
     WORKSRC="$WORKSRCROOT/$sdh"
@@ -413,14 +474,16 @@ default_patchlevel() {
   if [ -z "$pl" ]; then
     [ -n "${PATCHLEVEL:-}" ] && pl="$PATCHLEVEL" || pl="1"
   fi
-  echo "$pl"
+  printf '%s\n' "$pl"
 }
 
 apply_patches() {
   patchdir="$PKGDIR/patch"
   [ -d "$patchdir" ] || return 0
-  need_cmd patch
+
+  command -v patch >/dev/null 2>&1 || die "missing required command: patch"
   pl="$(default_patchlevel)"
+
   "$ADM_FIND" "$patchdir" -type f 2>/dev/null | "$ADM_SORT" | while IFS= read -r p; do
     log "apply patch: $(basename "$p") (-p$pl)"
     (cd "$WORKSRC" && patch -p"$pl" <"$p") || die "patch failed: $p"
@@ -1199,7 +1262,7 @@ install_with_deps() {
   export WORKDIR
 
   req="$WORKDIR/.req"
-  echo "$PKGNAME" >"$req"
+  printf '%s\n' "$PKGNAME" >"$req"
 
   order="$(toposort "$req")" || die "dependency resolution failed"
   printf '%s\n' "$order" | while IFS= read -r p; do
@@ -1213,7 +1276,7 @@ install_with_deps() {
     fi
   done
 
-  "$ADM_RM" -rf "$WORKDIR" || true
+  "$ADM_RM" -rf "$WORKDIR" 2>/dev/null || true
 }
 
 info_pkg() {
