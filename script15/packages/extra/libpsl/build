@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+NAME="libpsl"
+CATEGORY="extra"
+VERSION="0.21.5"
+
+URL="https://github.com/rockdaboot/libpsl/releases/download/0.21.5/libpsl-0.21.5.tar.gz"
+# SHA256 (fonte: fórmula do Homebrew para esse tarball)
+SHA256="1dcc9ceae8b128f3c0b3f654decd0e1e891afc6ff81098f227ef260449dae208"
+
+# Recomendadas pelo BLFS (para IDNA via libidn2)
+DEPENDS="libidn2 libunistring"
+
+BUILD_SYSTEM="meson"
+MESON_OPTS="-Ddocs=false"
