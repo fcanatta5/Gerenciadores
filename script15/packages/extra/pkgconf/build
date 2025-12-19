@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# extra/pkgconf 2.5.1 - build script para adm
+
+NAME="pkgconf"
+CATEGORY="extra"
+VERSION="2.5.1"
+
+URL="https://distfiles.ariadne.space/pkgconf/pkgconf-2.5.1.tar.xz"
+SHA256="cd05c9589b9f86ecf044c10a2269822bc9eb001eced2582cfffd658b0a50c243"
+
+DEPENDS=""
+BUILD_DEPENDS="autoconf automake libtool"
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+# Diretórios de pkg-config típicos em sistemas /usr
+PKGCFG_DIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+  --disable-nls
+  --with-pkg-config-dir=$PKGCFG_DIR
+  --with-system-includedir=$PREFIX/include
+  --with-system-libdir=$PREFIX/lib
+"
+
+pkg_prepare() {
+  make distclean >/dev/null 2>&1 || true
+  # Se vier de git/head, haveria autogen.sh; no tarball release geralmente já vem configure.
+  if [[ ! -x ./configure ]] && [[ -x ./autogen.sh ]]; then
+    ./autogen.sh
+  fi
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Drop-in replacement: pkg-config -> pkgconf
+  install -d -m 0755 "$DESTDIR$PREFIX/bin"
+  ln -sf pkgconf "$DESTDIR$PREFIX/bin/pkg-config"
+
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() { :; }
