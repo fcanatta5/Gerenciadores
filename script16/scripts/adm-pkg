@@ -1,7 +1,19 @@
 #!/bin/sh
-# adm-pkg - minimal rolling package manager (POSIX sh)
+# adm-pkg - rolling package manager (POSIX sh, no bashisms)
 # Target: x86_64-linux-musl
-# No bashisms. No arrays. No process substitution. No [[ ]].
+# Features:
+# - build scripts: /usr/adm/packages/<cat>/<pkg>/build
+# - patch/: auto apply, configurable patchlevel
+# - files/: overlay into DESTDIR after install
+# - source cache with checksum (sha256 or md5 per package)
+# - binary cache: tar.zst (fallback tar.xz)
+# - dependency resolution (closure) + cycle detection (toposort)
+# - atomic upgrade using staging apply + manifest diff
+# - uninstall by manifest + prune empty dirs
+# - resume (state) configurable, clean builds if disabled
+# - autodetect build systems: autotools, make, meson, cmake, cargo, go,
+#   python (pyproject/setuptools), npm, perl, ruby, scons, waf
+# - AUTOBUILD_HINT to remove heuristics without hooks
 
 umask 022
 
@@ -16,14 +28,17 @@ umask 022
 : "${ADM_BIN_CACHE:=$ADM_CACHE_DIR/binpkgs}"
 : "${ADM_BUILD_DIR:=$ADM_CACHE_DIR/build}"
 : "${ADM_LOG_DIR:=/var/log/adm-pkg}"
+
 : "${ADM_JOBS:=1}"
 : "${ADM_FETCH_CMD:=auto}"      # auto|curl|wget
-: "${ADM_GIT_REPO_DIR:=/usr/adm}" # your git repo root (optional)
+: "${ADM_RESUME:=1}"            # 1=resume enabled, 0=always clean workdir
 : "${ADM_STRIP:=1}"             # 1 or 0
+
 : "${ADM_CFLAGS:=-O2 -pipe}"
 : "${ADM_CXXFLAGS:=-O2 -pipe}"
 : "${ADM_LDFLAGS:=-Wl,-O1}"
 : "${ADM_MAKEFLAGS:=}"
+
 : "${ADM_TAR:=tar}"
 : "${ADM_ZSTD:=zstd}"
 : "${ADM_XZ:=xz}"
@@ -41,13 +56,15 @@ umask 022
 : "${ADM_TOUCH:=touch}"
 : "${ADM_DATE:=date}"
 : "${ADM_GIT:=git}"
-: "${ADM_LOCK_FD:=9}"
+: "${ADM_TR:=tr}"
+
+: "${ADM_GIT_REPO_DIR:=/usr/adm}"  # optional
 
 CONFIG_FILE="/etc/adm-pkg.conf"
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
 ###############################################################################
-# Helpers: logging, errors, locks
+# Helpers: errors, logging, dirs, lock
 ###############################################################################
 die() { echo "adm-pkg: ERROR: $*" >&2; exit 1; }
 
@@ -57,6 +74,8 @@ now() { "$ADM_DATE" '+%Y-%m-%d %H:%M:%S'; }
 
 ensure_dir() { [ -d "$1" ] || "$ADM_MKDIR" -p "$1" || die "cannot create dir: $1"; }
 
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+
 log_init() {
   ensure_dir "$ADM_LOG_DIR"
   ensure_dir "$ADM_DB_DIR"
@@ -64,16 +83,12 @@ log_init() {
   ensure_dir "$ADM_SRC_CACHE"
   ensure_dir "$ADM_BIN_CACHE"
   ensure_dir "$ADM_BUILD_DIR"
+  ensure_dir "$ADM_DB_DIR/pkgs"
 }
 
-log_file_for() {
-  # args: pkgname pkgver pkgrel
-  echo "$ADM_LOG_DIR/$1-$2-r$3.log"
-}
+log_file_for() { echo "$ADM_LOG_DIR/$1-$2-r$3.log"; }
 
 log() {
-  # Always also write to stdout
-  # If ADM_CURRENT_LOG is set, tee to it
   if [ -n "${ADM_CURRENT_LOG:-}" ]; then
     printf '%s %s\n' "$(now)" "$*" | tee -a "$ADM_CURRENT_LOG"
   else
@@ -81,42 +96,60 @@ log() {
   fi
 }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
 with_lock() {
   ensure_dir "$ADM_DB_DIR"
-  LOCKFILE="$ADM_DB_DIR/.lock"
-  # POSIX sh has no flock builtin; use mkdir lock (atomic)
-  # If stale lock: user can remove manually.
+  LOCKDIR="$ADM_DB_DIR/.lock"
   i=0
-  while ! "$ADM_MKDIR" "$LOCKFILE" 2>/dev/null; do
+  while ! "$ADM_MKDIR" "$LOCKDIR" 2>/dev/null; do
     i=$((i+1))
-    [ "$i" -gt 200 ] && die "could not acquire lock: $LOCKFILE (stale?)"
+    [ "$i" -gt 200 ] && die "could not acquire lock: $LOCKDIR (stale?)"
     sleep 1
   done
-  trap 'rmdir "$LOCKFILE" 2>/dev/null; exit 1' INT TERM HUP
+  trap 'rmdir "$LOCKDIR" 2>/dev/null; exit 1' INT TERM HUP
 }
 
 unlock() {
-  rmdir "$ADM_DB_DIR/.lock" 2>/dev/null
+  rmdir "$ADM_DB_DIR/.lock" 2>/dev/null || true
   trap - INT TERM HUP
 }
 
 ###############################################################################
-# Build script loading and package metadata
+# Package metadata loading
 ###############################################################################
+reset_pkg_vars() {
+  PKGDIR=""
+  BUILDSCRIPT=""
+  PKGNAME=""
+  PKGVER=""
+  PKGREL="1"
+  SECTION=""
+  PKGDESC=""
+  PKGURL=""
+  LICENSE=""
+  ARCH="x86_64"
+
+  SOURCES=""
+  SUMTYPE="sha256"  # sha256|md5
+  SUMS=""
+
+  DEPENDS=""
+  BUILD_DEPENDS=""
+
+  AUTOBUILD_HINT=""
+
+  # Optional per-package patch level hint (also via AUTOBUILD_HINT patchlevel:)
+  PATCHLEVEL=""
+}
+
 pkg_path_from_name() {
   # input: name or category/name
-  # output: absolute dir containing build script
   case "$1" in
     */*)
       p="$ADM_PKGS_DIR/$1"
       ;;
     *)
-      # search by name across categories
-      p=$("$ADM_FIND" "$ADM_PKGS_DIR" -mindepth 2 -maxdepth 2 -type d -name "$1" 2>/dev/null | "$ADM_SORT" | "$ADM_AWK" 'NR==1{print; exit}')
+      p=$("$ADM_FIND" "$ADM_PKGS_DIR" -mindepth 2 -maxdepth 2 -type d -name "$1" 2>/dev/null \
+        | "$ADM_SORT" | "$ADM_AWK" 'NR==1{print; exit}')
       ;;
   esac
   [ -n "$p" ] && [ -d "$p" ] || return 1
@@ -124,27 +157,7 @@ pkg_path_from_name() {
   echo "$p"
 }
 
-reset_pkg_vars() {
-  PKGNAME=""
-  PKGVER=""
-  PKGREL="1"
-  PKGDESC=""
-  PKGURL=""
-  LICENSE=""
-  ARCH="x86_64"
-  SECTION=""
-  SOURCES=""
-  SUMTYPE="sha256" # sha256|md5
-  SUMS=""
-  DEPENDS=""
-  BUILD_DEPENDS=""
-  CONFLICTS=""
-  PROVIDES=""
-  HOOKS=""
-}
-
 load_build_script() {
-  # args: pkgdir
   reset_pkg_vars
   PKGDIR="$1"
   BUILDSCRIPT="$PKGDIR/build"
@@ -158,23 +171,75 @@ load_build_script() {
   [ -n "$PKGREL" ] || PKGREL="1"
   [ -n "$SECTION" ] || SECTION="$(basename "$(dirname "$PKGDIR")")"
 
-  # Export common build env for build scripts
   export ADM_ROOT ADM_PKGS_DIR ADM_DB_DIR ADM_CACHE_DIR ADM_SRC_CACHE ADM_BIN_CACHE ADM_BUILD_DIR ADM_LOG_DIR
-  export ADM_JOBS ADM_CFLAGS ADM_CXXFLAGS ADM_LDFLAGS ADM_MAKEFLAGS ADM_STRIP
+  export ADM_JOBS ADM_CFLAGS ADM_CXXFLAGS ADM_LDFLAGS ADM_MAKEFLAGS ADM_STRIP ADM_RESUME
   export PKGDIR BUILDSCRIPT PKGNAME PKGVER PKGREL SECTION PKGDESC PKGURL LICENSE ARCH
+  export SOURCES SUMTYPE SUMS DEPENDS BUILD_DEPENDS AUTOBUILD_HINT
 }
 
 pkg_id() { echo "$PKGNAME-$PKGVER-r$PKGREL"; }
 
 db_pkg_dir() { echo "$ADM_DB_DIR/pkgs/$PKGNAME"; }
-
 db_installed_marker() { echo "$(db_pkg_dir)/installed"; }
-
 db_manifest() { echo "$(db_pkg_dir)/manifest"; }
-
 db_meta() { echo "$(db_pkg_dir)/meta"; }
 
 is_installed() { [ -f "$(db_installed_marker)" ]; }
+
+###############################################################################
+# Hints
+###############################################################################
+: "${AUTOBUILD_HINT:=}"
+
+hint_lines() {
+  # output normalized hint lines (one per line)
+  printf '%s\n' "$AUTOBUILD_HINT" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//;s/ *$//' \
+    | "$ADM_TR" ' ' '\n' | "$ADM_SED" '/^[[:space:]]*$/d'
+}
+
+hint_get() {
+  # $1 prefix -> returns value after prefix of first match
+  pfx="$1"
+  hint_lines | while IFS= read -r h; do
+    case "$h" in
+      "$pfx"*)
+        echo "${h#"$pfx"}"
+        return 0
+        ;;
+    esac
+  done
+  echo ""
+}
+
+hint_has() {
+  pfx="$1"
+  v="$(hint_get "$pfx")"
+  [ -n "$v" ] && echo 1 || echo 0
+}
+
+###############################################################################
+# Workdir / state / cleaning
+###############################################################################
+state_file() { echo "$WORKDIR/.state"; }
+
+state_set() { echo "$1" >"$(state_file)"; }
+
+state_get() { [ -f "$(state_file)" ] && cat "$(state_file)" || echo "none"; }
+
+prepare_workdir() {
+  ensure_dir "$ADM_BUILD_DIR"
+  WORKDIR="$ADM_BUILD_DIR/$PKGNAME-$PKGVER-r$PKGREL"
+  DESTDIR="$WORKDIR/destdir"
+  export WORKDIR DESTDIR
+
+  if [ "${ADM_RESUME:-1}" -eq 0 ]; then
+    [ -d "$WORKDIR" ] && "$ADM_RM" -rf "$WORKDIR"
+  fi
+
+  ensure_dir "$WORKDIR"
+  [ -d "$DESTDIR" ] && "$ADM_RM" -rf "$DESTDIR"
+  ensure_dir "$DESTDIR"
+}
 
 ###############################################################################
 # Fetching sources with cache + checksum validation
@@ -197,7 +262,6 @@ pick_fetch_cmd() {
 }
 
 checksum_file() {
-  # args: sumtype file
   t="$1"; f="$2"
   case "$t" in
     sha256) need_cmd "$ADM_SHA256"; "$ADM_SHA256" "$f" | "$ADM_AWK" '{print $1}' ;;
@@ -206,22 +270,18 @@ checksum_file() {
   esac
 }
 
-verify_sources() {
-  # Uses SOURCES and SUMS aligned line-by-line.
-  # SOURCES: lines of URLs or local paths (optional "name::url" supported).
-  # SUMS: lines of expected sums.
-  # SUMTYPE: sha256|md5
+default_fetch() {
   ensure_dir "$ADM_SRC_CACHE"
   fetchcmd="$(pick_fetch_cmd)"
 
   src_list_file="$WORKDIR/.sources"
   sum_list_file="$WORKDIR/.sums"
+
   printf '%s\n' "$SOURCES" | "$ADM_SED" '/^[[:space:]]*$/d' >"$src_list_file"
   printf '%s\n' "$SUMS" | "$ADM_SED" '/^[[:space:]]*$/d' >"$sum_list_file"
 
   src_count=$("$ADM_AWK" 'END{print NR+0}' "$src_list_file")
   sum_count=$("$ADM_AWK" 'END{print NR+0}' "$sum_list_file")
-
   [ "$src_count" -eq "$sum_count" ] || die "SOURCES count ($src_count) != SUMS count ($sum_count) in $BUILDSCRIPT"
 
   i=1
@@ -229,7 +289,6 @@ verify_sources() {
     src=$("$ADM_AWK" "NR==$i{print; exit}" "$src_list_file")
     exp=$("$ADM_AWK" "NR==$i{print; exit}" "$sum_list_file")
 
-    # Support "name::url"
     case "$src" in
       *"::"*)
         name=$(printf '%s' "$src" | "$ADM_AWK" -F"::" '{print $1}')
@@ -241,17 +300,9 @@ verify_sources() {
         ;;
     esac
 
-    # Determine filename
     case "$url" in
-      http://*|https://*)
-        base=$(basename "$url")
-        ;;
-      /*)
-        base=$(basename "$url")
-        ;;
-      *)
-        base=$(basename "$url")
-        ;;
+      http://*|https://*) base=$(basename "$url") ;;
+      *) base=$(basename "$url") ;;
     esac
     [ -n "$name" ] && base="$name"
 
@@ -264,7 +315,6 @@ verify_sources() {
         $fetchcmd "$cached.tmp" "$url" || return 1
         mv "$cached.tmp" "$cached" || return 1
       else
-        # local path relative to PKGDIR
         if [ -f "$PKGDIR/$url" ]; then
           log "copy local source: $PKGDIR/$url -> $cached"
           "$ADM_CP" -f "$PKGDIR/$url" "$cached" || return 1
@@ -292,29 +342,120 @@ verify_sources() {
       [ "$got" = "$exp" ] || { "$ADM_RM" -f "$cached"; die "checksum mismatch after download: $base"; }
     fi
 
-    # Copy into workdir for build
     "$ADM_CP" -f "$cached" "$WORKDIR/$base" || die "cannot stage source: $base"
     i=$((i+1))
   done
 }
 
 ###############################################################################
+# Unpack
+###############################################################################
+is_archive() {
+  case "$1" in
+    *.tar|*.tar.gz|*.tgz|*.tar.bz2|*.tbz2|*.tar.xz|*.txz|*.tar.zst) return 0 ;;
+  esac
+  return 1
+}
+
+unpack_one() {
+  f="$1"
+  [ -f "$f" ] || return 1
+  case "$f" in
+    *.tar.zst)
+      need_cmd "$ADM_ZSTD"
+      "$ADM_ZSTD" -dc "$f" | (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf -) || return 1
+      ;;
+    *.tar.xz|*.txz)
+      need_cmd "$ADM_XZ"
+      "$ADM_XZ" -dc "$f" | (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf -) || return 1
+      ;;
+    *.tar.gz|*.tgz)
+      need_cmd gzip
+      gzip -dc "$f" | (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf -) || return 1
+      ;;
+    *.tar.bz2|*.tbz2)
+      need_cmd bzip2
+      bzip2 -dc "$f" | (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf -) || return 1
+      ;;
+    *.tar)
+      (cd "$WORKSRCROOT" && "$ADM_TAR" -xpf "$f") || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+default_unpack() {
+  WORKSRCROOT="$WORKDIR/srcroot"
+  ensure_dir "$WORKSRCROOT"
+  export WORKSRCROOT
+
+  # If hint unpack:a,b,c is provided, unpack only those (relative to WORKDIR).
+  ulist="$(hint_get "unpack:")"
+  if [ -n "$ulist" ]; then
+    oldIFS=$IFS
+    IFS=,
+    for n in $ulist; do
+      IFS=$oldIFS
+      n=$(printf '%s' "$n" | "$ADM_SED" 's/^ *//;s/ *$//')
+      [ -n "$n" ] || continue
+      log "unpack (hint): $n"
+      unpack_one "$WORKDIR/$n" || die "unpack failed: $n"
+      IFS=,
+    done
+    IFS=$oldIFS
+  else
+    # Unpack all archives in WORKDIR (sorted).
+    "$ADM_FIND" "$WORKDIR" -maxdepth 1 -type f 2>/dev/null | "$ADM_SORT" | while IFS= read -r f; do
+      if is_archive "$f"; then
+        log "unpack: $(basename "$f")"
+        unpack_one "$f" || die "unpack failed: $(basename "$f")"
+      fi
+    done
+  fi
+
+  # Determine WORKSRC:
+  # - hint srcdir:<path> relative to srcroot
+  # - else if single top-level directory exists, use it
+  sdh="$(hint_get "srcdir:")"
+  if [ -n "$sdh" ]; then
+    WORKSRC="$WORKSRCROOT/$sdh"
+    [ -d "$WORKSRC" ] || die "srcdir hint not found: $sdh"
+  else
+    topcount=$("$ADM_FIND" "$WORKSRCROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | "$ADM_AWK" 'END{print NR+0}')
+    if [ "$topcount" -eq 1 ]; then
+      WORKSRC=$("$ADM_FIND" "$WORKSRCROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | "$ADM_AWK" 'NR==1{print; exit}')
+    else
+      # If no single dir, use srcroot itself
+      WORKSRC="$WORKSRCROOT"
+    fi
+  fi
+
+  export WORKSRC
+}
+
+###############################################################################
 # Patch + files overlay
 ###############################################################################
+default_patchlevel() {
+  pl="$(hint_get "patchlevel:")"
+  if [ -z "$pl" ]; then
+    [ -n "${PATCHLEVEL:-}" ] && pl="$PATCHLEVEL" || pl="1"
+  fi
+  echo "$pl"
+}
+
 apply_patches() {
   patchdir="$PKGDIR/patch"
   [ -d "$patchdir" ] || return 0
   need_cmd patch
+  pl="$(default_patchlevel)"
 
-  # Apply patches in sorted order
   "$ADM_FIND" "$patchdir" -type f 2>/dev/null | "$ADM_SORT" | while IFS= read -r p; do
-    log "apply patch: $(basename "$p")"
-    # Default: patch from WORKSRC (set later). If not, patch from WORKDIR.
-    if [ -n "${WORKSRC:-}" ] && [ -d "$WORKSRC" ]; then
-      (cd "$WORKSRC" && patch -p1 <"$p") || die "patch failed: $p"
-    else
-      (cd "$WORKDIR" && patch -p1 <"$p") || die "patch failed: $p"
-    fi
+    log "apply patch: $(basename "$p") (-p$pl)"
+    (cd "$WORKSRC" && patch -p"$pl" <"$p") || die "patch failed: $p"
   done
 }
 
@@ -322,36 +463,26 @@ copy_files_overlay() {
   filesdir="$PKGDIR/files"
   [ -d "$filesdir" ] || return 0
   log "overlay files/: copying into DESTDIR"
-  (cd "$filesdir" && "$ADM_TAR" -cf - .) | (cd "$DESTDIR" && "$ADM_TAR" -xf -) || die "files/ overlay failed"
+  (cd "$filesdir" && "$ADM_TAR" -cf - .) | (cd "$DESTDIR" && "$ADM_TAR" -xpf -) || die "files/ overlay failed"
 }
 
 ###############################################################################
-# Dependency parsing + topological sort with cycle detection
+# Dependency resolution: closure + toposort (cycle detection)
 ###############################################################################
-normalize_dep_list() {
-  # input: string of deps separated by spaces/newlines
-  # output: one per line, stripped, unique
-  printf '%s\n' "$1" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//' \
-    | "$ADM_TR" ' ' '\n' 2>/dev/null || true
-}
-
 dep_edges_for_pkg() {
-  # args: pkgname
   pd="$(pkg_path_from_name "$1" || true)"
   [ -n "$pd" ] || die "cannot locate package: $1"
   load_build_script "$pd"
-  # Only runtime deps for ordering; include build deps too for build correctness
+
   all_deps=$(printf '%s\n%s\n' "$DEPENDS" "$BUILD_DEPENDS" | "$ADM_SED" '/^[[:space:]]*$/d')
-  printf '%s\n' "$all_deps" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//' | "$ADM_TR" ' ' '\n' 2>/dev/null \
-    | "$ADM_SED" '/^[[:space:]]*$/d' | while IFS= read -r d; do
-      # format: A B means A depends on B
-      printf '%s %s\n' "$1" "$d"
-    done
+  printf '%s\n' "$all_deps" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//;s/ *$//' \
+    | "$ADM_TR" ' ' '\n' | "$ADM_SED" '/^[[:space:]]*$/d' \
+    | while IFS= read -r d; do
+        printf '%s %s\n' "$1" "$d"
+      done
 }
 
 toposort() {
-  # Input: list of package names (one per line) in $1 file.
-  # Output: ordered list on stdout, or die on cycle.
   inlist="$1"
   tmp="$WORKDIR/.topo"
   edges="$tmp.edges"
@@ -359,21 +490,16 @@ toposort() {
   indeg="$tmp.indeg"
   queue="$tmp.queue"
   out="$tmp.out"
-
-  : >"$edges"; : >"$nodes"; : >"$indeg"; : >"$queue"; : >"$out"
-
-  # Collect closure of dependencies
-  # BFS over packages, emitting nodes and edges
   seen="$tmp.seen"
-  : >"$seen"
   frontier="$tmp.frontier"
+
+  : >"$edges"; : >"$nodes"; : >"$indeg"; : >"$queue"; : >"$out"; : >"$seen"
+
   "$ADM_CP" -f "$inlist" "$frontier"
 
   while :; do
-    # remove empties and duplicates
     "$ADM_SED" '/^[[:space:]]*$/d' "$frontier" | "$ADM_SORT" -u >"$frontier.u"
     mv "$frontier.u" "$frontier"
-
     [ -s "$frontier" ] || break
 
     : >"$tmp.next"
@@ -381,43 +507,31 @@ toposort() {
       "$ADM_GREP" -qx "$p" "$seen" 2>/dev/null && continue
       printf '%s\n' "$p" >>"$seen"
       printf '%s\n' "$p" >>"$nodes"
-
       dep_edges_for_pkg "$p" >>"$edges"
-      # enqueue deps to explore
       dep_edges_for_pkg "$p" | "$ADM_AWK" '{print $2}' >>"$tmp.next"
     done <"$frontier"
-
     mv "$tmp.next" "$frontier"
   done
 
-  # Unique nodes
   "$ADM_SORT" -u "$nodes" >"$nodes.u" && mv "$nodes.u" "$nodes"
 
-  # Compute indegree for each node
   while IFS= read -r n; do
     c=$("$ADM_GREP" -E "^[^ ]+ $n$" "$edges" 2>/dev/null | "$ADM_AWK" 'END{print NR+0}')
     printf '%s %s\n' "$n" "$c" >>"$indeg"
   done <"$nodes"
 
-  # Initialize queue with indegree 0
   "$ADM_AWK" '$2==0{print $1}' "$indeg" >"$queue"
 
-  # Kahn's algorithm
   processed=0
   total=$("$ADM_AWK" 'END{print NR+0}' "$nodes")
 
   while [ -s "$queue" ]; do
-    # pop first
     n=$("$ADM_AWK" 'NR==1{print $1; exit}' "$queue")
     "$ADM_AWK" 'NR>1{print}' "$queue" >"$queue.tmp" && mv "$queue.tmp" "$queue"
     printf '%s\n' "$n" >>"$out"
     processed=$((processed+1))
 
-    # For each m where n->m (meaning m depends on n?) our edges are A depends on B (A->B)
-    # In Kahn we need adjacency from B to A to decrement indegree(A) when B processed.
-    # So: find all A such that A depends on n.
     "$ADM_GREP" -E "^[^ ]+ $n$" "$edges" 2>/dev/null | "$ADM_AWK" '{print $1}' | while IFS= read -r a; do
-      # decrement indegree of a
       cur=$("$ADM_AWK" -v k="$a" '$1==k{print $2; exit}' "$indeg")
       new=$((cur-1))
       "$ADM_AWK" -v k="$a" -v v="$new" '{if($1==k){print $1, v}else{print}}' "$indeg" >"$indeg.tmp" && mv "$indeg.tmp" "$indeg"
@@ -428,146 +542,19 @@ toposort() {
   done
 
   if [ "$processed" -ne "$total" ]; then
-    # Cycle exists: report remaining nodes with indegree > 0
     log "dependency cycle detected. Remaining nodes:"
     "$ADM_AWK" '$2>0{print " - "$1}' "$indeg" >&2
     die "cannot resolve dependency order due to cycle"
   fi
 
-  # Output build order should build deps first:
-  # Our out contains deps later? With our decrement logic, it outputs deps first then dependents -> correct.
   cat "$out"
 }
 
 ###############################################################################
-# Packaging, install, uninstall, upgrade
-###############################################################################
-pkg_artifact_path() {
-  # Prefer zst then xz; store by pkgid
-  echo "$ADM_BIN_CACHE/$(pkg_id).tar.zst"
-}
-
-pkg_artifact_path_xz() {
-  echo "$ADM_BIN_CACHE/$(pkg_id).tar.xz"
-}
-
-write_meta() {
-  ensure_dir "$(db_pkg_dir)"
-  {
-    echo "PKGNAME=$PKGNAME"
-    echo "PKGVER=$PKGVER"
-    echo "PKGREL=$PKGREL"
-    echo "SECTION=$SECTION"
-    echo "PKGDESC=$PKGDESC"
-    echo "PKGURL=$PKGURL"
-    echo "LICENSE=$LICENSE"
-    echo "ARCH=$ARCH"
-    echo "DEPENDS=$(printf '%s' "$DEPENDS" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//')"
-    echo "BUILD_DEPENDS=$(printf '%s' "$BUILD_DEPENDS" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//')"
-    echo "BUILDTIME=$(now)"
-  } >"$(db_meta)"
-}
-
-make_manifest() {
-  # manifest: all installed paths (relative to /)
-  # run from DESTDIR root
-  (cd "$DESTDIR" && "$ADM_FIND" . -mindepth 1 -print | "$ADM_SED" 's#^\./##') | "$ADM_SORT" >"$WORKDIR/manifest"
-}
-
-strip_binaries() {
-  [ "${ADM_STRIP:-1}" -eq 1 ] || return 0
-  command -v strip >/dev/null 2>&1 || return 0
-  # Strip common executable/shared objects
-  (cd "$DESTDIR" && "$ADM_FIND" . -type f 2>/dev/null) | while IFS= read -r f; do
-    case "$f" in
-      */bin/*|*/sbin/*|*/lib/*.so*|*/libexec/*)
-        strip --strip-unneeded "$DESTDIR/$f" 2>/dev/null || true
-        ;;
-    esac
-  done
-}
-
-pack_destdir() {
-  ensure_dir "$ADM_BIN_CACHE"
-  zst="$(pkg_artifact_path)"
-  xz="$(pkg_artifact_path_xz)"
-
-  make_manifest
-  strip_binaries
-
-  # pack as tar from DESTDIR root
-  if command -v "$ADM_ZSTD" >/dev/null 2>&1; then
-    log "pack: creating $(basename "$zst")"
-    (cd "$DESTDIR" && "$ADM_TAR" -cf - .) | "$ADM_ZSTD" -q -T0 -19 -o "$zst.tmp" || die "zstd packaging failed"
-    mv "$zst.tmp" "$zst" || die "cannot move artifact"
-    [ -f "$xz" ] && "$ADM_RM" -f "$xz" || true
-  else
-    need_cmd "$ADM_XZ"
-    log "pack: creating $(basename "$xz") (fallback)"
-    (cd "$DESTDIR" && "$ADM_TAR" -cf - .) | "$ADM_XZ" -c -T0 -9 >"$xz.tmp" || die "xz packaging failed"
-    mv "$xz.tmp" "$xz" || die "cannot move artifact"
-    [ -f "$zst" ] && "$ADM_RM" -f "$zst" || true
-  fi
-}
-
-extract_artifact_to_root() {
-  # args: artifact path
-  a="$1"
-  [ -f "$a" ] || die "artifact not found: $a"
-  log "install: extracting $(basename "$a") to $ADM_ROOT"
-  case "$a" in
-    *.tar.zst)
-      need_cmd "$ADM_ZSTD"
-      # shellcheck disable=SC2086
-      "$ADM_ZSTD" -dc "$a" | (cd "$ADM_ROOT" && "$ADM_TAR" -xpf -) || die "extract failed"
-      ;;
-    *.tar.xz)
-      need_cmd "$ADM_XZ"
-      "$ADM_XZ" -dc "$a" | (cd "$ADM_ROOT" && "$ADM_TAR" -xpf -) || die "extract failed"
-      ;;
-    *) die "unknown artifact type: $a" ;;
-  esac
-}
-
-remove_paths_from_manifest() {
-  # args: manifest file
-  mf="$1"
-  [ -f "$mf" ] || return 0
-  # remove files first, then prune empty dirs
-  log "uninstall: removing files"
-  while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    # prevent unsafe deletions
-    case "$p" in
-      ""|"/"|".") continue ;;
-    esac
-    if [ -f "$ADM_ROOT/$p" ] || [ -L "$ADM_ROOT/$p" ]; then
-      "$ADM_RM" -f "$ADM_ROOT/$p" 2>/dev/null || true
-    fi
-  done <"$mf"
-
-  log "uninstall: pruning empty directories"
-  # reverse sort by depth
-  "$ADM_AWK" -F/ '{print NF, $0}' "$mf" | "$ADM_SORT" -rn | "$ADM_AWK" '{ $1=""; sub(/^ /,""); print }' \
-    | while IFS= read -r p; do
-      [ -d "$ADM_ROOT/$p" ] && rmdir "$ADM_ROOT/$p" 2>/dev/null || true
-    done
-}
-
-mark_installed() {
-  ensure_dir "$(db_pkg_dir)"
-  "$ADM_TOUCH" "$(db_installed_marker)"
-  mv "$WORKDIR/manifest" "$(db_manifest)" || die "cannot store manifest"
-  write_meta
-}
-
-###############################################################################
-# Hooks and default phases
+# Hooks and phases
 ###############################################################################
 run_hook() {
-  # args: hookname
   h="$1"
-  # Build scripts may define: hook_pre_fetch, hook_post_fetch, etc.
   fn="hook_$h"
   if command -v "$fn" >/dev/null 2>&1; then
     log "hook: $fn"
@@ -575,57 +562,37 @@ run_hook() {
   fi
 }
 
-default_unpack() {
-  # Heuristic: if there is exactly one tar.* among staged sources, unpack it.
-  # Build scripts can override by defining pkg_unpack()
-  tarball=$("$ADM_FIND" "$WORKDIR" -maxdepth 1 -type f 2>/dev/null | "$ADM_GREP" -E '\.(tar\.gz|tar\.bz2|tar\.xz|tar\.zst|tgz|tbz2|txz|tar)$' | "$ADM_SORT" | "$ADM_AWK" 'NR==1{print; exit}')
-  [ -n "$tarball" ] || return 0
+call_phase() {
+  ph="$1"
+  fn="pkg_$ph"
 
-  log "unpack: $(basename "$tarball")"
-  # Prepare WORKSRC directory
-  WORKSRC="$WORKDIR/src"
-  ensure_dir "$WORKSRC"
-  case "$tarball" in
-    *.tar.zst)
-      need_cmd "$ADM_ZSTD"
-      "$ADM_ZSTD" -dc "$tarball" | (cd "$WORKSRC" && "$ADM_TAR" -xpf -) || die "unpack failed"
-      ;;
-    *.tar.xz|*.txz)
-      need_cmd "$ADM_XZ"
-      "$ADM_XZ" -dc "$tarball" | (cd "$WORKSRC" && "$ADM_TAR" -xpf -) || die "unpack failed"
-      ;;
-    *.tar.gz|*.tgz)
-      need_cmd gzip
-      gzip -dc "$tarball" | (cd "$WORKSRC" && "$ADM_TAR" -xpf -) || die "unpack failed"
-      ;;
-    *.tar.bz2|*.tbz2)
-      need_cmd bzip2
-      bzip2 -dc "$tarball" | (cd "$WORKSRC" && "$ADM_TAR" -xpf -) || die "unpack failed"
-      ;;
-    *.tar)
-      (cd "$WORKSRC" && "$ADM_TAR" -xpf "$tarball") || die "unpack failed"
-      ;;
-    *) return 0 ;;
-  esac
+  run_hook "pre_$ph"
 
-  # If tar produced a single top-level dir, use it
-  top=$("$ADM_FIND" "$WORKSRC" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | "$ADM_SORT" | "$ADM_AWK" 'NR==1{print; exit}')
-  if [ -n "$top" ]; then
-    WORKSRC="$top"
+  if command -v "$fn" >/dev/null 2>&1; then
+    log "phase: $fn"
+    "$fn" || die "phase failed: $fn"
+  else
+    case "$ph" in
+      fetch) default_fetch ;;
+      unpack) default_unpack ;;
+      prepare) apply_patches ;;
+      build) default_build ;;
+      check) default_check ;;
+      install) default_install ;;
+      *) die "unknown phase: $ph" ;;
+    esac
   fi
-  export WORKSRC
+
+  run_hook "post_$ph"
 }
 
-default_prepare() {
-  # Apply patches after unpack by default
-  apply_patches
-}
-
+###############################################################################
+# Autodetection: systems + tool invocations
+###############################################################################
 have() { command -v "$1" >/dev/null 2>&1; }
 
 pick_ninja() { have ninja && echo ninja && return 0; have samu && echo samu && return 0; echo ""; }
 
-# Decide o diretório de trabalho do source (WORKSRC se existe, senão WORKDIR)
 srcdir() {
   if [ -n "${WORKSRC:-}" ] && [ -d "$WORKSRC" ]; then
     echo "$WORKSRC"
@@ -637,103 +604,62 @@ srcdir() {
 detect_build_system() {
   d="$(srcdir)"
 
-  # Rust
+  forced="$(hint_get "system:")"
+  [ -n "$forced" ] && { echo "$forced"; return 0; }
+
+  [ "$(hint_has "cargo")" -eq 1 ] && { echo "cargo"; return 0; }
+  [ "$(hint_has "go")" -eq 1 ] && { echo "go"; return 0; }
+  [ "$(hint_has "python")" -eq 1 ] && { echo "python"; return 0; }
+  [ "$(hint_has "npm")" -eq 1 ] && { echo "npm"; return 0; }
+  [ "$(hint_has "perl")" -eq 1 ] && { echo "perl"; return 0; }
+  [ "$(hint_has "ruby")" -eq 1 ] && { echo "ruby"; return 0; }
+  [ "$(hint_has "scons")" -eq 1 ] && { echo "scons"; return 0; }
+  [ "$(hint_has "waf")" -eq 1 ] && { echo "waf"; return 0; }
+
+  if [ -x "$d/waf" ] || [ -f "$d/wscript" ]; then echo "waf"; return 0; fi
+  if [ -f "$d/SConstruct" ] || [ -f "$d/SConscript" ]; then echo "scons"; return 0; fi
+  if [ -f "$d/pyproject.toml" ] || [ -f "$d/setup.py" ] || [ -f "$d/setup.cfg" ]; then echo "python"; return 0; fi
+  if [ -f "$d/package.json" ]; then echo "npm"; return 0; fi
+  if [ -f "$d/Makefile.PL" ] || [ -f "$d/Build.PL" ]; then echo "perl"; return 0; fi
+  if ls "$d"/*.gemspec >/dev/null 2>&1 || [ -f "$d/Rakefile" ] || [ -f "$d/Gemfile" ]; then echo "ruby"; return 0; fi
   if [ -f "$d/Cargo.toml" ]; then echo "cargo"; return 0; fi
-  # Go (módulo ou GOPATH legacy)
-  if [ -f "$d/go.mod" ] || [ -f "$d/Gopkg.lock" ] || [ -n "$(ls "$d"/*.go 2>/dev/null | "$ADM_AWK" 'NR==1{print}')" ]; then
-    echo "go"; return 0
-  fi
-  # Meson
+  if [ -f "$d/go.mod" ] || ls "$d"/*.go >/dev/null 2>&1; then echo "go"; return 0; fi
   if [ -f "$d/meson.build" ]; then echo "meson"; return 0; fi
-  # CMake
   if [ -f "$d/CMakeLists.txt" ]; then echo "cmake"; return 0; fi
-  # Autotools (configure)
   if [ -x "$d/configure" ]; then echo "autotools"; return 0; fi
-  # Autotools (configure.ac / Makefile.am) -> precisa autoreconf
-  if [ -f "$d/configure.ac" ] || [ -f "$d/configure.in" ] || [ -f "$d/Makefile.am" ]; then
-    echo "autotools_bootstrap"; return 0
-  fi
-  # Make puro
+  if [ -f "$d/configure.ac" ] || [ -f "$d/configure.in" ] || [ -f "$d/Makefile.am" ]; then echo "autotools_bootstrap"; return 0; fi
   if [ -f "$d/Makefile" ] || [ -f "$d/makefile" ] || [ -f "$d/GNUmakefile" ]; then echo "make"; return 0; fi
 
   echo "unknown"
 }
 
-default_build() {
-  d="$(srcdir)"
-  cd "$d" || die "cannot cd source dir: $d"
-
+export_toolchain_env() {
   export CC="${CC:-cc}"
   export CXX="${CXX:-c++}"
+  export AR="${AR:-ar}"
+  export RANLIB="${RANLIB:-ranlib}"
+  export STRIP="${STRIP:-strip}"
   export CFLAGS="${CFLAGS:-$ADM_CFLAGS}"
   export CXXFLAGS="${CXXFLAGS:-$ADM_CXXFLAGS}"
   export LDFLAGS="${LDFLAGS:-$ADM_LDFLAGS}"
   export MAKEFLAGS="${MAKEFLAGS:-$ADM_MAKEFLAGS}"
+}
+
+default_check() { :; }
+
+default_build() {
+  d="$(srcdir)"
+  cd "$d" || die "cannot cd source dir: $d"
+  export_toolchain_env
 
   sys="$(detect_build_system)"
   log "autodetect build system: $sys"
 
   case "$sys" in
-    cargo)
-      have cargo || die "cargo not found (add rust/cargo to BUILD_DEPENDS)"
-      # padrão robusto: build release
-      log "build: cargo build --release"
-      cargo build --release || die "cargo build failed"
-      ;;
-
-    go)
-      have go || die "go not found (add go to BUILD_DEPENDS)"
-      # go não tem padrão universal de install para /usr; regra:
-      # - se existir Makefile, use make (já teria caído em make)
-      # - senão: build binário principal para ./build-out (se tiver cmd/)
-      out="$WORKDIR/.go-out"
-      ensure_dir "$out"
-      log "build: go build"
-      if [ -d "$d/cmd" ]; then
-        # constrói cada cmd como binário separado (comum em projetos Go)
-        for c in "$d"/cmd/*; do
-          [ -d "$c" ] || continue
-          name=$(basename "$c")
-          (cd "$c" && go build -trimpath -ldflags="-s -w" -o "$out/$name") || die "go build failed for cmd/$name"
-        done
-      else
-        # single-module
-        go build -trimpath -ldflags="-s -w" -o "$out/$PKGNAME" ./... 2>/dev/null || \
-          go build -trimpath -ldflags="-s -w" -o "$out/$PKGNAME" . || die "go build failed"
-      fi
-      ;;
-
-    meson)
-      have meson || die "meson not found (add meson to BUILD_DEPENDS)"
-      n="$(pick_ninja)"
-      [ -n "$n" ] || die "need ninja or samu for meson projects"
-      b="$WORKDIR/.build-meson"
-      ensure_dir "$b"
-      log "build: meson setup"
-      # --prefix=/usr e DESTDIR no install depois
-      (cd "$b" && meson setup "$d" --prefix=/usr --buildtype=release) || die "meson setup failed"
-      log "build: meson compile"
-      (cd "$b" && meson compile -j "$ADM_JOBS") || die "meson compile failed"
-      ;;
-
-    cmake)
-      have cmake || die "cmake not found (add cmake to BUILD_DEPENDS)"
-      n="$(pick_ninja)"
-      b="$WORKDIR/.build-cmake"
-      ensure_dir "$b"
-      gen="Unix Makefiles"
-      if [ -n "$n" ]; then gen="Ninja"; fi
-      log "build: cmake configure ($gen)"
-      (cd "$b" && cmake -G "$gen" -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release "$d") || die "cmake configure failed"
-      log "build: cmake build"
-      (cd "$b" && cmake --build . -- -j "$ADM_JOBS") || die "cmake build failed"
-      ;;
-
     autotools_bootstrap)
-      have autoreconf || die "autoreconf not found (add autoconf/automake/libtool to BUILD_DEPENDS)"
+      need_cmd autoreconf
       log "build: autoreconf -fi"
       autoreconf -fi || die "autoreconf failed"
-      # cai no autotools normal
       log "build: ./configure"
       ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var || die "configure failed"
       log "build: make"
@@ -752,13 +678,145 @@ default_build() {
       make -j"$ADM_JOBS" || die "make failed"
       ;;
 
+    meson)
+      need_cmd meson
+      n="$(pick_ninja)"
+      [ -n "$n" ] || die "need ninja or samu for meson"
+      b="$WORKDIR/.build-meson"
+      ensure_dir "$b"
+      log "build: meson setup"
+      (cd "$b" && meson setup "$d" --prefix=/usr --buildtype=release) || die "meson setup failed"
+      log "build: meson compile"
+      (cd "$b" && meson compile -j "$ADM_JOBS") || die "meson compile failed"
+      ;;
+
+    cmake)
+      need_cmd cmake
+      n="$(pick_ninja)"
+      b="$WORKDIR/.build-cmake"
+      ensure_dir "$b"
+      gen="Unix Makefiles"
+      [ -n "$n" ] && gen="Ninja"
+      log "build: cmake configure ($gen)"
+      (cd "$b" && cmake -G "$gen" -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release "$d") || die "cmake configure failed"
+      log "build: cmake build"
+      (cd "$b" && cmake --build . -- -j "$ADM_JOBS") || die "cmake build failed"
+      ;;
+
+    cargo)
+      need_cmd cargo
+      log "build: cargo build --release"
+      cargo build --release || die "cargo build failed"
+      ;;
+
+    go)
+      need_cmd go
+      out="$WORKDIR/.go-out"
+      ensure_dir "$out"
+      log "build: go build"
+      if [ -d "$d/cmd" ]; then
+        for c in "$d"/cmd/*; do
+          [ -d "$c" ] || continue
+          name=$(basename "$c")
+          (cd "$c" && go build -trimpath -ldflags="-s -w" -o "$out/$name") || die "go build failed: cmd/$name"
+        done
+      else
+        want="$(hint_get "go-bin:")"
+        [ -z "$want" ] && want="$PKGNAME"
+        go build -trimpath -ldflags="-s -w" -o "$out/$want" . || die "go build failed"
+      fi
+      ;;
+
+    python)
+      need_cmd python3
+      log "build: python wheel"
+      if python3 -c "import build" >/dev/null 2>&1; then
+        python3 -m build --wheel --no-isolation || die "python build failed"
+      else
+        need_cmd pip3
+        ensure_dir "$WORKDIR/.pywheel"
+        pip3 wheel --no-deps --no-build-isolation -w "$WORKDIR/.pywheel" . || die "pip wheel failed"
+      fi
+      ;;
+
+    npm)
+      need_cmd npm
+      log "build: npm install/ci"
+      if [ -f package-lock.json ]; then
+        npm ci || die "npm ci failed"
+      else
+        npm install || die "npm install failed"
+      fi
+      script="$(hint_get "npm-build:")"
+      if [ -n "$script" ]; then
+        log "build: npm run $script"
+        npm run "$script" || die "npm run failed: $script"
+      else
+        if have node; then
+          node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts.build?0:1)" >/dev/null 2>&1 && \
+            { log "build: npm run build"; npm run build || die "npm run build failed"; }
+        fi
+      fi
+      ;;
+
+    perl)
+      need_cmd perl
+      if [ -f "Build.PL" ]; then
+        log "build: perl Build.PL"
+        perl Build.PL || die "perl Build.PL failed"
+        log "build: ./Build"
+        ./Build || die "perl Build failed"
+      else
+        log "build: perl Makefile.PL"
+        perl Makefile.PL PREFIX=/usr || die "perl Makefile.PL failed"
+        log "build: make"
+        make -j"$ADM_JOBS" || die "perl make failed"
+      fi
+      ;;
+
+    ruby)
+      need_cmd ruby
+      if [ -f "Rakefile" ] && have rake; then
+        task="$(hint_get "rake:")"
+        [ -z "$task" ] && task="build"
+        log "build: rake $task (best-effort)"
+        rake -T 2>/dev/null | "$ADM_GREP" -qE "(^|:)${task}\b" && rake "$task" || true
+      fi
+      if ls ./*.gemspec >/dev/null 2>&1 && have gem; then
+        spec=$(ls ./*.gemspec 2>/dev/null | "$ADM_AWK" 'NR==1{print;exit}')
+        log "build: gem build $spec"
+        gem build "$spec" || die "gem build failed"
+      fi
+      ;;
+
+    scons)
+      need_cmd scons
+      log "build: scons"
+      scons -j"$ADM_JOBS" || die "scons build failed"
+      ;;
+
+    waf)
+      sub="$(hint_get "waf-subdir:")"
+      [ -n "$sub" ] && cd "$d/$sub" || true
+      wafcmd="./waf"
+      [ -x "./waf" ] || wafcmd="waf"
+      need_cmd "${wafcmd#./}"
+      log "build: waf configure"
+      "$wafcmd" configure --prefix=/usr || die "waf configure failed"
+      log "build: waf build"
+      "$wafcmd" build -j"$ADM_JOBS" || die "waf build failed"
+      ;;
+
     *)
-      die "unknown build system; define pkg_build/pkg_install in build script for this package"
+      die "unknown build system; define pkg_build/pkg_install or set AUTOBUILD_HINT system:<name>"
       ;;
   esac
 }
 
-default_check() { :; }
+copy_tree() {
+  # $1 src, $2 dst
+  (cd "$1" && "$ADM_TAR" -cf - .) | (cd "$2" && "$ADM_TAR" -xpf -) || return 1
+}
 
 default_install() {
   d="$(srcdir)"
@@ -766,25 +824,48 @@ default_install() {
   log "autodetect install system: $sys"
 
   case "$sys" in
+    autotools_bootstrap|autotools|make)
+      cd "$d" || die "cannot cd source dir: $d"
+      log "install: make DESTDIR=... install"
+      make DESTDIR="$DESTDIR" install || die "make install failed"
+      ;;
+
+    meson)
+      b="$WORKDIR/.build-meson"
+      [ -d "$b" ] || die "meson build dir missing"
+      log "install: meson install --destdir"
+      (cd "$b" && meson install --destdir "$DESTDIR") || die "meson install failed"
+      ;;
+
+    cmake)
+      b="$WORKDIR/.build-cmake"
+      [ -d "$b" ] || die "cmake build dir missing"
+      log "install: cmake --install with DESTDIR"
+      (cd "$b" && DESTDIR="$DESTDIR" cmake --install .) || die "cmake install failed"
+      ;;
+
     cargo)
-      # Cargo não tem install padrão para /usr com DESTDIR universal.
-      # Estratégia: instalar binários de target/release em /usr/bin (se houver).
-      # (Para crates library-only, não instala nada.)
+      cd "$d" || die "cannot cd source dir: $d"
       bindir="$DESTDIR/usr/bin"
       ensure_dir "$bindir"
-      # binários: heurística: se existir target/release/* executável
-      # Instala apenas executáveis regulares.
       td="$d/target/release"
       [ -d "$td" ] || die "cargo target/release not found"
-      log "install: cargo binaries -> /usr/bin"
-      for f in "$td"/*; do
-        [ -f "$f" ] || continue
-        [ -x "$f" ] || continue
-        case "$(basename "$f")" in
-          *.d|*.rlib|*.so|*.a) continue ;;
-        esac
-        "$ADM_INSTALL" -m 0755 "$f" "$bindir/$(basename "$f")" || die "install failed: $(basename "$f")"
-      done
+      want="$(hint_get "cargo-bin:")"
+      if [ -n "$want" ]; then
+        [ -x "$td/$want" ] || die "cargo-bin not found/executable: $want"
+        log "install: cargo-bin $want -> /usr/bin"
+        "$ADM_INSTALL" -m 0755 "$td/$want" "$bindir/$want" || die "install failed: $want"
+      else
+        log "install: cargo bins -> /usr/bin (heuristic)"
+        for f in "$td"/*; do
+          [ -f "$f" ] || continue
+          [ -x "$f" ] || continue
+          case "$(basename "$f")" in
+            *.d|*.rlib|*.so|*.a) continue ;;
+          esac
+          "$ADM_INSTALL" -m 0755 "$f" "$bindir/$(basename "$f")" || die "install failed: $(basename "$f")"
+        done
+      fi
       ;;
 
     go)
@@ -792,105 +873,304 @@ default_install() {
       ensure_dir "$bindir"
       out="$WORKDIR/.go-out"
       [ -d "$out" ] || die "go build output not found"
-      log "install: go binaries -> /usr/bin"
-      for f in "$out"/*; do
-        [ -f "$f" ] || continue
-        "$ADM_INSTALL" -m 0755 "$f" "$bindir/$(basename "$f")" || die "install failed: $(basename "$f")"
-      done
+      want="$(hint_get "go-bin:")"
+      if [ -n "$want" ]; then
+        [ -f "$out/$want" ] || die "go-bin not found: $want"
+        log "install: go-bin $want -> /usr/bin"
+        "$ADM_INSTALL" -m 0755 "$out/$want" "$bindir/$want" || die "install failed: $want"
+      else
+        log "install: go binaries -> /usr/bin"
+        for f in "$out"/*; do
+          [ -f "$f" ] || continue
+          "$ADM_INSTALL" -m 0755 "$f" "$bindir/$(basename "$f")" || die "install failed: $(basename "$f")"
+        done
+      fi
       ;;
 
-    meson)
-      b="$WORKDIR/.build-meson"
-      [ -d "$b" ] || die "meson build dir missing"
-      log "install: meson install (DESTDIR)"
-      (cd "$b" && meson install --destdir "$DESTDIR") || die "meson install failed"
-      ;;
-
-    cmake)
-      b="$WORKDIR/.build-cmake"
-      [ -d "$b" ] || die "cmake build dir missing"
-      log "install: cmake install (DESTDIR)"
-      (cd "$b" && cmake --install . --prefix /usr --strip --component "") >/dev/null 2>&1 || true
-      # cmake --install não usa DESTDIR de forma uniforme; melhor exportar DESTDIR:
-      (cd "$b" && DESTDIR="$DESTDIR" cmake --install .) || die "cmake install failed"
-      ;;
-
-    autotools_bootstrap|autotools|make)
+    python)
+      need_cmd python3
+      need_cmd pip3
       cd "$d" || die "cannot cd source dir: $d"
-      log "install: make DESTDIR=... install"
-      make DESTDIR="$DESTDIR" install || die "make install failed"
+
+      whl=""
+      if [ -d "$d/dist" ]; then
+        whl=$(ls "$d"/dist/*.whl 2>/dev/null | "$ADM_AWK" 'NR==1{print;exit}')
+      fi
+      if [ -z "$whl" ] && [ -d "$WORKDIR/.pywheel" ]; then
+        whl=$(ls "$WORKDIR"/.pywheel/*.whl 2>/dev/null | "$ADM_AWK" 'NR==1{print;exit}')
+      fi
+      [ -n "$whl" ] || die "no wheel found (python build did not produce .whl)"
+
+      log "install: python wheel -> DESTDIR"
+      pip3 install --no-deps --no-compile --no-warn-script-location \
+        --prefix=/usr --root="$DESTDIR" "$whl" || die "pip install wheel failed"
+      ;;
+
+    npm)
+      need_cmd npm
+      cd "$d" || die "cannot cd source dir: $d"
+      sharedir="$DESTDIR/usr/share/$PKGNAME"
+      ensure_dir "$sharedir"
+
+      outdir="$(hint_get "npm-out:")"
+      [ -z "$outdir" ] && outdir="dist"
+
+      if [ -d "$d/$outdir" ]; then
+        log "install: npm output $outdir -> /usr/share/$PKGNAME"
+        copy_tree "$d/$outdir" "$sharedir" || die "npm output copy failed"
+      else
+        log "install: npm no dist found; installing minimal package.json"
+        [ -f "$d/package.json" ] && "$ADM_INSTALL" -m 0644 "$d/package.json" "$sharedir/package.json" || true
+      fi
+
+      bspec="$(hint_get "npm-bin:")"
+      if [ -n "$bspec" ]; then
+        name=$(printf '%s' "$bspec" | "$ADM_AWK" -F: '{print $1}')
+        entry=$(printf '%s' "$bspec" | "$ADM_AWK" -F: '{print $2}')
+        bindir="$DESTDIR/usr/bin"
+        ensure_dir "$bindir"
+        log "install: npm wrapper $name -> /usr/bin"
+        cat >"$bindir/$name" <<EOF
+#!/bin/sh
+exec node /usr/share/$PKGNAME/$entry "\$@"
+EOF
+        chmod 0755 "$bindir/$name" || die "chmod failed"
+      fi
+      ;;
+
+    perl)
+      need_cmd perl
+      cd "$d" || die "cannot cd source dir: $d"
+      if [ -f "Build.PL" ]; then
+        log "install: ./Build install --destdir"
+        ./Build install --destdir "$DESTDIR" || die "perl Build install failed"
+      else
+        log "install: make DESTDIR install"
+        make DESTDIR="$DESTDIR" install || die "perl make install failed"
+      fi
+      ;;
+
+    ruby)
+      need_cmd ruby
+      cd "$d" || die "cannot cd source dir: $d"
+      if ls ./*.gem >/dev/null 2>&1 && have gem; then
+        gemfile=$(ls ./*.gem 2>/dev/null | "$ADM_AWK" 'NR==1{print;exit}')
+        vdir="$DESTDIR/usr/lib/ruby/gems"
+        ensure_dir "$vdir"
+        log "install: gem unpack -> $vdir"
+        (cd "$vdir" && gem unpack "$d/$gemfile") || die "gem unpack failed"
+      elif ls ./*.gemspec >/dev/null 2>&1 && have gem; then
+        spec=$(ls ./*.gemspec 2>/dev/null | "$ADM_AWK" 'NR==1{print;exit}')
+        gem build "$spec" || die "gem build failed"
+        gemfile=$(ls ./*.gem 2>/dev/null | "$ADM_AWK" 'NR==1{print;exit}')
+        vdir="$DESTDIR/usr/lib/ruby/gems"
+        ensure_dir "$vdir"
+        log "install: gem unpack -> $vdir"
+        (cd "$vdir" && gem unpack "$d/$gemfile") || die "gem unpack failed"
+      elif [ -f "Rakefile" ] && have rake; then
+        log "install: rake install (best-effort)"
+        rake install DESTDIR="$DESTDIR" PREFIX=/usr 2>/dev/null || die "rake install failed"
+      else
+        die "ruby install unknown; use pkg_install or provide gemspec"
+      fi
+      ;;
+
+    scons)
+      need_cmd scons
+      cd "$d" || die "cannot cd source dir: $d"
+      log "install: scons DESTDIR install"
+      scons DESTDIR="$DESTDIR" PREFIX=/usr install || die "scons install failed"
+      ;;
+
+    waf)
+      sub="$(hint_get "waf-subdir:")"
+      [ -n "$sub" ] && cd "$d/$sub" || true
+      wafcmd="./waf"
+      [ -x "./waf" ] || wafcmd="waf"
+      need_cmd "${wafcmd#./}"
+      log "install: waf install --destdir"
+      "$wafcmd" install --destdir="$DESTDIR" || die "waf install failed"
       ;;
 
     *)
-      die "unknown install system; define pkg_install in build script"
+      die "unknown install system; define pkg_install or set AUTOBUILD_HINT system:<name>"
       ;;
   esac
+
+  copy_files_overlay
 }
 
-call_phase() {
-  # args: phase
-  ph="$1"
-  fn="pkg_$ph"
-  run_hook "pre_$ph"
-  if command -v "$fn" >/dev/null 2>&1; then
-    log "phase: $fn"
-    "$fn" || die "phase failed: $fn"
-  else
-    case "$ph" in
-      unpack) default_unpack ;;
-      prepare) default_prepare ;;
-      build) default_build ;;
-      check) default_check ;;
-      install) default_install ;;
-      *) die "unknown phase: $ph" ;;
+###############################################################################
+# Packaging: manifest, strip, tar.zst (fallback xz)
+###############################################################################
+write_meta() {
+  ensure_dir "$(db_pkg_dir)"
+  {
+    echo "PKGNAME=$PKGNAME"
+    echo "PKGVER=$PKGVER"
+    echo "PKGREL=$PKGREL"
+    echo "SECTION=$SECTION"
+    echo "PKGDESC=$PKGDESC"
+    echo "PKGURL=$PKGURL"
+    echo "LICENSE=$LICENSE"
+    echo "ARCH=$ARCH"
+    echo "DEPENDS=$(printf '%s' "$DEPENDS" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//')"
+    echo "BUILD_DEPENDS=$(printf '%s' "$BUILD_DEPENDS" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//')"
+    echo "BUILDTIME=$(now)"
+  } >"$(db_meta)"
+}
+
+make_manifest() {
+  (cd "$DESTDIR" && "$ADM_FIND" . -mindepth 1 -print | "$ADM_SED" 's#^\./##') | "$ADM_SORT" >"$WORKDIR/manifest"
+}
+
+strip_binaries() {
+  [ "${ADM_STRIP:-1}" -eq 1 ] || return 0
+  command -v strip >/dev/null 2>&1 || return 0
+  (cd "$DESTDIR" && "$ADM_FIND" . -type f 2>/dev/null) | while IFS= read -r f; do
+    case "$f" in
+      */bin/*|*/sbin/*|*/lib/*.so*|*/libexec/*)
+        strip --strip-unneeded "$DESTDIR/$f" 2>/dev/null || true
+        ;;
     esac
+  done
+}
+
+pkg_artifact_path() { echo "$ADM_BIN_CACHE/$(pkg_id).tar.zst"; }
+pkg_artifact_path_xz() { echo "$ADM_BIN_CACHE/$(pkg_id).tar.xz"; }
+
+pack_destdir() {
+  ensure_dir "$ADM_BIN_CACHE"
+  zst="$(pkg_artifact_path)"
+  xz="$(pkg_artifact_path_xz)"
+
+  make_manifest
+  strip_binaries
+
+  if command -v "$ADM_ZSTD" >/dev/null 2>&1; then
+    log "pack: $(basename "$zst")"
+    (cd "$DESTDIR" && "$ADM_TAR" -cf - .) | "$ADM_ZSTD" -q -T0 -19 -o "$zst.tmp" || die "zstd packaging failed"
+    mv "$zst.tmp" "$zst" || die "cannot move artifact"
+    [ -f "$xz" ] && "$ADM_RM" -f "$xz" || true
+  else
+    need_cmd "$ADM_XZ"
+    log "pack: $(basename "$xz") (fallback)"
+    (cd "$DESTDIR" && "$ADM_TAR" -cf - .) | "$ADM_XZ" -c -T0 -9 >"$xz.tmp" || die "xz packaging failed"
+    mv "$xz.tmp" "$xz" || die "cannot move artifact"
+    [ -f "$zst" ] && "$ADM_RM" -f "$zst" || true
   fi
-  run_hook "post_$ph"
+}
+
+artifact_for_loaded_pkg() {
+  z="$(pkg_artifact_path)"
+  x="$(pkg_artifact_path_xz)"
+  [ -f "$z" ] && { echo "$z"; return 0; }
+  [ -f "$x" ] && { echo "$x"; return 0; }
+  return 1
 }
 
 ###############################################################################
-# Resume and clean build dirs
+# Install/upgrade/uninstall using manifest
 ###############################################################################
-state_file() { echo "$WORKDIR/.state"; }
+remove_paths_from_manifest() {
+  mf="$1"
+  [ -f "$mf" ] || return 0
 
-state_set() { echo "$1" >"$(state_file)"; }
+  log "uninstall: removing files"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in ""|"/"|".") continue ;; esac
+    if [ -f "$ADM_ROOT/$p" ] || [ -L "$ADM_ROOT/$p" ]; then
+      "$ADM_RM" -f "$ADM_ROOT/$p" 2>/dev/null || true
+    fi
+  done <"$mf"
 
-state_get() {
-  [ -f "$(state_file)" ] && cat "$(state_file)" || echo "none"
+  log "uninstall: pruning empty directories"
+  "$ADM_AWK" -F/ '{print NF, $0}' "$mf" | "$ADM_SORT" -rn | "$ADM_AWK" '{ $1=""; sub(/^ /,""); print }' \
+    | while IFS= read -r p; do
+      [ -d "$ADM_ROOT/$p" ] && rmdir "$ADM_ROOT/$p" 2>/dev/null || true
+    done
 }
 
-clean_workdir() {
-  [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ] && "$ADM_RM" -rf "$WORKDIR" || true
+install_pkg_loaded() {
+  a="$(artifact_for_loaded_pkg || true)"
+  if [ -z "$a" ]; then
+    build_pkg "$PKGDIR"
+    a="$(artifact_for_loaded_pkg)" || die "build completed but no artifact found"
+  fi
+
+  staging="$ADM_BUILD_DIR/.stage-$PKGNAME-$$"
+  ensure_dir "$staging"
+  log "install: staging extract -> $staging"
+
+  case "$a" in
+    *.tar.zst)
+      need_cmd "$ADM_ZSTD"
+      "$ADM_ZSTD" -dc "$a" | (cd "$staging" && "$ADM_TAR" -xpf -) || die "staging extract failed"
+      ;;
+    *.tar.xz)
+      need_cmd "$ADM_XZ"
+      "$ADM_XZ" -dc "$a" | (cd "$staging" && "$ADM_TAR" -xpf -) || die "staging extract failed"
+      ;;
+    *) die "unknown artifact type: $a" ;;
+  esac
+
+  oldmf="$(db_manifest)"
+  oldmf_tmp=""
+  if is_installed; then
+    oldmf_tmp="$ADM_BUILD_DIR/.oldmf-$PKGNAME-$$"
+    [ -f "$oldmf" ] && "$ADM_CP" -f "$oldmf" "$oldmf_tmp" || true
+  fi
+
+  log "install: applying to root $ADM_ROOT"
+  (cd "$staging" && "$ADM_TAR" -cf - .) | (cd "$ADM_ROOT" && "$ADM_TAR" -xpf -) || die "apply failed"
+
+  ensure_dir "$(db_pkg_dir)"
+  (cd "$staging" && "$ADM_FIND" . -mindepth 1 -print | "$ADM_SED" 's#^\./##') | "$ADM_SORT" >"$ADM_BUILD_DIR/.newmf-$PKGNAME-$$"
+
+  mv "$ADM_BUILD_DIR/.newmf-$PKGNAME-$$" "$(db_manifest)" || die "cannot commit manifest"
+  "$ADM_TOUCH" "$(db_installed_marker)"
+  write_meta
+
+  if [ -n "$oldmf_tmp" ] && [ -f "$oldmf_tmp" ]; then
+    log "upgrade: removing old files not present in new manifest"
+    "$ADM_GREP" -vxFf "$(db_manifest)" "$oldmf_tmp" >"$ADM_BUILD_DIR/.remove-$PKGNAME-$$" || true
+    remove_paths_from_manifest "$ADM_BUILD_DIR/.remove-$PKGNAME-$$"
+    "$ADM_RM" -f "$ADM_BUILD_DIR/.remove-$PKGNAME-$$" "$oldmf_tmp" || true
+  fi
+
+  "$ADM_RM" -rf "$staging" || true
+  log "installed: $(pkg_id)"
 }
 
-prepare_workdir() {
-  ensure_dir "$ADM_BUILD_DIR"
-  WORKDIR="$ADM_BUILD_DIR/$PKGNAME-$PKGVER-r$PKGREL"
-  DESTDIR="$WORKDIR/destdir"
-  ensure_dir "$WORKDIR"
-  # Always clean DESTDIR before build (no bloat / deterministic)
-  [ -d "$DESTDIR" ] && "$ADM_RM" -rf "$DESTDIR"
-  ensure_dir "$DESTDIR"
-  export WORKDIR DESTDIR
+uninstall_pkg() {
+  n="$1"
+  mf="$ADM_DB_DIR/pkgs/$n/manifest"
+  [ -f "$mf" ] || die "not installed: $n"
+  log "uninstall: $n"
+  remove_paths_from_manifest "$mf"
+  "$ADM_RM" -rf "$ADM_DB_DIR/pkgs/$n" || true
+  log "uninstalled: $n"
 }
 
 ###############################################################################
-# Build from scripts and create binary package
+# Build driver (fetch/unpack/prepare/build/check/install/package)
 ###############################################################################
 build_pkg() {
-  # args: pkgdir
   load_build_script "$1"
   log_init
 
   ADM_CURRENT_LOG="$(log_file_for "$PKGNAME" "$PKGVER" "$PKGREL")"
   export ADM_CURRENT_LOG
-  ensure_dir "$(dirname "$ADM_CURRENT_LOG")"
 
   log "build start: $(pkg_id) (section=$SECTION)"
   prepare_workdir
 
-  # resume support: if state exists, continue from next phase
   st="$(state_get)"
+  if [ "${ADM_RESUME:-1}" -eq 0 ]; then
+    st="none"
+  fi
+
   case "$st" in
     none) next="fetch" ;;
     fetch) next="unpack" ;;
@@ -904,14 +1184,9 @@ build_pkg() {
     *) next="fetch" ;;
   esac
 
-  # Fetch always safe to re-run; but honor resume by skipping if already marked
-  if [ "$st" = "none" ] || [ "$st" = "fetch" ]; then
+  if [ "$st" = "none" ]; then
     state_set "fetch"
-    call_phase "fetch" 2>/dev/null || true
-    # If pkg_fetch not defined, use default verify_sources fetch
-    if ! command -v pkg_fetch >/dev/null 2>&1; then
-      verify_sources
-    fi
+    call_phase "fetch"
     state_set "unpack"
   fi
 
@@ -942,7 +1217,6 @@ build_pkg() {
   if [ "$next" = "install" ] || [ "$st" = "install" ]; then
     state_set "install"
     call_phase "install"
-    copy_files_overlay
     state_set "package"
   fi
 
@@ -956,87 +1230,19 @@ build_pkg() {
 }
 
 ###############################################################################
-# Install flow: from cache if available, else build then install.
-###############################################################################
-artifact_for_loaded_pkg() {
-  z="$(pkg_artifact_path)"
-  x="$(pkg_artifact_path_xz)"
-  if [ -f "$z" ]; then echo "$z"; return 0; fi
-  if [ -f "$x" ]; then echo "$x"; return 0; fi
-  return 1
-}
-
-install_pkg_loaded() {
-  # Requires load_build_script already done
-  a="$(artifact_for_loaded_pkg || true)"
-  if [ -z "$a" ]; then
-    # build it
-    build_pkg "$PKGDIR"
-    a="$(artifact_for_loaded_pkg)" || die "build completed but no artifact found"
-  fi
-
-  # atomic upgrade: extract to a staging dir first, then apply, then remove old only after success
-  staging="$ADM_BUILD_DIR/.stage-$PKGNAME-$$"
-  ensure_dir "$staging"
-  log "install: staging extract to $staging"
-  case "$a" in
-    *.tar.zst)
-      need_cmd "$ADM_ZSTD"
-      "$ADM_ZSTD" -dc "$a" | (cd "$staging" && "$ADM_TAR" -xpf -) || die "staging extract failed"
-      ;;
-    *.tar.xz)
-      need_cmd "$ADM_XZ"
-      "$ADM_XZ" -dc "$a" | (cd "$staging" && "$ADM_TAR" -xpf -) || die "staging extract failed"
-      ;;
-  esac
-
-  # If installed, keep old manifest for uninstall after success
-  oldmf="$(db_manifest)"
-  oldmf_tmp=""
-  if is_installed; then
-    oldmf_tmp="$ADM_BUILD_DIR/.oldmf-$PKGNAME-$$"
-    [ -f "$oldmf" ] && "$ADM_CP" -f "$oldmf" "$oldmf_tmp" || true
-  fi
-
-  # Apply staging to root
-  log "install: applying to root $ADM_ROOT"
-  (cd "$staging" && "$ADM_TAR" -cf - .) | (cd "$ADM_ROOT" && "$ADM_TAR" -xpf -) || die "apply failed"
-
-  # Create new manifest from staging
-  ensure_dir "$(db_pkg_dir)"
-  (cd "$staging" && "$ADM_FIND" . -mindepth 1 -print | "$ADM_SED" 's#^\./##') | "$ADM_SORT" >"$ADM_BUILD_DIR/.newmf-$PKGNAME-$$"
-
-  # Commit DB first
-  mv "$ADM_BUILD_DIR/.newmf-$PKGNAME-$$" "$(db_manifest)" || die "cannot commit manifest"
-  "$ADM_TOUCH" "$(db_installed_marker)"
-  write_meta
-
-  # Only now remove old files that are not part of new manifest
-  if [ -n "$oldmf_tmp" ] && [ -f "$oldmf_tmp" ]; then
-    log "upgrade: removing old files not present in new manifest"
-    "$ADM_GREP" -vxFf "$(db_manifest)" "$oldmf_tmp" >"$ADM_BUILD_DIR/.remove-$PKGNAME-$$" || true
-    remove_paths_from_manifest "$ADM_BUILD_DIR/.remove-$PKGNAME-$$"
-    "$ADM_RM" -f "$ADM_BUILD_DIR/.remove-$PKGNAME-$$" "$oldmf_tmp" || true
-  fi
-
-  "$ADM_RM" -rf "$staging" || true
-  log "installed: $(pkg_id)"
-}
-
-###############################################################################
 # High-level operations
 ###############################################################################
 install_with_deps() {
-  # args: pkgname or category/name
   target="$1"
   pd="$(pkg_path_from_name "$target")" || die "package not found: $target"
   load_build_script "$pd"
 
-  # Resolve dependency order (closure) and install in order
-  req="$WORKDIR/.req"
   ensure_dir "$ADM_BUILD_DIR"
   WORKDIR="$ADM_BUILD_DIR/.op-$$"
   ensure_dir "$WORKDIR"
+  export WORKDIR
+
+  req="$WORKDIR/.req"
   echo "$PKGNAME" >"$req"
 
   order="$(toposort "$req")" || die "dependency resolution failed"
@@ -1054,27 +1260,12 @@ install_with_deps() {
   "$ADM_RM" -rf "$WORKDIR" || true
 }
 
-uninstall_pkg() {
-  # args: pkgname
-  n="$1"
-  pdir="$(db_pkg_dir)/manifest"
-  [ -f "$pdir" ] || die "not installed: $n"
-  log_init
-  log "uninstall: $n"
-  remove_paths_from_manifest "$pdir"
-  "$ADM_RM" -rf "$(db_pkg_dir)" || true
-  log "uninstalled: $n"
-}
-
 info_pkg() {
-  # args: pkgname or category/name
   target="$1"
   pd="$(pkg_path_from_name "$target" 2>/dev/null || true)"
   if [ -n "$pd" ]; then
     load_build_script "$pd"
-    installed="no"
-    is_installed && installed="yes"
-    if [ "$installed" = "yes" ]; then mark="[ ✔️ ]"; else mark="[     ]"; fi
+    if is_installed; then mark="[ ✔️ ]"; else mark="[     ]"; fi
     echo "$mark $PKGNAME"
     echo "  Version: $PKGVER-r$PKGREL"
     echo "  Section: $SECTION"
@@ -1084,12 +1275,12 @@ info_pkg() {
     echo "  Arch:    ${ARCH:-}"
     echo "  Depends: $(printf '%s' "$DEPENDS" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//')"
     echo "  BDepends: $(printf '%s' "$BUILD_DEPENDS" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//')"
+    echo "  Hints:   $(printf '%s' "$AUTOBUILD_HINT" | "$ADM_SED" 's/[[:space:]]\+/ /g' | "$ADM_SED" 's/^ *//; s/ *$//')"
   else
-    # maybe installed but build script missing
     d="$ADM_DB_DIR/pkgs/$target/meta"
     if [ -f "$d" ]; then
       echo "[ ✔️ ] $target (installed; build script missing)"
-      cat "$d" | "$ADM_SED" 's/^/  /'
+      "$ADM_SED" 's/^/  /' "$d"
     else
       die "package not found: $target"
     fi
@@ -1097,19 +1288,14 @@ info_pkg() {
 }
 
 search_pkgs() {
-  # args: pattern
   pat="$1"
   [ -n "$pat" ] || pat="."
   "$ADM_FIND" "$ADM_PKGS_DIR" -mindepth 2 -maxdepth 2 -type f -name build 2>/dev/null | while IFS= read -r b; do
     d=$(dirname "$b")
     c=$(basename "$(dirname "$d")")
     n=$(basename "$d")
-    case "$n" in
-      *"$pat"*) ;;
-      *) continue ;;
-    esac
+    case "$n" in *"$pat"*) ;; *) continue ;; esac
     p="$c/$n"
-    # installed mark
     if [ -f "$ADM_DB_DIR/pkgs/$n/installed" ]; then
       echo "[ ✔️ ] $p"
     else
@@ -1119,7 +1305,6 @@ search_pkgs() {
 }
 
 list_installed() {
-  ensure_dir "$ADM_DB_DIR/pkgs"
   "$ADM_FIND" "$ADM_DB_DIR/pkgs" -mindepth 2 -maxdepth 2 -type f -name installed 2>/dev/null | while IFS= read -r f; do
     n=$(basename "$(dirname "$f")")
     echo "[ ✔️ ] $n"
@@ -1127,7 +1312,6 @@ list_installed() {
 }
 
 sync_git() {
-  # optional: commit and push changes in ADM_GIT_REPO_DIR
   [ -d "$ADM_GIT_REPO_DIR/.git" ] || die "not a git repo: $ADM_GIT_REPO_DIR"
   need_cmd "$ADM_GIT"
   (cd "$ADM_GIT_REPO_DIR" && \
@@ -1140,8 +1324,7 @@ sync_git() {
 
 clean_system() {
   log_init
-  msg "clean: removing leftover build dirs older than 7 days"
-  # Busybox find may lack -mtime; try anyway.
+  msg "clean: removing leftover build dirs older than 7 days (best-effort)"
   "$ADM_FIND" "$ADM_BUILD_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +7 2>/dev/null | while IFS= read -r d; do
     "$ADM_RM" -rf "$d" 2>/dev/null || true
   done
@@ -1149,12 +1332,9 @@ clean_system() {
 }
 
 rebuild_pkg() {
-  # args: pkgname
   target="$1"
   pd="$(pkg_path_from_name "$target")" || die "package not found: $target"
   load_build_script "$pd"
-  # wipe existing workdir state to force clean rebuild
-  ensure_dir "$ADM_BUILD_DIR"
   w="$ADM_BUILD_DIR/$PKGNAME-$PKGVER-r$PKGREL"
   [ -d "$w" ] && "$ADM_RM" -rf "$w" || true
   build_pkg "$pd"
@@ -1162,13 +1342,12 @@ rebuild_pkg() {
 }
 
 rebuild_world() {
-  # Rebuild all installed packages in dependency order (best-effort).
   log_init
   ensure_dir "$ADM_BUILD_DIR"
   WORKDIR="$ADM_BUILD_DIR/.world-$$"
   ensure_dir "$WORKDIR"
+  export WORKDIR
 
-  # collect installed names
   inst="$WORKDIR/installed"
   : >"$inst"
   "$ADM_FIND" "$ADM_DB_DIR/pkgs" -mindepth 2 -maxdepth 2 -type f -name installed 2>/dev/null \
@@ -1178,7 +1357,6 @@ rebuild_world() {
 
   order="$(toposort "$inst")" || die "dependency resolution failed for world rebuild"
   printf '%s\n' "$order" | while IFS= read -r p; do
-    # Only rebuild if installed
     [ -f "$ADM_DB_DIR/pkgs/$p/installed" ] || continue
     msg "rebuild: $p"
     rebuild_pkg "$p"
@@ -1205,16 +1383,30 @@ Usage:
   adm-pkg clean
   adm-pkg sync
 
-Notes:
-  - Build scripts live under: $ADM_PKGS_DIR/<category>/<pkg>/build
-  - patches: <pkg>/patch/* (auto-applied)
-  - files overlay: <pkg>/files/* (copied into DESTDIR)
+Build scripts:
+  $ADM_PKGS_DIR/<category>/<pkg>/build
+Patches:
+  $ADM_PKGS_DIR/<category>/<pkg>/patch/*
+Files overlay:
+  $ADM_PKGS_DIR/<category>/<pkg>/files/*  (copied into DESTDIR)
+Hints:
+  AUTOBUILD_HINT can include:
+    system:<name>
+    cargo-bin:<name>
+    go-bin:<name>
+    npm-build:<script>
+    npm-out:<dir>
+    npm-bin:<name>:<entry>
+    unpack:<a,b,c>
+    srcdir:<path>
+    patchlevel:<0..4>
+    waf-subdir:<path>
+    rake:<task>
 EOF
 }
 
 main() {
   log_init
-
   cmd="${1:-}"
   case "$cmd" in
     search) shift; search_pkgs "${1:-.}" ;;
