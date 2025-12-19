@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# extra/automake 1.18.1 - build script para adm
+# Compatível com musl, bootstrap e sistema final
+
+NAME="automake"
+CATEGORY="extra"
+VERSION="1.18.1"
+
+URL="https://ftp.gnu.org/gnu/automake/automake-1.18.1.tar.xz"
+SHA256="168aa363278351b89af56684448f525a5bce5079d0b6842bd910fdd3f1646887"
+
+# automake normalmente é usado junto com autoconf; também depende de perl em runtime.
+DEPENDS="autoconf"
+BUILD_DEPENDS="perl"
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-nls
+"
+
+pkg_prepare() {
+  # Limpeza defensiva para rebuild/resume
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
