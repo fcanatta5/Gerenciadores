@@ -1,0 +1,7 @@
+# Coloque no mesmo diretório do script.
+# name|url|sha256
+linux|https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.18.1.tar.xz|<SHA256>
+binutils|https://sourceware.org/pub/binutils/releases/binutils-2.45.1.tar.xz|<SHA256>
+gcc|https://ftp.gnu.org/gnu/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz|438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e
+musl|https://musl.libc.org/releases/musl-1.2.5.tar.gz|a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
+busybox|https://busybox.net/downloads/busybox-1.36.1.tar.bz2|<SHA256>
