@@ -1,0 +1,249 @@
+BOOTSTRAP COMPLETO DO SISTEMA COM ADM
+====================================
+
+Este documento descreve, passo a passo, como sair de um host Linux,
+construir um cross-toolchain temporário com musl + busybox,
+entrar em chroot com segurança e, a partir daí, permitir que o ADM
+assuma completamente a construção do sistema final.
+
+Nada aqui é implícito. Cada etapa tem um propósito claro.
+
+----------------------------------------------------------------------
+CONCEITOS FUNDAMENTAIS
+----------------------------------------------------------------------
+
+1) ROOTFS
+---------
+ROOTFS = /mnt/adm/rootfs
+
+Esse diretório será o "/" (raiz) do sistema novo quando você entrar
+em chroot. Tudo o que estiver aqui será o sistema final.
+
+2) CROSS-TOOLS
+--------------
+CROSS-TOOLS = /mnt/adm/rootfs/cross-tools
+
+Aqui fica o toolchain temporário:
+- x86_64-linux-musl-gcc
+- x86_64-linux-musl-ld
+- binutils
+- headers do kernel
+- libc musl (no sysroot)
+
+Esse toolchain NÃO é o sistema final.
+Ele existe apenas para permitir que o sistema novo seja construído.
+
+3) ADM
+------
+O adm é o gerenciador que vai assumir tudo depois.
+Mas ele NÃO pode funcionar sem ferramentas mínimas.
+
+----------------------------------------------------------------------
+FASE 1 — O QUE O adm-cross-bootstrap.sh FAZ
+----------------------------------------------------------------------
+
+Quando você executa:
+
+  sudo ./adm-cross-bootstrap.sh --all
+
+O script faz APENAS isto:
+
+1) Cria o layout mínimo do rootfs:
+   - /bin /lib /usr /etc /proc /sys /dev /run /tmp
+
+2) Instala linux-headers no sysroot:
+   - /mnt/adm/rootfs/usr/include
+
+3) Constrói binutils cross (pass1):
+   - instala em /mnt/adm/rootfs/cross-tools
+
+4) Constrói gcc cross (pass1):
+   - apenas C
+   - sem headers
+   - apenas para compilar libc
+
+5) Constrói musl libc:
+   - instala libc e headers no rootfs
+
+6) Constrói gcc cross (pass2):
+   - agora com libc
+   - C e C++
+
+7) Constrói busybox estático:
+   - instala em /mnt/adm/rootfs/bin
+   - cria /bin/sh
+
+RESULTADO FINAL DA FASE 1:
+--------------------------
+✔ toolchain temporário funcional
+✔ rootfs mínimo vivo
+✔ possível entrar em chroot
+
+O SCRIPT NÃO:
+-------------
+✘ não instala gcc nativo em /usr/bin
+✘ não instala binutils nativo
+✘ não instala make, tar, patch completos
+✘ não roda o adm sozinho
+
+Isso é INTENCIONAL.
+
+----------------------------------------------------------------------
+FASE 2 — ENTRAR EM CHROOT COM SEGURANÇA
+----------------------------------------------------------------------
+
+Antes de entrar no chroot, no HOST:
+
+  sudo ./adm-cross-bootstrap.sh --mounts
+
+Isso monta:
+- /proc
+- /sys
+- /dev
+- /run
+
+Agora entre no chroot:
+
+  sudo chroot /mnt/adm/rootfs /bin/sh
+
+Se você vê um prompt e consegue rodar:
+
+  echo OK
+  ls /
+
+Então o chroot está funcional.
+
+----------------------------------------------------------------------
+FASE 3 — PREPARAR O AMBIENTE PARA O ADM
+----------------------------------------------------------------------
+
+Dentro do chroot, faça:
+
+1) Tornar o cross-toolchain acessível:
+
+  export PATH=/cross-tools/bin:/bin:/usr/bin
+
+Teste:
+
+  x86_64-linux-musl-gcc --version
+
+Se funcionar, você pode compilar programas.
+
+2) Copiar o ADM para dentro do chroot (feito no HOST):
+
+  cp /usr/sbin/adm /mnt/adm/rootfs/usr/sbin/adm
+  chmod +x /mnt/adm/rootfs/usr/sbin/adm
+
+  cp -a /usr/local/adm/packages /mnt/adm/rootfs/usr/local/adm/
+
+Volte ao chroot e teste:
+
+  adm --help
+
+Neste ponto:
+✔ o adm existe
+✘ o sistema ainda não é autossuficiente
+
+----------------------------------------------------------------------
+FASE 4 — PRIMEIRO BOOTSTRAP COM O ADM
+----------------------------------------------------------------------
+
+Agora acontece o ponto mais importante:
+
+O ADM será usado PARA CONSTRUIR AS FERRAMENTAS QUE ELE MESMO PRECISA.
+
+Dentro do chroot, execute nesta ordem EXATA:
+
+1) zlib
+   adm build zlib
+
+2) m4
+   adm build m4
+
+3) make
+   adm build make
+
+4) bison
+   adm build bison
+
+5) flex
+   adm build flex
+
+Essas ferramentas permitem construir toolchains reais.
+
+----------------------------------------------------------------------
+FASE 5 — SUBSTITUIR O TOOLCHAIN TEMPORÁRIO
+----------------------------------------------------------------------
+
+Agora construa os toolchains NATIVOS FINAIS:
+
+6) binutils nativo
+   adm build binutils
+
+Resultado:
+- /usr/bin/ld
+- /usr/bin/as
+
+7) gcc nativo
+   adm build gcc
+
+Resultado:
+- /usr/bin/gcc
+- /usr/bin/g++
+- sistema se compila a si mesmo
+
+Teste:
+
+  which gcc
+  gcc --version
+
+Se o caminho for /usr/bin/gcc, sucesso.
+
+----------------------------------------------------------------------
+FASE 6 — DESCARTAR O CROSS-TOOLCHAIN
+----------------------------------------------------------------------
+
+Quando gcc e binutils NATIVOS estiverem funcionando:
+
+  rm -rf /cross-tools
+
+Agora:
+✔ o sistema é nativo
+✔ o adm controla tudo
+✔ nenhum resíduo do bootstrap é necessário
+
+----------------------------------------------------------------------
+FASE 7 — ESTADO FINAL DO SISTEMA
+----------------------------------------------------------------------
+
+Neste ponto você tem:
+
+✔ musl libc funcional
+✔ gcc/binutils nativos
+✔ busybox ou coreutils
+✔ adm totalmente operacional
+✔ sistema rolling pronto para crescer
+
+A partir daqui, tudo se resume a:
+
+  adm build <pacote>
+
+----------------------------------------------------------------------
+MODELO MENTAL (IMPORTANTE)
+----------------------------------------------------------------------
+
+FASE                | QUEM COMPILA
+--------------------|-------------------------
+host                | host → cross-tools
+bootstrap early     | cross-tools → rootfs
+sistema final       | rootfs → rootfs (nativo)
+
+O adm-cross-bootstrap.sh cobre apenas a PRIMEIRA LINHA.
+O ADM cobre TODAS AS OUTRAS.
+
+----------------------------------------------------------------------
+FIM
+----------------------------------------------------------------------
+
+Este processo é equivalente a LFS, porém automatizado,
+reprodutível e gerenciado pelo ADM.
