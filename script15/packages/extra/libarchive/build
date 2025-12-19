@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# extra/libarchive 3.8.4 - build script para adm
+# Autotools (sem depender de cmake), bom para bootstrap.
+
+NAME="libarchive"
+CATEGORY="extra"
+VERSION="3.8.4"
+
+URL="https://www.libarchive.org/downloads/libarchive-3.8.4.tar.xz"
+SHA256="c7b847b57feacf5e182f4d14dd6cae545ac6843d55cb725f58e107cdf1c9ad73"
+
+# Dependências típicas para habilitar filtros comuns usados por sistemas atuais
+DEPENDS="zlib bzip2 xz zstd openssl"
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+  --without-xml2
+"
+
+pkg_prepare() {
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() { :; }
