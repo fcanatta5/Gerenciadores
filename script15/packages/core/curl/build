@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# core/curl 8.17.0 - build script para adm
+# TLS via OpenSSL + zlib, bootstrap-friendly
+
+NAME="curl"
+CATEGORY="core"
+VERSION="8.17.0"
+
+# Tarball oficial (release)
+URL="https://github.com/curl/curl/releases/download/curl-8_17_0/curl-8.17.0.tar.xz"
+SHA256="955f6e729ad6b3566260e8fef68620e76ba3c31acf0a18524416a185acf77992"
+
+DEPENDS="openssl zlib"
+BUILD_DEPENDS=""
+
+PREFIX="/usr"
+BUILD_SYSTEM="autotools"
+
+CONFIGURE_OPTS="
+  --prefix=$PREFIX
+  --disable-static
+  --with-openssl
+  --with-zlib
+  --with-ca-path=/etc/ssl/certs
+  --without-libpsl
+"
+
+pkg_prepare() {
+  # Fix citado por BLFS (segurança/robustez do script wcurl)
+  # (inofensivo se o arquivo não existir)
+  sed -i 's/2F 5C/%2F %5C/' scripts/wcurl 2>/dev/null || true
+
+  make distclean >/dev/null 2>&1 || true
+}
+
+pkg_configure() {
+  rm -rf build
+  mkdir -p build
+  cd build
+
+  ../configure $CONFIGURE_OPTS
+}
+
+pkg_build() {
+  cd build
+  make -j"${JOBS:-1}"
+}
+
+pkg_install() {
+  cd build
+  make DESTDIR="$DESTDIR" install
+
+  # Remove .la (boa prática)
+  find "$DESTDIR" -name '*.la' -delete 2>/dev/null || true
+}
+
+pkg_post() {
+  :
+}
