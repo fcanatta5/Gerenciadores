@@ -77,6 +77,180 @@ ensure_dir() { [ -d "$1" ] || "$ADM_MKDIR" -p "$1" || die "cannot create dir: $1
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+is_url() {
+  case "$1" in
+    http://*|https://*|ftp://*) return 0 ;;
+  esac
+  return 1
+}
+
+trim() { printf '%s' "$1" | "$ADM_SED" 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
+
+have_bsdtar() { command -v bsdtar >/dev/null 2>&1; }
+
+parse_source() {
+  # Input formats:
+  #   name::URL
+  #   URL
+  #   git+https://...#ref=v1.2.3&subdir=...
+  #   github:user/repo#ref=...
+  #   gitlab:user/repo#ref=...
+  #
+  # Outputs (globals):
+  #   SRC_NAME SRC_KIND SRC_URL SRC_REF SRC_SUBDIR
+
+  in="$1"
+
+  SRC_NAME=""
+  SRC_KIND="file"
+  SRC_URL=""
+  SRC_REF=""
+  SRC_SUBDIR=""
+
+  case "$in" in
+    *"::"*)
+      SRC_NAME=$(printf '%s' "$in" | "$ADM_AWK" -F"::" '{print $1}')
+      rest=$(printf '%s' "$in" | "$ADM_AWK" -F"::" '{print $2}')
+      ;;
+    *)
+      rest="$in"
+      ;;
+  esac
+
+  case "$rest" in
+    github:*)
+      r="${rest#github:}"
+      SRC_KIND="git"
+      SRC_URL="https://github.com/${r%%#*}.git"
+      ;;
+    gitlab:*)
+      r="${rest#gitlab:}"
+      SRC_KIND="git"
+      SRC_URL="https://gitlab.com/${r%%#*}.git"
+      ;;
+    git+*)
+      SRC_KIND="git"
+      r="${rest#git+}"
+      SRC_URL="${r%%#*}"
+      ;;
+    *)
+      SRC_KIND="file"
+      SRC_URL="$rest"
+      ;;
+  esac
+
+  case "$rest" in
+    *"#"*)
+      frag="${rest#*#}"
+      oldIFS=$IFS; IFS='&'
+      for kv in $frag; do
+        IFS=$oldIFS
+        key=$(printf '%s' "$kv" | "$ADM_AWK" -F= '{print $1}')
+        val=$(printf '%s' "$kv" | "$ADM_AWK" -F= '{print $2}')
+        case "$key" in
+          ref) SRC_REF="$val" ;;
+          subdir) SRC_SUBDIR="$val" ;;
+        esac
+        IFS='&'
+      done
+      IFS=$oldIFS
+      ;;
+  esac
+
+  if [ -z "$SRC_NAME" ]; then
+    if [ "$SRC_KIND" = "git" ]; then
+      base=$(basename "$SRC_URL")
+      case "$base" in *.git) base=${base%.git} ;; esac
+      SRC_NAME="$base"
+    else
+      SRC_NAME=$(basename "$SRC_URL")
+    fi
+  fi
+
+  return 0
+}
+
+fetch_git_source() {
+  name="$1"
+  url="$2"
+  ref="$3"
+
+  command -v git >/dev/null 2>&1 || die "missing git (required for git sources)"
+
+  ensure_dir "$ADM_SRC_CACHE"
+  ensure_dir "$ADM_SRC_CACHE/git"
+
+  bare="$ADM_SRC_CACHE/git/$name.git"
+  checkout="$WORKDIR/$name-src"
+
+  if [ ! -d "$bare" ]; then
+    log "git: init bare cache $bare"
+    git clone --mirror "$url" "$bare" || die "git clone --mirror failed: $url"
+  else
+    log "git: fetch update $url"
+    (cd "$bare" && git remote update --prune) || die "git remote update failed: $url"
+  fi
+
+  [ -d "$checkout" ] && "$ADM_RM" -rf "$checkout"
+  log "git: checkout -> $checkout"
+  git clone "$bare" "$checkout" >/dev/null 2>&1 || die "git clone from cache failed"
+
+  if [ -n "$ref" ]; then
+    log "git: checkout ref=$ref"
+    (cd "$checkout" && git checkout -q "$ref") || die "git checkout failed: $ref"
+  fi
+
+  [ -d "$checkout/.git" ] && "$ADM_RM" -rf "$checkout/.git" || true
+  return 0
+}
+
+fetch_file_source() {
+  name="$1"
+  url="$2"
+  sumtype="$3"
+  expected="$4"  # may be SKIP
+
+  ensure_dir "$ADM_SRC_CACHE"
+  fetchcmd="$(pick_fetch_cmd)"
+
+  cached="$ADM_SRC_CACHE/$name"
+
+  if [ -f "$cached" ] && [ "$expected" != "SKIP" ] && [ -n "$expected" ]; then
+    got="$(checksum_file "$sumtype" "$cached" 2>/dev/null || true)"
+    if [ "$got" != "$expected" ]; then
+      log "checksum mismatch for cached $name; refetching"
+      "$ADM_RM" -f "$cached"
+    fi
+  fi
+
+  if [ ! -f "$cached" ]; then
+    if is_url "$url"; then
+      log "fetch: $url -> $cached"
+      # shellcheck disable=SC2086
+      $fetchcmd "$cached.tmp" "$url" || die "failed to fetch: $url"
+      mv "$cached.tmp" "$cached" || die "cannot move fetched file: $name"
+    else
+      if [ -f "$PKGDIR/$url" ]; then
+        log "copy local source: $PKGDIR/$url -> $cached"
+        "$ADM_CP" -f "$PKGDIR/$url" "$cached" || die "copy failed: $url"
+      elif [ -f "$url" ]; then
+        log "copy local source: $url -> $cached"
+        "$ADM_CP" -f "$url" "$cached" || die "copy failed: $url"
+      else
+        die "source not found: $url"
+      fi
+    fi
+
+    if [ "$expected" != "SKIP" ] && [ -n "$expected" ]; then
+      got="$(checksum_file "$sumtype" "$cached")"
+      [ "$got" = "$expected" ] || { "$ADM_RM" -f "$cached"; die "checksum mismatch after download: $name"; }
+    fi
+  fi
+
+  "$ADM_CP" -f "$cached" "$WORKDIR/$name" || die "cannot stage source: $name"
+  return 0
+}
+
 # Logging
 log_init() {
   ensure_dir "$ADM_LOG_DIR"
