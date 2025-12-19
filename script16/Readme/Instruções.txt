@@ -1,0 +1,117 @@
+O conjunto mínimo (em camadas), pensado para musl + busybox + runit + wayland + firefox
+
+Camada 0: base do sistema
+
+busybox (coreutils, sh, tar, gzip, etc. — você já quer)
+
+musl (libc do sistema) + linux-headers
+
+runit (init/supervisor)
+
+ca-certificates (Firefox precisa para HTTPS; sem isso é dor)
+
+tzdata (opcional, mas recomendado)
+
+
+Camada 1: toolchain “C/C++ padrão”
+
+binutils (as/ld/ar/ranlib/strip)
+
+gcc (com suporte a C e C++)
+
+make
+
+pkgconf (substitui pkg-config; Wayland/Mesa usam)
+
+m4, bison, flex (aparecem em builds)
+
+gawk, sed, grep, findutils, diffutils, patch
+(BusyBox cobre alguns, mas builds grandes frequentemente exigem GNU tools completas.)
+
+perl (muitos scripts de build ainda dependem)
+
+python3 (muitos projetos modernos dependem)
+
+ninja + meson
+
+cmake
+
+git (pra fontes, patches, etc.)
+
+
+Isso já te permite compilar a maioria do universo C/C++.
+
+Camada 2: toolchains “modernas” necessárias para Firefox e ecossistema
+
+rust + cargo (Firefox exige Rust)
+
+nodejs + npm (Firefox e várias partes do mundo web/build usam node)
+
+clang (não obrigatório para todo o sistema, mas Firefox muitas vezes prefere/usa clang; mesmo se você compilar com GCC, ter clang disponível reduz atrito com algumas dependências e ferramentas)
+
+Se você quiser manter “mínimo mesmo”, você pode deixar clang para depois e tentar Firefox com GCC, mas esteja preparado para ajustes.
+
+
+
+Camada 3: Wayland stack mínimo (sem bloat)
+
+Para “Wayland funcional” (compositor básico + libs):
+
+wayland + wayland-protocols
+
+libxkbcommon
+
+libdrm
+
+mesa (EGL/GLES + drivers; sem isso Wayland fica capenga)
+
+pixman
+
+libinput
+
+seatd (ou elogind; seatd é mais minimalista, combina bem com runit)
+
+Um compositor: sway (wlroots) ou weston (referência).
+Sway/wlroots costuma ser mais “minimalista”; Weston é mais “padrão”.
+
+
+
+---
+
+Recomendação concreta para você (estudando, quer evitar dor)
+
+Opção recomendada (equilíbrio ideal)
+
+GCC + binutils como toolchain principal
+
+Instalar clang mais tarde, mas planejar tê-lo antes do Firefox se necessário
+
+Manter GNU userland essencial (mesmo com BusyBox) para builds grandes
+
+Adotar seatd em vez de elogind para Wayland + runit (mais leve)
+
+
+Opção “ultra minimalista” (não recomendo para Firefox no início)
+
+Tentar só BusyBox + GCC + binutils + make + python + rust + node
+
+Você vai bater em problemas de build com ferramentas ausentes e passar muito tempo “apagando incêndio”.
+
+Como isso se traduz no seu repo (o jeito mais simples de você manter)
+
+Você vai manter uns “meta-pacotes” no seu sistema (mesmo que sejam só listas no seu cérebro), tipo:
+
+1. core/base: musl, linux-headers, busybox, runit, ca-certificates
+
+
+2. core/toolchain: binutils, gcc, make, pkgconf, m4, bison, flex, awk/sed/grep/find/patch, perl, python, ninja, meson, cmake, git
+
+
+3. devel/lang: rust, nodejs (e talvez clang)
+
+
+4. graphics/wayland: wayland, protocols, libdrm, mesa, libxkbcommon, libinput, seatd, compositor
+
+
+
+Isso reduz o “loop infinito”: você não fica descobrindo deps na marra toda hora.
