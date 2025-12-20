@@ -5,15 +5,14 @@
 #   meta, build.sh, files/, patch/
 #
 # Requisitos esperados (BusyBox OK):
-#   sh, find, sort, awk, sed, tar, xz, sha256sum, mkdir, rm, mv, date
+#   sh, find, sort, awk, sed, tar, xz, sha256sum, mkdir, rm, mv, date, tee
 # Opcionais conforme uso:
 #   git (sync/push), patch (patch/), strip (PM_STRIP=1), wget/curl (nas receitas)
-#
-# Uso: ./pm.sh help
 
 set -eu
 
 PM_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
 PKGS_DIR="$PM_ROOT/pkgs"
 STATE_DIR="$PM_ROOT/state"
 DB_DIR="$STATE_DIR/db"
@@ -37,7 +36,13 @@ mkdir -p "$PKGS_DIR" "$DB_DIR" "$CACHE_DIR" "$LOG_DIR" "$BUILD_ROOT" "$LOCK_DIR"
 log() {
   lvl=$1; shift
   ts=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)
-  printf "%s [%s] %s\n" "$ts" "$lvl" "$*" | tee -a "$LOG_DIR/pm.log" >&2
+  # tee pode não existir em busybox ultra-minimal; se faltar, cai em stderr apenas.
+  if command -v tee >/dev/null 2>&1; then
+    printf "%s [%s] %s\n" "$ts" "$lvl" "$*" | tee -a "$LOG_DIR/pm.log" >&2
+  else
+    printf "%s [%s] %s\n" "$ts" "$lvl" "$*" >&2
+    printf "%s [%s] %s\n" "$ts" "$lvl" "$*" >>"$LOG_DIR/pm.log" 2>/dev/null || true
+  fi
 }
 
 die() { log "ERROR" "$*"; exit 1; }
@@ -48,13 +53,27 @@ need_cmd() {
   done
 }
 
+# Remoção segura: apenas dentro do STATE_DIR.
 safe_rm_rf() {
   p=$1
   [ -n "$p" ] || die "safe_rm_rf: path vazio"
+
+  # normaliza para path absoluto
   case "$p" in
-    "/"|"/bin"|"/sbin"|"/usr"|"/etc"|"/var"|"/home") die "safe_rm_rf: recusando apagar caminho crítico: $p" ;;
+    /*) ap="$p" ;;
+    *) ap="$PWD/$p" ;;
   esac
-  rm -rf -- "$p"
+
+  # protege contra remoção fora do state
+  case "$ap" in
+    "$STATE_DIR"|"${STATE_DIR}/"*) ;;
+    *) die "safe_rm_rf: recusando apagar fora do STATE_DIR: $ap" ;;
+  esac
+
+  # não remover o próprio STATE_DIR raiz (evita apagar DB/cache por engano)
+  [ "$ap" != "$STATE_DIR" ] || die "safe_rm_rf: recusando apagar STATE_DIR raiz"
+
+  rm -rf -- "$ap"
 }
 
 # -------------------------
@@ -79,7 +98,7 @@ acquire_lock() {
 
 release_lock() {
   lock=$1
-  [ -n "$lock" ] || return 0
+  [ -n "${lock:-}" ] || return 0
   rmdir "$lock" 2>/dev/null || true
 }
 
@@ -89,7 +108,6 @@ release_lock() {
 # -------------------------
 pkg_resolve() {
   q=$1
-  # Já parece cat/pkg?
   case "$q" in
     */*)
       [ -d "$PKGS_DIR/$q" ] || die "Receita não encontrada: $q"
@@ -98,10 +116,7 @@ pkg_resolve() {
       ;;
   esac
 
-  # Buscar por nome único
   found=""
-  # pkgs/<cat>/<pkg>
-  # shellcheck disable=SC2039
   for d in "$PKGS_DIR"/*/"$q"; do
     [ -d "$d" ] || continue
     rel=${d#"$PKGS_DIR"/}
@@ -115,26 +130,14 @@ pkg_resolve() {
   printf "%s\n" "$found"
 }
 
-pkg_path() {
-  id=$1
-  printf "%s/%s\n" "$PKGS_DIR" "$id"
-}
-
-pkg_cat() {
-  id=$1
-  echo "$id" | awk -F/ '{print $1}'
-}
-
-pkg_name() {
-  id=$1
-  echo "$id" | awk -F/ '{print $2}'
-}
+pkg_path() { printf "%s/%s\n" "$PKGS_DIR" "$1"; }
+pkg_cat()  { echo "$1" | awk -F/ '{print $1}'; }
+pkg_name() { echo "$1" | awk -F/ '{print $2}'; }
 
 # -------------------------
 # Meta
 # -------------------------
 meta_load() {
-  # define: PKGNAME, PKGVER, DEPS, DESC
   id=$1
   pdir=$(pkg_path "$id")
   m="$pdir/meta"
@@ -147,21 +150,22 @@ meta_load() {
   : "${DESC:=}"
 }
 
-# Hash determinístico do conteúdo da receita (inclui meta/build.sh/files/patch)
+# Hash determinístico da receita (inclui meta/build.sh/files/patch)
+# Implementação sem '\0' (mais portável).
 pkg_recipe_hash() {
   id=$1
   pdir=$(pkg_path "$id")
   [ -d "$pdir" ] || die "Pacote inexistente: $id"
   (
     cd "$pdir"
-    # lista determinística + hash de conteúdo
-    find . -type f -maxdepth 4 2>/dev/null \
+    # lista determinística e hasheia conteúdo + caminho
+    # formato: "<sha256>  <path>"
+    find . -maxdepth 4 -type f 2>/dev/null \
       | LC_ALL=C sort \
       | while IFS= read -r f; do
           [ -f "$f" ] || continue
-          printf "%s\0" "$f"
-          sha256sum "$f" | awk '{print $1}'
-          printf "\0"
+          h=$(sha256sum "$f" | awk '{print $1}')
+          printf "%s  %s\n" "$h" "$f"
         done
   ) | sha256sum | awk '{print $1}'
 }
@@ -198,11 +202,14 @@ owners_get() {
   awk -v P="$path" -F '\t' '$1==P{print $2; exit}' "$OWNERS_FILE"
 }
 
-owners_set_if_empty() {
+# Política corrigida: "último instalador vence"
+owners_set_force() {
   path=$1 pkgid=$2
-  cur=$(owners_get "$path" 2>/dev/null || true)
-  [ -n "${cur:-}" ] && return 0
   mkdir -p "$(dirname -- "$OWNERS_FILE")"
+  if [ -f "$OWNERS_FILE" ]; then
+    awk -v P="$path" -F '\t' '$1!=P' "$OWNERS_FILE" >"$OWNERS_FILE.tmp" || true
+    mv -f "$OWNERS_FILE.tmp" "$OWNERS_FILE"
+  fi
   printf "%s\t%s\n" "$path" "$pkgid" >>"$OWNERS_FILE"
 }
 
@@ -218,10 +225,10 @@ db_track_file() {
   idir=$(db_installed_dir "$pkgid")
   mkdir -p "$idir"
   printf "%s\n" "$file" >>"$idir/files.list"
-  owners_set_if_empty "$file" "$pkgid"
+  owners_set_force "$file" "$pkgid"
 }
 
-# deps snapshot: gravamos em installed/<id>/deps.snapshot
+# deps snapshot: installed/<id>/deps.snapshot (+ hash)
 db_write_deps_snapshot() {
   pkgid=$1
   idir=$(db_installed_dir "$pkgid")
@@ -281,6 +288,7 @@ db_mark_installed() {
   idir=$(db_installed_dir "$pkgid")
   mkdir -p "$idir"
   rhash=$(pkg_recipe_hash "$pkgid")
+
   db_write_kv "$idir/meta" "PKGID" "$pkgid"
   db_write_kv "$idir/meta" "CATEGORY" "$(pkg_cat "$pkgid")"
   db_write_kv "$idir/meta" "PKGNAME" "$PKGNAME"
@@ -289,19 +297,21 @@ db_mark_installed() {
   db_write_kv "$idir/meta" "DESC" "$DESC"
   db_write_kv "$idir/meta" "INSTALLED_AT" "$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
 
-  # registra DEPS do momento (para uninstall correto mesmo se receita mudar depois)
+  # registra DEPS do momento (para uninstall correto mesmo se receita mudar)
   depsfile="$idir/deps.list"
   : >"$depsfile"
   for d in $DEPS; do
     printf "%s\n" "$(pkg_resolve "$d")" >>"$depsfile"
   done
 
-  # deps -> revdeps
   for depid in $(cat "$depsfile" 2>/dev/null || true); do
     db_track_revdep_add "$pkgid" "$depid"
   done
 
   db_write_deps_snapshot "$pkgid"
+
+  # finaliza pendência
+  rm -f -- "$idir/PENDING" 2>/dev/null || true
 }
 
 # -------------------------
@@ -357,7 +367,7 @@ apply_patches() {
   pdir="$(pkg_path "$pkgid")/patch"
   [ -d "$pdir" ] || return 0
   need_cmd patch
-  find "$pdir" -type f -maxdepth 1 2>/dev/null | LC_ALL=C sort | while IFS= read -r pf; do
+  find "$pdir" -maxdepth 1 -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r pf; do
     log "INFO" "Aplicando patch: $pf"
     (cd "$srcdir" && patch -p1 <"$pf") || die "Falha ao aplicar patch: $pf"
   done
@@ -383,15 +393,12 @@ strip_binaries_in_destdir() {
   done
 }
 
-# Hooks opcionais na receita:
-#   hook_pre_install
-#   hook_post_install
-# (executadas no host, antes/depois de extrair o tarball em /)
+# Hooks opcionais na receita (host):
+#   hook_pre_install, hook_post_install
 run_hook() {
   pkgid=$1 hookname=$2
   pdir=$(pkg_path "$pkgid")
   [ -f "$pdir/build.sh" ] || return 0
-  # carregamos build.sh em subshell para não poluir ambiente global
   (
     meta_load "$pkgid"
     export PM_ROOT PM_PREFIX PM_JOBS PKGNAME PKGVER
@@ -399,7 +406,7 @@ run_hook() {
     . "$pdir/build.sh"
     command -v "$hookname" >/dev/null 2>&1 || exit 0
     "$hookname"
-  ) >>"$LOG_DIR/hooks.$(pkg_name "$pkgid").log" 2>&1 || die "Hook $hookname falhou para $pkgid"
+  ) >>"$LOG_DIR/hooks.$(pkg_cat "$pkgid").$(pkg_name "$pkgid").log" 2>&1 || die "Hook $hookname falhou para $pkgid"
 }
 
 pkg_build() {
@@ -408,8 +415,10 @@ pkg_build() {
   pdir=$(pkg_path "$pkgid")
   bdir="$BUILD_ROOT/$pkgid"
 
-  # sempre limpar antes de construir (pedido seu)
-  safe_rm_rf "$bdir"
+  # sempre limpar antes de construir
+  if [ -d "$bdir" ]; then
+    safe_rm_rf "$bdir"
+  fi
   mkdir -p "$bdir"
 
   logf="$LOG_DIR/build.$(pkg_cat "$pkgid").$(pkg_name "$pkgid").log"
@@ -423,16 +432,19 @@ pkg_build() {
   export PM_ROOT PM_PREFIX PM_JOBS WORKDIR SRCDIR DESTDIR PKGNAME PKGVER
 
   [ -f "$pdir/build.sh" ] || die "build.sh não encontrado para $pkgid"
-  # shellcheck disable=SC1090
-  . "$pdir/build.sh" >/dev/null 2>&1 || true
-
-  command -v pkg_fetch   >/dev/null 2>&1 || die "$pkgid: build.sh deve definir função pkg_fetch"
-  command -v pkg_unpack  >/dev/null 2>&1 || die "$pkgid: build.sh deve definir função pkg_unpack"
-  command -v pkg_build   >/dev/null 2>&1 || die "$pkgid: build.sh deve definir função pkg_build"
-  command -v pkg_install >/dev/null 2>&1 || die "$pkgid: build.sh deve definir função pkg_install"
 
   log "INFO" "Build iniciado: $pkgid-$PKGVER"
-  {
+
+  # Executa em subshell para não poluir ambiente global e para preservar erros do source
+  (
+    # shellcheck disable=SC1090
+    . "$pdir/build.sh"
+
+    command -v pkg_fetch   >/dev/null 2>&1 || die "$pkgid: build.sh deve definir função pkg_fetch"
+    command -v pkg_unpack  >/dev/null 2>&1 || die "$pkgid: build.sh deve definir função pkg_unpack"
+    command -v pkg_build   >/dev/null 2>&1 || die "$pkgid: build.sh deve definir função pkg_build"
+    command -v pkg_install >/dev/null 2>&1 || die "$pkgid: build.sh deve definir função pkg_install"
+
     pkg_fetch
     pkg_unpack
     apply_patches "$pkgid" "$SRCDIR"
@@ -440,7 +452,8 @@ pkg_build() {
     pkg_install
     copy_files_overlay "$pkgid" "$DESTDIR"
     strip_binaries_in_destdir "$DESTDIR"
-  } >>"$logf" 2>&1 || die "Falha no build de $pkgid. Veja: $logf"
+  ) >>"$logf" 2>&1 || die "Falha no build de $pkgid. Veja: $logf"
+
   log "INFO" "Build concluído: $pkgid-$PKGVER"
 }
 
@@ -479,14 +492,18 @@ cache_verify() {
 tarball_is_safe() {
   tb=$1
   # valida entradas: nada de absoluto, nada de .., nada de vazio
-  tar -tf "$tb" | while IFS= read -r f; do
-    f=${f#./}
-    [ -n "$f" ] || continue
-    case "$f" in
-      /*) exit 2 ;;
-      *"../"*|*".."|../*) exit 2 ;;
-    esac
-  done
+  tar -tf "$tb" \
+    | awk '
+        function bad() { exit 2 }
+        {
+          f=$0
+          sub(/^\.\//, "", f)
+          if (f == "") next
+          if (substr(f,1,1) == "/") bad()
+          if (f ~ /(^|\/)\.\.(\/|$)/) bad()
+        }
+        END { exit 0 }
+      '
 }
 
 install_tarball() {
@@ -499,13 +516,15 @@ install_tarball() {
 
   run_hook "$pkgid" hook_pre_install
 
-  log "INFO" "Instalando: $pkgid a partir de $tarball (extraindo em /)"
-  tar -C / -xJpf "$tarball"
-
-  # registra arquivos instalados (e owners)
   idir=$(db_installed_dir "$pkgid")
   mkdir -p "$idir"
   : >"$idir/files.list"
+  : >"$idir/PENDING"
+
+  log "INFO" "Instalando: $pkgid a partir de $tarball (extraindo em /)"
+  tar -C / -xJpf "$tarball"
+
+  # registra arquivos instalados + owners (último instalador vence)
   tar -tf "$tarball" | while IFS= read -r f; do
     f=${f#./}
     [ -n "$f" ] || continue
@@ -519,7 +538,6 @@ pm_install_one() {
   pkgid=$(pkg_resolve "$1")
   meta_load "$pkgid"
 
-  # Determinação inteligente de necessidade de upgrade:
   need=0
   dep_changed=0
 
@@ -532,10 +550,8 @@ pm_install_one() {
     if [ "$inst_ver" != "$PKGVER" ] || [ "$inst_hash" != "$new_hash" ]; then
       need=1
     else
-      # receita/versão iguais -> checar snapshot de deps (ABI)
       if [ "$PM_UPGRADE_REBUILD_ON_DEP_CHANGE" = "1" ]; then
         old_snap=$(db_deps_snapshot_hash "$pkgid" 2>/dev/null || echo "")
-        # gera snapshot atual em arquivo temp e compara hash
         tmp="$BUILD_ROOT/.depsnap.$$"
         mkdir -p "$tmp"
         cur="$tmp/snap"
@@ -573,7 +589,6 @@ pm_install_one() {
     need=1
   fi
 
-  # tenta instalar do cache; senão compila e empacota
   if cache_has_pkgver "$pkgid" "$PKGVER"; then
     tb=$(cache_tarball_path "$pkgid" "$PKGVER")
     install_tarball "$pkgid" "$tb"
@@ -583,31 +598,27 @@ pm_install_one() {
     install_tarball "$pkgid" "$tb"
   fi
 
-  # marca instalado e registra deps/revdeps/snapshot
   db_mark_installed "$pkgid"
 }
 
 # -------------------------
-# Uninstall melhorado
-# - respeita owners: só remove arquivo se owner==pkg
-# - remove diretórios vazios ascendentes de forma conservadora
-# - não depende de meta atual: usa deps.list instalado
-# Hooks opcionais:
-#   hook_pre_remove, hook_post_remove (se definidos na receita)
+# Uninstall (corrigido)
+# - remove somente arquivos cujo owner==pkgid
+# - agora owners reflete "último instalador vence", então colisões são tratadas corretamente
+# Hooks opcionais: hook_pre_remove, hook_post_remove
 # -------------------------
 run_remove_hook() {
   pkgid=$1 hookname=$2
   pdir=$(pkg_path "$pkgid")
   [ -f "$pdir/build.sh" ] || return 0
   (
-    # apenas para dar contexto; pode não existir receita (mas normalmente existe)
     meta_load "$pkgid" || true
     export PM_ROOT PM_PREFIX PM_JOBS PKGNAME PKGVER
     # shellcheck disable=SC1090
     . "$pdir/build.sh" || true
     command -v "$hookname" >/dev/null 2>&1 || exit 0
     "$hookname"
-  ) >>"$LOG_DIR/hooks.remove.$(pkg_name "$pkgid").log" 2>&1 || die "Hook $hookname falhou para $pkgid"
+  ) >>"$LOG_DIR/hooks.remove.$(pkg_cat "$pkgid").$(pkg_name "$pkgid").log" 2>&1 || die "Hook $hookname falhou para $pkgid"
 }
 
 cmd_remove() {
@@ -619,7 +630,6 @@ cmd_remove() {
     pkgid=$(pkg_resolve "$q")
     db_is_installed "$pkgid" || die "$pkgid não está instalado."
 
-    # bloqueia se houver reverse deps
     r=$(revdeps_list "$pkgid" 2>/dev/null || true)
     if [ -n "${r:-}" ]; then
       die "Não é possível remover $pkgid: requerido por:\n$r"
@@ -631,16 +641,13 @@ cmd_remove() {
 
     run_remove_hook "$pkgid" hook_pre_remove
 
-    # Remover arquivos do pacote em ordem reversa
     if [ -f "$files" ]; then
-      # gera ordem reversa portável
       rev=$(awk '{a[NR]=$0} END{for(i=NR;i>=1;i--)print a[i]}' "$files")
-      # primeiro remove arquivos
+
+      # remove arquivos
       printf "%s\n" "$rev" | while IFS= read -r f; do
         [ -n "$f" ] || continue
-        case "$f" in
-          "/"|"") continue ;;
-        esac
+        case "$f" in "/"|"") continue ;; esac
         owner=$(owners_get "$f" 2>/dev/null || true)
         if [ "$owner" = "$pkgid" ]; then
           rm -f -- "$f" 2>/dev/null || true
@@ -648,11 +655,10 @@ cmd_remove() {
         fi
       done
 
-      # depois tenta remover diretórios vazios ascendentes (conservador)
+      # remove dirs vazios ascendentes (conservador)
       printf "%s\n" "$rev" | while IFS= read -r f; do
         [ -n "$f" ] || continue
         d=$(dirname -- "$f")
-        # suba removendo vazios, mas pare em /
         while [ "$d" != "/" ] && [ -n "$d" ]; do
           rmdir -- "$d" 2>/dev/null || break
           d=$(dirname -- "$d")
@@ -660,7 +666,7 @@ cmd_remove() {
       done
     fi
 
-    # Atualiza revdeps usando deps.list instalado (não depende da receita atual)
+    # atualiza revdeps usando deps.list instalado
     if [ -f "$depslist" ]; then
       while IFS= read -r depid; do
         [ -n "$depid" ] || continue
@@ -669,7 +675,6 @@ cmd_remove() {
     fi
 
     safe_rm_rf "$idir"
-
     run_remove_hook "$pkgid" hook_post_remove
 
     log "INFO" "Removido: $pkgid"
@@ -697,7 +702,7 @@ cmd_search() {
   q=$1
   find "$PKGS_DIR" -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
     | while IFS= read -r d; do
-        rel=${d#"$PKGS_DIR"/}   # cat/pkg
+        rel=${d#"$PKGS_DIR"/}
         if echo "$rel" | grep -qi "$q"; then
           echo "$rel"
           continue
@@ -726,6 +731,9 @@ cmd_info() {
     echo "INST_VER: $(db_get_kv "$inst_meta" PKGVER 2>/dev/null || true)"
     echo "RECIPE_HASH: $(db_get_kv "$inst_meta" RECIPE_HASH 2>/dev/null || true)"
     echo "DEP_SNAPSHOT_HASH: $(db_deps_snapshot_hash "$id" 2>/dev/null || true)"
+    if [ -f "$(db_installed_dir "$id")/PENDING" ]; then
+      echo "STATE: PENDING (instalação anterior pode ter falhado)"
+    fi
   else
     echo "INSTALLED: no"
   fi
@@ -771,13 +779,15 @@ cmd_rebuild_all() {
 }
 
 cmd_clean() {
-  safe_rm_rf "$BUILD_ROOT"
+  if [ -d "$BUILD_ROOT" ]; then
+    safe_rm_rf "$BUILD_ROOT"
+  fi
   mkdir -p "$BUILD_ROOT"
   log "INFO" "Build root limpo: $BUILD_ROOT"
 }
 
 cmd_gc() {
-  # remove revdeps vazios + compacta owners removendo entradas para arquivos inexistentes
+  # remove revdeps vazios
   find "$DB_DIR/revdeps" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r d; do
     f="$d/list"
     [ -f "$f" ] || continue
@@ -786,10 +796,45 @@ cmd_gc() {
     fi
   done
 
-  if [ -f "$OWNERS_FILE" ]; then
-    awk -F '\t' 'NF==2 {print $0}' "$OWNERS_FILE" >"$OWNERS_FILE.tmp" || true
-    mv -f "$OWNERS_FILE.tmp" "$OWNERS_FILE"
+  # Reconstrói owners.tsv a partir das listas de arquivos instalados (fonte da verdade).
+  tmp="$BUILD_ROOT/.gc.$$"
+  mkdir -p "$tmp"
+  newowners="$tmp/owners.tsv"
+  : >"$newowners"
+
+  if [ -d "$DB_DIR/installed" ]; then
+    find "$DB_DIR/installed" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r idir; do
+      pkgid=$(basename -- "$idir")
+      fl="$idir/files.list"
+      [ -f "$fl" ] || continue
+      # para cada arquivo, último instalador vence (aqui, "installed state" já reflete isso)
+      while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        printf "%s\t%s\n" "$p" "$pkgid" >>"$newowners"
+      done <"$fl"
+    done
   fi
+
+  # Dedup: se um arquivo aparecer múltiplas vezes, mantém a última ocorrência (compatível com "último vence")
+  # Implementação simples: percorre do fim para o começo e mantém primeiro visto (portável com awk).
+  if [ -s "$newowners" ]; then
+    awk -F '\t' '
+      { a[NR]=$0; k[NR]=$1 }
+      END{
+        for(i=NR;i>=1;i--){
+          if(!(k[i] in seen)){
+            seen[k[i]]=1
+            out[++n]=a[i]
+          }
+        }
+        for(i=n;i>=1;i--) print out[i]
+      }' "$newowners" >"$newowners.dedup" || true
+    mv -f "$newowners.dedup" "$newowners"
+  fi
+
+  mkdir -p "$(dirname -- "$OWNERS_FILE")"
+  mv -f "$newowners" "$OWNERS_FILE"
+  safe_rm_rf "$tmp"
 
   log "INFO" "GC concluído."
 }
@@ -841,7 +886,7 @@ Receita:
   pkgs/<cat>/<pkg>/meta:
     PKGNAME=<pkg>        (opcional; default = nome do diretório)
     PKGVER=<versão>      (obrigatório)
-    DEPS="dep1 dep2 ..." (opcional; pode usar cat/pkg ou apenas pkg se único)
+    DEPS="dep1 dep2 ..." (opcional; cat/pkg ou apenas pkg se único)
     DESC="..."           (opcional)
 
   pkgs/<cat>/<pkg>/build.sh deve definir:
@@ -859,6 +904,7 @@ Hooks opcionais na receita (build.sh):
 Extras:
   pkgs/<cat>/<pkg>/files/  -> overlay copiado para DESTDIR
   pkgs/<cat>/<pkg>/patch/  -> patches aplicados automaticamente (patch -p1)
+
 EOF
 }
 
