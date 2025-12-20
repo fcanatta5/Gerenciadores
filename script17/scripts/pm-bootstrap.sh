@@ -1,21 +1,11 @@
 #!/bin/sh
-# pm-bootstrap.sh
-# Bootstrap de toolchain temporária (POSIX sh) usando pm.sh
+# pm-bootstrap.sh (POSIX sh)
+# Bootstrap de toolchain temporária (binutils + linux-headers + gcc-stage1 + musl + gcc-final)
+# Opcional (recomendado para chroot): xz + busybox no sysroot
 #
-# Objetivo:
-# - Construir uma toolchain temporária (binutils + headers + musl + gcc) em um prefix isolado
-# - Gerar um arquivo de ambiente para o pm “assumir corretamente” (PATH/CC/etc)
-#
-# Pré-requisitos:
-# - Um compilador/assembler/linker funcional no host (ex.: gcc/clang + binutils) para o estágio 0
-# - ./pm.sh na mesma pasta deste script
-# - Receitas no repo para toolchain (nomes sugeridos abaixo)
-#
-# Convenções recomendadas de receitas (você pode adaptar o script):
-#   core/binutils
-#   core/linux-headers         (ou core/kernel-headers)
-#   core/musl                  (ou core/musl-headers + core/musl)
-#   core/gcc                   (ou core/gcc-stage1 + core/gcc-final)
+# IMPORTANTE:
+# - pm.sh instala extraindo tarball em "/". Este script é seguro porque as receitas bootstrap
+#   devem instalar em /state/toolchain/prefix e /state/toolchain/sysroot (via TC_PREFIX/TC_SYSROOT).
 #
 # Variáveis configuráveis:
 #   TARGET=x86_64-linux-musl
@@ -23,7 +13,9 @@
 #   JOBS=1
 #   KEEP_WORK=0
 #   CLEAN=1
-
+#   WITH_XZ=1
+#   WITH_BUSYBOX=1
+#
 set -eu
 
 PM_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -35,11 +27,14 @@ PKGS_DIR="$PM_ROOT/pkgs"
 : "${JOBS:=1}"
 : "${KEEP_WORK:=0}"
 : "${CLEAN:=1}"
+: "${WITH_XZ:=1}"
+: "${WITH_BUSYBOX:=1}"
 
-TC_PREFIX="$BOOTSTRAP_DIR/prefix"      # onde o pm instalará os binários do toolchain
-TC_SYSROOT="$BOOTSTRAP_DIR/sysroot"   # sysroot (libc/headers finais) – receitas devem usar
+TC_PREFIX="$BOOTSTRAP_DIR/prefix"
+TC_SYSROOT="$BOOTSTRAP_DIR/sysroot"
 TC_LOGDIR="$BOOTSTRAP_DIR/logs"
 TC_ENV="$BOOTSTRAP_DIR/env.sh"
+LOCKDIR="$BOOTSTRAP_DIR/.lock"
 
 ts() { date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date; }
 log() { printf "%s [BOOT] %s\n" "$(ts)" "$*" >&2; }
@@ -51,30 +46,20 @@ need_cmd() {
   done
 }
 
-pkg_dir() {
-  # $1 = cat/pkg
-  echo "$PKGS_DIR/$1"
+# lock simples via mkdir
+lock_acquire() {
+  i=0
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    i=$((i+1))
+    [ "$i" -le 120 ] || die "Timeout aguardando lock: $LOCKDIR"
+    sleep 1
+  done
 }
+lock_release() { rmdir "$LOCKDIR" 2>/dev/null || true; }
 
-pkg_exists() {
-  [ -d "$(pkg_dir "$1")" ]
-}
+pkg_dir() { echo "$PKGS_DIR/$1"; }
+pkg_exists() { [ -d "$(pkg_dir "$1")" ]; }
 
-run_pm_install() {
-  pkg=$1
-  log "Instalando via pm: $pkg"
-  # Importante: passamos PM_PREFIX para instalar tudo dentro do TC_PREFIX,
-  # e exportamos também TARGET/TC_SYSROOT para as receitas de toolchain.
-  PM_PREFIX="$TC_PREFIX" \
-  PM_JOBS="$JOBS" \
-  TARGET="$TARGET" \
-  TC_PREFIX="$TC_PREFIX" \
-  TC_SYSROOT="$TC_SYSROOT" \
-  BOOTSTRAP=1 \
-  "$PM" install "$pkg" 2>&1 | tee -a "$TC_LOGDIR/bootstrap.log" >&2
-}
-
-# Escolhe o primeiro pacote existente em uma lista de alternativas
 pick_pkg() {
   for p in "$@"; do
     if pkg_exists "$p"; then
@@ -85,7 +70,6 @@ pick_pkg() {
   return 1
 }
 
-# Limpeza segura do bootstrap dir (fora do pm)
 safe_rm_rf() {
   p=$1
   [ -n "$p" ] || die "safe_rm_rf: path vazio"
@@ -101,7 +85,7 @@ safe_rm_rf() {
 }
 
 write_env() {
-  # Gera um arquivo para "assumir corretamente" (source antes de usar o pm)
+  # Ambiente para "assumir" toolchain temporária
   cat >"$TC_ENV" <<EOF
 # Fonte este arquivo: . "$TC_ENV"
 # Toolchain temporária gerada por pm-bootstrap.sh
@@ -110,10 +94,9 @@ export TARGET='${TARGET}'
 export TC_PREFIX='${TC_PREFIX}'
 export TC_SYSROOT='${TC_SYSROOT}'
 
-# Toolchain no PATH
 export PATH="\${TC_PREFIX}/bin:\${PATH}"
 
-# Compiladores (se as receitas criarem toolchain prefixada)
+# Preferir toolchain prefixada
 if [ -x "\${TC_PREFIX}/bin/\${TARGET}-gcc" ]; then
   export CC="\${TC_PREFIX}/bin/\${TARGET}-gcc"
   export CXX="\${TC_PREFIX}/bin/\${TARGET}-g++"
@@ -123,14 +106,19 @@ if [ -x "\${TC_PREFIX}/bin/\${TARGET}-gcc" ]; then
   export RANLIB="\${TC_PREFIX}/bin/\${TARGET}-ranlib"
   export STRIP="\${TC_PREFIX}/bin/\${TARGET}-strip"
 else
-  # fallback: use o cc do host com sysroot (se aplicável)
   export CC="\${CC:-cc}"
   export CXX="\${CXX:-c++}"
 fi
 
-# Flags base (receitas podem sobrescrever)
+# sysroot flags (receitas podem sobrescrever)
+export CPPFLAGS="\${CPPFLAGS:-} --sysroot=\${TC_SYSROOT}"
 export CFLAGS="\${CFLAGS:-} --sysroot=\${TC_SYSROOT}"
+export CXXFLAGS="\${CXXFLAGS:-} --sysroot=\${TC_SYSROOT}"
 export LDFLAGS="\${LDFLAGS:-} --sysroot=\${TC_SYSROOT}"
+
+# pkg-config apontando para sysroot (útil quando começar a construir userland no chroot)
+export PKG_CONFIG_SYSROOT_DIR="\${TC_SYSROOT}"
+export PKG_CONFIG_LIBDIR="\${TC_SYSROOT}/usr/lib/pkgconfig:\${TC_SYSROOT}/usr/share/pkgconfig"
 EOF
 }
 
@@ -151,44 +139,120 @@ Variáveis:
   JOBS=${JOBS}
   CLEAN=${CLEAN}
   KEEP_WORK=${KEEP_WORK}
+  WITH_XZ=${WITH_XZ}
+  WITH_BUSYBOX=${WITH_BUSYBOX}
 
 Exemplo:
-  JOBS=4 TARGET=x86_64-linux-musl ./pm-bootstrap.sh bootstrap
+  JOBS=4 WITH_XZ=1 WITH_BUSYBOX=1 ./pm-bootstrap.sh bootstrap
   . ${TC_ENV}
-  ./pm.sh install core/zlib
 EOF
 }
 
 doctor() {
-  [ -x "$PM" ] || die "pm.sh não encontrado/executável em: $PM"
+  [ -f "$PM" ] || die "pm.sh não encontrado em: $PM"
+  [ -x "$PM" ] || log "AVISO: pm.sh não executável; tentarei rodar via sh."
+
   need_cmd sh find sort awk sed tar xz sha256sum mkdir rm mv date
 
-  # Necessidades típicas para bootstrap (host)
-  # (Você pode ter clang em vez de gcc; testamos cc.)
   command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1 \
     || die "Nenhum compilador encontrado no host (cc/gcc/clang). Necessário para stage0."
   command -v make >/dev/null 2>&1 || die "make não encontrado no host. Necessário para stage0."
   command -v patch >/dev/null 2>&1 || log "AVISO: patch não encontrado (ok se você não usa patch/ nas receitas)."
 
-  # Receitas mínimas
   BINUTILS=$(pick_pkg bootstrap/binutils toolchain/binutils) || die "Receita binutils não encontrada (bootstrap/binutils)."
   LINUX_HEADERS=$(pick_pkg bootstrap/linux-headers bootstrap/kernel-headers toolchain/linux-headers) || die "Receita de headers do kernel não encontrada."
   MUSL=$(pick_pkg bootstrap/musl toolchain/musl) || die "Receita musl não encontrada."
-  GCC_STAGE1=$(pick_pkg bootstrap/gcc-stage1 toolchain/gcc-stage1 bootstrap/gcc) || die "Receita gcc não encontrada."
+  GCC_STAGE1=$(pick_pkg bootstrap/gcc-stage1 toolchain/gcc-stage1) || die "Receita gcc-stage1 não encontrada."
+  GCC_FINAL=$(pick_pkg bootstrap/gcc-final toolchain/gcc-final 2>/dev/null || echo "")
+
+  if [ "$WITH_XZ" = "1" ]; then
+    XZ_PKG=$(pick_pkg bootstrap/xz toolchain/xz 2>/dev/null || echo "")
+    [ -n "$XZ_PKG" ] || log "AVISO: WITH_XZ=1 mas receita bootstrap/xz não encontrada (recomendado para chroot)."
+  fi
+
+  if [ "$WITH_BUSYBOX" = "1" ]; then
+    BB_PKG=$(pick_pkg bootstrap/busybox toolchain/busybox 2>/dev/null || echo "")
+    [ -n "$BB_PKG" ] || log "AVISO: WITH_BUSYBOX=1 mas receita bootstrap/busybox não encontrada (recomendado para /bin/sh no chroot)."
+  fi
+
   log "OK receitas:"
   log "  BINUTILS=$BINUTILS"
   log "  LINUX_HEADERS=$LINUX_HEADERS"
+  log "  GCC_STAGE1=$GCC_STAGE1"
   log "  MUSL=$MUSL"
-  log "  GCC_STAGE1(or gcc)=$GCC_STAGE1"
-
-  # Opcional: gcc final
-  if pick_pkg core/gcc-final toolchain/gcc-final >/dev/null 2>&1; then
-    log "  GCC_FINAL=$(pick_pkg core/gcc-final toolchain/gcc-final)"
+  if [ -n "$GCC_FINAL" ]; then
+    log "  GCC_FINAL=$GCC_FINAL"
   else
-    log "  GCC_FINAL: não encontrado (o script usará core/gcc se não houver split stage)."
+    log "  GCC_FINAL: não encontrado (sem gcc-final; você ficará com stage1)."
+  fi
+  log "doctor concluído."
+}
+
+run_pm_install() {
+  pkg=$1
+  log "Instalando via pm: $pkg"
+
+  mkdir -p "$TC_LOGDIR"
+  tmp="$TC_LOGDIR/.pm.$$.$(echo "$pkg" | tr '/ ' '__').tmp"
+  out="$TC_LOGDIR/bootstrap.log"
+
+  # BUG corrigido: não usar pipeline direto com tee (mascara falha do pm).
+  # Aqui capturamos o status real do pm.
+  if [ -x "$PM" ]; then
+    PM_PREFIX="$TC_PREFIX" PM_JOBS="$JOBS" TARGET="$TARGET" \
+    TC_PREFIX="$TC_PREFIX" TC_SYSROOT="$TC_SYSROOT" BOOTSTRAP=1 \
+      "$PM" install "$pkg" >"$tmp" 2>&1 || st=$?
+  else
+    PM_PREFIX="$TC_PREFIX" PM_JOBS="$JOBS" TARGET="$TARGET" \
+    TC_PREFIX="$TC_PREFIX" TC_SYSROOT="$TC_SYSROOT" BOOTSTRAP=1 \
+      sh "$PM" install "$pkg" >"$tmp" 2>&1 || st=$?
   fi
 
-  log "doctor concluído."
+  st=${st:-0}
+  cat "$tmp" | tee -a "$out" >&2
+  rm -f "$tmp" 2>/dev/null || true
+
+  [ "$st" -eq 0 ] || die "pm install falhou para: $pkg"
+}
+
+# checks de sanidade por estágio (evita “construiu mas não gerou nada”)
+check_binutils() {
+  [ -d "$TC_PREFIX/bin" ] || die "binutils: TC_PREFIX/bin não existe"
+  # pelo menos um dos binutils comuns
+  if [ ! -x "$TC_PREFIX/bin/${TARGET}-ld" ] && [ ! -x "$TC_PREFIX/bin/ld" ]; then
+    log "AVISO: não encontrei ${TARGET}-ld nem ld em $TC_PREFIX/bin; verifique a receita binutils."
+  fi
+}
+
+check_headers() {
+  # headers normalmente em $TC_SYSROOT/usr/include
+  [ -d "$TC_SYSROOT/usr/include" ] || die "linux-headers: $TC_SYSROOT/usr/include não existe (receita deve instalar no sysroot)"
+}
+
+check_musl() {
+  # musl final deve criar loader e libc no sysroot
+  # (caminhos podem variar, então checamos sinais comuns)
+  if [ ! -f "$TC_SYSROOT/usr/lib/libc.so" ] && [ ! -f "$TC_SYSROOT/lib/libc.so" ]; then
+    log "AVISO: musl: libc.so não encontrada em sysroot; verifique receita."
+  fi
+}
+
+check_gcc() {
+  if [ ! -x "$TC_PREFIX/bin/${TARGET}-gcc" ]; then
+    log "AVISO: gcc: ${TARGET}-gcc não encontrado em $TC_PREFIX/bin; env.sh usará fallback do host."
+  fi
+}
+
+check_busybox_sysroot() {
+  if [ ! -x "$TC_SYSROOT/bin/sh" ] && [ ! -x "$TC_SYSROOT/bin/busybox" ]; then
+    log "AVISO: busybox: /bin/sh e /bin/busybox não encontrados no sysroot. Para chroot, isso é crítico."
+  fi
+}
+
+check_xz_sysroot() {
+  if [ ! -x "$TC_SYSROOT/bin/xz" ]; then
+    log "AVISO: xz: /bin/xz não encontrado no sysroot. Para pm rodar confortável no chroot, é recomendado."
+  fi
 }
 
 do_clean() {
@@ -201,17 +265,16 @@ do_clean() {
 
 bootstrap() {
   doctor
-
-  mkdir -p "$TC_LOGDIR"
-  : >"$TC_LOGDIR/bootstrap.log"
+  lock_acquire
+  trap 'lock_release' EXIT INT TERM
 
   if [ "$CLEAN" = "1" ]; then
     do_clean || true
   fi
 
   mkdir -p "$TC_PREFIX" "$TC_SYSROOT" "$TC_LOGDIR"
+  : >"$TC_LOGDIR/bootstrap.log"
 
-  # Env inicial: PATH aponta para TC_PREFIX/bin mesmo antes de existir, para “assumir” assim que instalar binutils/gcc.
   write_env
 
   log "BOOTSTRAP_DIR=$BOOTSTRAP_DIR"
@@ -219,68 +282,83 @@ bootstrap() {
   log "TC_SYSROOT=$TC_SYSROOT"
   log "TARGET=$TARGET"
   log "JOBS=$JOBS"
+  log "WITH_XZ=$WITH_XZ WITH_BUSYBOX=$WITH_BUSYBOX"
 
-  # Seleciona nomes conforme suas receitas existirem
   BINUTILS=$(pick_pkg bootstrap/binutils toolchain/binutils)
   LINUX_HEADERS=$(pick_pkg bootstrap/linux-headers bootstrap/kernel-headers toolchain/linux-headers)
-  MUSL=$(pick_pkg bootstrap/musl toolchain/musl)
   GCC_STAGE1=$(pick_pkg bootstrap/gcc-stage1 toolchain/gcc-stage1)
+  MUSL=$(pick_pkg bootstrap/musl toolchain/musl)
   GCC_FINAL=$(pick_pkg bootstrap/gcc-final toolchain/gcc-final 2>/dev/null || echo "")
-  # 1) binutils (assembler/linker/ar/ranlib)
-  run_pm_install "$BINUTILS"
 
-  # 2) headers do kernel (instala em sysroot; receitas devem obedecer TC_SYSROOT)
-  run_pm_install "$LINUX_HEADERS"
-
-  # 3) gcc stage1 (se existir). Se não existir, cai para core/gcc (monolítico).
-  #    Stage1 normalmente usa --without-headers/--with-newlib e/ou sysroot vazio.
-  if [ -n "$GCC_STAGE1" ]; then
-    run_pm_install "$GCC_STAGE1"
-  else
-    # fallback para gcc monolítico
-    if pkg_exists core/gcc; then
-      run_pm_install core/gcc
-    else
-      die "Nenhuma receita gcc-stage1 ou core/gcc encontrada."
-    fi
+  # Opcional (recomendado): xz e busybox no sysroot para facilitar chroot + builds posteriores
+  XZ_PKG=""
+  BB_PKG=""
+  if [ "$WITH_XZ" = "1" ]; then
+    XZ_PKG=$(pick_pkg bootstrap/xz toolchain/xz 2>/dev/null || echo "")
+  fi
+  if [ "$WITH_BUSYBOX" = "1" ]; then
+    BB_PKG=$(pick_pkg bootstrap/busybox toolchain/busybox 2>/dev/null || echo "")
   fi
 
-  # 4) musl (instala headers+libc no sysroot; receitas devem usar TC_SYSROOT)
-  run_pm_install "$MUSL"
+  # 1) binutils
+  run_pm_install "$BINUTILS"
+  check_binutils
 
-  # 5) gcc final (se existir). Caso contrário, reinstala/instala core/gcc para gerar toolchain completa.
+  # 2) linux headers (DEVE ir para sysroot via TC_SYSROOT na receita)
+  run_pm_install "$LINUX_HEADERS"
+  check_headers
+
+  # 3) gcc stage1
+  run_pm_install "$GCC_STAGE1"
+  check_gcc
+
+  # 4) musl (DEVE ir para sysroot via TC_SYSROOT na receita)
+  run_pm_install "$MUSL"
+  check_musl
+
+  # 5) gcc final (opcional mas recomendado)
   if [ -n "$GCC_FINAL" ]; then
     run_pm_install "$GCC_FINAL"
+    check_gcc
   else
-    # Se você usa receita única core/gcc (sem split), instale agora (se não instalou) ou reinstale para linkar com musl completa.
-    if pkg_exists core/gcc; then
-      run_pm_install core/gcc
-    else
-      log "AVISO: gcc-final não existe e core/gcc não existe; mantendo stage1."
-    fi
+    log "AVISO: gcc-final não encontrado; você ficará com stage1 (pode limitar builds no chroot)."
   fi
 
-  # Opcional: limpeza de work/build do pm (mantém cache binário)
+  # 6) opcional: xz no sysroot (melhora robustez do pm/tar.xz no chroot)
+  if [ -n "$XZ_PKG" ]; then
+    run_pm_install "$XZ_PKG"
+    check_xz_sysroot
+  fi
+
+  # 7) opcional: busybox no sysroot (necessário para /bin/sh no chroot mínimo)
+  if [ -n "$BB_PKG" ]; then
+    run_pm_install "$BB_PKG"
+    check_busybox_sysroot
+  fi
+
+  # Limpa builds do pm (mantém cache binário)
   if [ "$KEEP_WORK" != "1" ]; then
-    # limpa build roots do pm (mas não apaga cache de binários)
-    # nota: depende do seu pm.sh ter o comando clean (o seu tem).
     log "Limpando diretórios de build do pm (mantendo cache)..."
-    "$PM" clean 2>&1 | tee -a "$TC_LOGDIR/bootstrap.log" >&2
+    if [ -x "$PM" ]; then
+      "$PM" clean 2>&1 | tee -a "$TC_LOGDIR/bootstrap.log" >&2 || die "pm clean falhou"
+    else
+      sh "$PM" clean 2>&1 | tee -a "$TC_LOGDIR/bootstrap.log" >&2 || die "pm clean falhou"
+    fi
   fi
 
   write_env
 
   log "Bootstrap concluído."
-  log "Para assumir a toolchain temporária:"
+  log "Assuma a toolchain temporária:"
   log "  . $TC_ENV"
-  log "Depois, rode o pm normalmente para construir o sistema usando essa toolchain."
-  log "Exemplo:"
-  log "  . $TC_ENV"
-  log "  ./pm.sh install core/zlib"
+  if [ -x "$TC_SYSROOT/bin/sh" ]; then
+    log "Sysroot já tem /bin/sh (ok para chroot mínimo)."
+  else
+    log "AVISO: sysroot NÃO tem /bin/sh; para chroot mínimo, instale bootstrap/busybox."
+  fi
 }
 
 cmd=${1:-bootstrap}
-
 case "$cmd" in
   bootstrap) bootstrap ;;
   clean) do_clean ;;
