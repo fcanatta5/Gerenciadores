@@ -171,11 +171,10 @@ doctor() {
   command -v patch >/dev/null 2>&1 || log "AVISO: patch não encontrado (ok se você não usa patch/ nas receitas)."
 
   # Receitas mínimas
-  BINUTILS=$(pick_pkg core/binutils toolchain/binutils) || die "Receita binutils não encontrada (core/binutils ou toolchain/binutils)."
-  LINUX_HEADERS=$(pick_pkg core/linux-headers core/kernel-headers toolchain/linux-headers) || die "Receita de headers do kernel não encontrada."
-  MUSL=$(pick_pkg core/musl toolchain/musl) || die "Receita musl não encontrada."
-  GCC_STAGE1=$(pick_pkg core/gcc-stage1 toolchain/gcc-stage1 core/gcc) || die "Receita gcc não encontrada (ao menos core/gcc)."
-
+  BINUTILS=$(pick_pkg bootstrap/binutils toolchain/binutils) || die "Receita binutils não encontrada (bootstrap/binutils)."
+  LINUX_HEADERS=$(pick_pkg bootstrap/linux-headers bootstrap/kernel-headers toolchain/linux-headers) || die "Receita de headers do kernel não encontrada."
+  MUSL=$(pick_pkg bootstrap/musl toolchain/musl) || die "Receita musl não encontrada."
+  GCC_STAGE1=$(pick_pkg bootstrap/gcc-stage1 toolchain/gcc-stage1 bootstrap/gcc) || die "Receita gcc não encontrada."
   log "OK receitas:"
   log "  BINUTILS=$BINUTILS"
   log "  LINUX_HEADERS=$LINUX_HEADERS"
@@ -222,12 +221,11 @@ bootstrap() {
   log "JOBS=$JOBS"
 
   # Seleciona nomes conforme suas receitas existirem
-  BINUTILS=$(pick_pkg core/binutils toolchain/binutils)
-  LINUX_HEADERS=$(pick_pkg core/linux-headers core/kernel-headers toolchain/linux-headers)
-  MUSL=$(pick_pkg core/musl toolchain/musl)
-  GCC_STAGE1=$(pick_pkg core/gcc-stage1 toolchain/gcc-stage1)
-  GCC_FINAL=$(pick_pkg core/gcc-final toolchain/gcc-final 2>/dev/null || echo "")
-
+  BINUTILS=$(pick_pkg bootstrap/binutils toolchain/binutils)
+  LINUX_HEADERS=$(pick_pkg bootstrap/linux-headers bootstrap/kernel-headers toolchain/linux-headers)
+  MUSL=$(pick_pkg bootstrap/musl toolchain/musl)
+  GCC_STAGE1=$(pick_pkg bootstrap/gcc-stage1 toolchain/gcc-stage1)
+  GCC_FINAL=$(pick_pkg bootstrap/gcc-final toolchain/gcc-final 2>/dev/null || echo "")
   # 1) binutils (assembler/linker/ar/ranlib)
   run_pm_install "$BINUTILS"
 
