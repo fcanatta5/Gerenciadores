@@ -1,0 +1,4 @@
+PKGNAME=gcc-final
+PKGVER=15.2.0
+DEPS="bootstrap/binutils bootstrap/linux-headers bootstrap/gcc-stage1 bootstrap/musl"
+DESC="Bootstrap GCC final (C/C++) for temporary x86_64-linux-musl toolchain"
