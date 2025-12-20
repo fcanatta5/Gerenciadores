@@ -1,0 +1,4 @@
+PKGNAME=toolchain-env
+PKGVER=1
+DEPS=""
+DESC="Environment helper to assume the temporary toolchain (TARGET, sysroot, PATH)"
