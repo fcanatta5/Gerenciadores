@@ -1,0 +1,87 @@
+1) Fluxo de bootstrap e entrada no chroot, (A) Bootstrap toolchain (fora do chroot, no host)
+./pm-bootstrap.sh bootstrap
+
+Isso te entrega:
+state/toolchain/prefix (binutils+gcc)
+state/toolchain/sysroot (linux-headers+musl+busybox, se você instalou bootstrap/busybox)
+state/toolchain/env.sh (se você estiver usando o env gerado pelo bootstrap script)
+(B) Prepare o sysroot para chroot,Você precisa dos pseudo-filesystems e alguns dirs:
+
+SYS=/state/toolchain/sysroot
+
+mkdir -p "$SYS"/{dev,proc,sys,tmp,run}
+chmod 1777 "$SYS/tmp"
+
+# /dev mínimo: null/zero/tty/console
+# (Se você já estiver como root no host, use mknod; caso contrário, use bind-mount /dev)
+mknod -m 666 "$SYS/dev/null" c 1 3 2>/dev/null || true
+mknod -m 666 "$SYS/dev/zero" c 1 5 2>/dev/null || true
+mknod -m 666 "$SYS/dev/tty"  c 5 0 2>/dev/null || true
+mknod -m 600 "$SYS/dev/console" c 5 1 2>/dev/null || true
+
+Montagens (como root no host):
+mount -t proc proc "$SYS/proc"
+mount -t sysfs sys "$SYS/sys"
+mount --bind /dev "$SYS/dev"
+
+ 2) Colocar o pm dentro do chroot, O pm.sh e as receitas precisam estar acessíveis dentro do chroot. A forma mais limpa é bind-mount do seu repo: 
+  REPO=/caminho/para/seu-repo-pm
+mkdir -p "$SYS/mnt/pm"
+mount --bind "$REPO" "$SYS/mnt/pm"
+
+ Dentro do chroot, você usará:
+/mnt/pm/pm.sh
+/mnt/pm/pkgs/...
+  
+3) Entrar no chroot com ambiente correto,Você quer que o pm use o toolchain temporário e os caminhos corretos. Exemplo:
+chroot "$SYS" /bin/sh -lc '
+  export TARGET=x86_64-linux-musl
+  export TC_PREFIX=/state/toolchain/prefix
+  export TC_SYSROOT=/state/toolchain/sysroot
+  export PATH=$TC_PREFIX/bin:/bin:/sbin:/usr/bin:/usr/sbin
+
+  # opcional: symlinks convenientes
+  # (se instalou bootstrap/toolchain-symlinks no root final, isso pode estar em /usr/local/bin)
+  export CC=$TC_PREFIX/bin/$TARGET-gcc
+  export CXX=$TC_PREFIX/bin/$TARGET-g++
+  export AR=$TC_PREFIX/bin/$TARGET-ar
+  export LD=$TC_PREFIX/bin/$TARGET-ld
+
+  cd /mnt/pm
+  ./pm.sh install core/zlib
+'
+
+O ponto importante: agora o pm.sh extrai os tarballs em / do chroot, que é exatamente o seu sysroot. Isso “continua a construir o sistema” dentro do ambiente musl.
+
+  4) Ajustes que você provavelmente vai querer fazer no seu pm/receitas,Para esse fluxo funcionar sem dor:
+(A) PM_PREFIX, Decida um layout para o sistema final (dentro do chroot). Recomendações comuns:
+PM_PREFIX=/usr (mais padrão em sistemas modernos)
+ou PM_PREFIX=/usr/local (mais “não-invasivo”)
+Se você escolher /usr, rode dentro do chroot:
+
+  PM_PREFIX=/usr ./pm.sh install core/xz
+
+ Ou exporte PM_PREFIX=/usr no shell do chroot.
+  
+(B) Garantir /bin/sh
+Com bootstrap/busybox no sysroot, você tem /bin/sh. Isso é essencial.
+  
+(C) Ferramentas de build dentro do chroot,Para compilar “o mundo” dentro do chroot, você precisa que ferramentas mínimas existam dentro dele:
+
+make
+tar
+xz
+patch
+sha256sum
+find/awk/sed/grep
+  
+Você pode: compilar/instalar essas ferramentas como pacotes “core” cedo, ou
+habilitar os applets equivalentes no BusyBox (muitos você já habilitou).
+Eu recomendo: usar BusyBox para o básico,e instalar make (GNU make) como um dos primeiros pacotes reais. 
+
+5) Um detalhe crítico do seu design atual (para não quebrar no chroot),Seu pm.sh instala extraindo tarball em /. No chroot isso é perfeito.
+Mas fora do chroot, isso pisaria no host. Então:
+NUNCA rode pm.sh install core/* no host depois de iniciar o bootstrap, a menos que seja intencional.
+O pm-bootstrap.sh mitiga isso usando PM_PREFIX para instalar a toolchain em state/toolchain/prefix, mas ele ainda extrai em / do host durante o bootstrap (só que os paths dos pacotes bootstrap são em /state/toolchain/... por design). Isso é aceitável, mas exige disciplina.
+Se você quiser, eu consigo te entregar um modo ainda mais seguro:
+pm.sh com variável PM_ROOTFS=/algum/path para instalar sem tocar no / do host (instala em $PM_ROOTFS/), o que torna o bootstrap e o chroot muito mais seguros.
