@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+: "${PKG:=gcc}"
+: "${VER:=15.2.0}"
+: "${PREFIX:=/usr}"
+
+fail() { echo "adm: ${PKG}:${VER}: post-install: ERRO: $*" >&2; exit 1; }
+warn() { echo "adm: ${PKG}:${VER}: post-install: AVISO: $*" >&2; }
+info() { echo "adm: ${PKG}:${VER}: post-install: $*" >&2; }
+
+# 1) Binários básicos no sistema
+command -v gcc >/dev/null 2>&1 || fail "gcc não encontrado no PATH"
+command -v g++ >/dev/null 2>&1 || fail "g++ não encontrado no PATH"
+
+# 2) Sanidade de execução (não faz parsing rígido da versão, só garante que roda)
+gcc --version >/dev/null 2>&1 || fail "gcc executa com erro"
+g++ --version >/dev/null 2>&1 || fail "g++ executa com erro"
+
+# 3) Compilar e executar testes mínimos
+tmpd="/var/tmp/adm/gcc-postinstall.$$"
+umask 022
+mkdir -p "$tmpd"
+
+cleanup() { rm -rf "$tmpd" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+cat >"$tmpd/t.c" <<'EOF'
+#include <stdio.h>
+int main(void){ puts("gcc-ok"); return 0; }
+EOF
+
+cat >"$tmpd/t.cc" <<'EOF'
+#include <iostream>
+int main(){ std::cout << "gpp-ok\n"; return 0; }
+EOF
+
+gcc -O2 -o "$tmpd/t-c" "$tmpd/t.c" >/dev/null 2>&1 || fail "Falha ao compilar teste C"
+outc="$("$tmpd/t-c" 2>/dev/null || true)"
+[ "$outc" = "gcc-ok" ] || fail "Execução do teste C falhou ou saída inesperada: '$outc'"
+
+g++ -O2 -o "$tmpd/t-cpp" "$tmpd/t.cc" >/dev/null 2>&1 || fail "Falha ao compilar teste C++"
+outcpp="$("$tmpd/t-cpp" 2>/dev/null || true)"
+[ "$outcpp" = "gpp-ok" ] || fail "Execução do teste C++ falhou ou saída inesperada: '$outcpp'"
+
+# 4) Opcional: checar interpretador (musl) se readelf existir
+if command -v readelf >/dev/null 2>&1; then
+  interp="$(readelf -l "$tmpd/t-c" 2>/dev/null | awk '/interpreter/ {print $NF; exit}' || true)"
+  if [ -n "$interp" ] && [ "$interp" != "/lib/ld-musl-x86_64.so.1" ]; then
+    fail "Interpretador ELF inesperado no teste C: $interp"
+  fi
+fi
+
+info "OK: gcc pós-instalação validado (execução e compile+run C/C++)"
