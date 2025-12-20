@@ -3,37 +3,40 @@ set -eu
 
 DESTDIR=${1:?uso: build DESTDIR}
 
-# Variáveis esperadas do adm (exportadas):
-#   PREFIX, SRCROOT, BUILD_DIR
-: "${PREFIX:=/usr/local}"
+# Instalação final no sistema: /usr
+: "${PREFIX:=/usr}"
 : "${SRCROOT:=$(pwd)}"
 : "${BUILD_DIR:=$SRCROOT/.build}"
 
-# Recomendação: build fora da árvore
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# Ajustes comuns/seguros:
+# Evita exigir texinfo/makeinfo para gerar documentação info:
+# (na prática, "MAKEINFO=true" faz o build prosseguir sem criar info pages)
+export MAKEINFO=true
+
+# Opções alinhadas com um binutils "host" padrão para sistema final.
 # - --disable-nls: reduz dependências (gettext)
-# - --disable-werror: evita falhas por warnings em toolchains mais novas
-# - --enable-plugins: útil para LTO e integrações
-# - --enable-shared: libs compartilhadas quando aplicável
-# - --with-sysroot=/ : comportamento típico de toolchain "host"
-# Observação: binutils 2.45.x (ramo ímpar) não inclui GOLD; não habilitamos.
+# - --disable-werror: evita falhas por warnings com toolchains novas
+# - --enable-plugins: útil para LTO/integrações
+# - --enable-deterministic-archives: reprodutibilidade
+# - --disable-multilib: mantém simples (ajuste se seu sistema for multilib)
 "$SRCROOT/configure" \
   --prefix="$PREFIX" \
+  --sysconfdir=/etc \
+  --localstatedir=/var \
   --disable-nls \
   --disable-werror \
   --enable-plugins \
   --enable-shared \
+  --enable-deterministic-archives \
   --with-sysroot=/ \
   --disable-multilib
 
-# Paralelismo (se seu ambiente definir MAKEFLAGS/JOBS, ok)
 make ${MAKEFLAGS:-}
 
 make DESTDIR="$DESTDIR" install
 
-# Higiene opcional: remover docs/info se você não quer dependência em texinfo
-# (deixe comentado inicialmente; ajuste conforme sua política)
-# rm -rf "$DESTDIR$PREFIX/share/info" || true
+# Opcional: se você não quer instalar info em hipótese alguma, garanta remoção.
+# (Em geral, com MAKEINFO=true elas não são geradas, mas isto reforça.)
+rm -rf "$DESTDIR$PREFIX/share/info" 2>/dev/null || true
