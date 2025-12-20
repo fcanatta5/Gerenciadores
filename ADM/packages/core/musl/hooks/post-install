@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+# Hook post-install para musl: validação no sistema após instalar.
+# Rodado como root pelo adm. Evita alterações permanentes: usa tmp e remove ao final.
+
+: "${PKG:=musl}"
+: "${VER:=unknown}"
+: "${PREFIX:=/usr}"
+
+fail() {
+  echo "adm: ${PKG}:${VER}: post-install: ERRO: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "adm: ${PKG}:${VER}: post-install: AVISO: $*" >&2
+}
+
+info() {
+  echo "adm: ${PKG}:${VER}: post-install: $*" >&2
+}
+
+# 1) Verificar loader e libc no sistema
+[ -e /lib/ld-musl-x86_64.so.1 ] || fail "Loader ausente no sistema: /lib/ld-musl-x86_64.so.1"
+[ -e /lib/libc.so ] || fail "libc.so ausente no sistema: /lib/libc.so"
+[ -e /lib/libc.musl-x86_64.so.1 ] || fail "libc real ausente no sistema: /lib/libc.musl-x86_64.so.1"
+
+# 2) Headers mínimos (úteis para desenvolvimento básico e para pacotes posteriores)
+req_headers="
+/usr/include/errno.h
+/usr/include/stdlib.h
+/usr/include/stdio.h
+/usr/include/string.h
+/usr/include/unistd.h
+/usr/include/stdint.h
+/usr/include/sys/types.h
+/usr/include/sys/stat.h
+"
+for h in $req_headers; do
+  [ -f "$h" ] || fail "Header obrigatório ausente no sistema: $h"
+done
+
+# 3) Validação dinâmica: compilar e executar um binário mínimo
+# Requer que um compilador C esteja disponível (gcc ou clang).
+# Se não houver, não falha o sistema; apenas alerta (você pode endurecer depois).
+cc=""
+if command -v cc >/dev/null 2>&1; then
+  cc="cc"
+elif command -v gcc >/dev/null 2>&1; then
+  cc="gcc"
+elif command -v clang >/dev/null 2>&1; then
+  cc="clang"
+fi
+
+if [ -z "$cc" ]; then
+  warn "Nenhum compilador C (cc/gcc/clang) encontrado; pulando teste de link/exec"
+  info "OK: validações estáticas passaram"
+  exit 0
+fi
+
+tmpd="/var/tmp/adm/musl-postinstall.$$"
+umask 022
+mkdir -p "$tmpd"
+
+cleanup() {
+  rm -rf "$tmpd" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+cat >"$tmpd/t.c" <<'EOF'
+#include <stdio.h>
+#include <unistd.h>
+int main(void) {
+  puts("musl-ok");
+  return (access("/", F_OK) == 0) ? 0 : 1;
+}
+EOF
+
+# Compila estaticamente? Para musl final, o teste mais realista é dinâmico (default).
+# Não força -static. Apenas garante que compila e roda.
+"$cc" -O2 -o "$tmpd/t" "$tmpd/t.c" >/dev/null 2>&1 || fail "Falha ao compilar binário de teste com $cc"
+
+# Executa e valida saída
+out="$("$tmpd/t" 2>/dev/null || true)"
+[ "$out" = "musl-ok" ] || fail "Execução do binário de teste falhou ou saída inesperada: '$out'"
+
+# 4) Se readelf existir, checar interpretador do ELF (opcional)
+if command -v readelf >/dev/null 2>&1; then
+  interp="$(readelf -l "$tmpd/t" 2>/dev/null | awk '/interpreter/ {print $NF; exit}' || true)"
+  if [ -n "$interp" ] && [ "$interp" != "/lib/ld-musl-x86_64.so.1" ]; then
+    # Em um sistema musl puro, espera-se exatamente esse interpretador.
+    fail "Interpretador ELF inesperado no binário de teste: $interp"
+  fi
+fi
+
+info "OK: musl pós-instalação validado (loader/libc/headers e link+exec mínimos)"
