@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+DESTDIR=${1:?uso: build DESTDIR}
+
+: "${PREFIX:=/usr}"
+: "${SRCROOT:=$(pwd)}"
+: "${BUILD_DIR:=$SRCROOT/.build}"
+
+# Para headers, o kernel usa ARCH=x86 para x86_64.
+ARCH=x86
+
+mkdir -p "$BUILD_DIR"
+
+# Garante ambiente limpo no diretório O= (out-of-tree)
+make -C "$SRCROOT" O="$BUILD_DIR" ARCH="$ARCH" mrproper
+
+# Instala headers “user-space API” em /usr/include dentro do DESTDIR
+make -C "$SRCROOT" O="$BUILD_DIR" ARCH="$ARCH" headers_install \
+  INSTALL_HDR_PATH="$DESTDIR$PREFIX"
+
+# Higiene padrão: remove arquivos auxiliares que não devem ser instalados
+# (o headers_install costuma deixar arquivos ocultos e Makefile)
+find "$DESTDIR$PREFIX/include" -name '.*' -delete 2>/dev/null || true
+rm -f "$DESTDIR$PREFIX/include/Makefile" 2>/dev/null || true
