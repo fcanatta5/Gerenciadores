@@ -485,30 +485,100 @@ extract_archive_to() {
 # Extract + patch + overlay
 ###############################################################################
 extract_sources() {
-  dld="$1"; srcd="$2"
-  run "mkdir -p '$srcd'"
+	# Extrai sources baixados em $dldir para $srcdir.
+	# Evolução: extrai MULTIPLOS tarballs (em ordem determinística).
+	# Retorna (echo) o SRCROOT a ser usado pelo build:
+	# - se git snapshot existir: $srcdir/src
+	# - senão: primeiro diretório top-level criado pela extração do primeiro tarball
+	#          (ou $srcdir se não houver diretório top-level)
 
-  g=$(find "$dld" -maxdepth 1 -type d -name 'git-*' 2>/dev/null | head -n 1 || true)
-  if [ -n "$g" ]; then
-    info "extract: git snapshot"
-    run "rm -rf '$srcd/src' && mkdir -p '$srcd/src'"
-    cp_tree_posix "$g" "$srcd/src"
-    echo "$srcd/src"
-    return 0
-  fi
+	dldir=$1
+	srcdir=$2
 
-  t=$(find "$dld" -maxdepth 1 -type f \
-    \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.bz2' -o -name '*.tbz2' -o -name '*.tar.xz' -o -name '*.txz' \) \
-    2>/dev/null | head -n 1 || true)
-  [ -n "$t" ] || die "Nenhum tarball encontrado em $dld"
+	# 1) Se existir snapshot git (git-*), mantém comportamento atual:
+	#    copia snapshot para $srcdir/src e usa isso como SRCROOT.
+	gitdir=$(find "$dldir" -mindepth 1 -maxdepth 1 -type d -name 'git-*' 2>/dev/null | head -n1 || true)
+	if [ -n "${gitdir:-}" ] && [ -d "$gitdir" ]; then
+		rm -rf "$srcdir"
+		mkdir -p "$srcdir/src"
+		cp_tree_posix "$gitdir" "$srcdir/src"
+		echo "$srcdir/src"
+		return 0
+	fi
 
-  info "extract: $(basename "$t")"
-  run "rm -rf '$srcd'/*"
-  extract_archive_to "$t" "$srcd"
+	# 2) Tarballs: extrair TODOS em ordem.
+	# Limpa o srcdir uma vez, no início.
+	rm -rf "$srcdir"
+	mkdir -p "$srcdir"
 
-  r=$(find "$srcd" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
-  [ -n "$r" ] || r="$srcd"
-  echo "$r"
+	# Lista determinística de arquivos suportados (ordenada).
+	# Compatível com o conjunto de extensões que o adm já suporta via extract_archive_to().
+	archives=$(
+		# -print0 evita problemas com espaços, mas aqui simplificamos mantendo basename normal;
+		# se você tiver nomes com espaços, eu adapto para -print0 + while read -d ''.
+		find "$dldir" -mindepth 1 -maxdepth 1 -type f \( \
+			-name '*.tar' -o \
+			-name '*.tar.gz' -o -name '*.tgz' -o \
+			-name '*.tar.bz2' -o -name '*.tbz2' -o \
+			-name '*.tar.xz' -o -name '*.txz' \
+		\) 2>/dev/null | LC_ALL=C sort
+	)
+
+	if [ -z "${archives:-}" ]; then
+		die "nenhum tarball suportado encontrado em $dldir"
+	fi
+
+	# Para escolher um SRCROOT estável: medimos o estado antes/depois do PRIMEIRO tarball.
+	first=1
+	srcroot=""
+
+	for a in $archives; do
+		# Para o primeiro tarball, capture snapshot do top-level antes.
+		if [ "$first" -eq 1 ]; then
+			before=$(
+				( cd "$srcdir" && find . -mindepth 1 -maxdepth 1 -print ) 2>/dev/null | LC_ALL=C sort
+			)
+		fi
+
+		info "extraindo $(basename "$a")"
+		extract_archive_to "$a" "$srcdir"
+
+		# Após extrair o primeiro tarball, determine o SRCROOT
+		if [ "$first" -eq 1 ]; then
+			after=$(
+				( cd "$srcdir" && find . -mindepth 1 -maxdepth 1 -print ) 2>/dev/null | LC_ALL=C sort
+			)
+
+			# Diferencial: entradas novas no top-level.
+			new_top=$(
+				# comm requer inputs ordenados; usamos sort acima.
+				comm -13 \
+					<(printf '%s\n' "$before") \
+					<(printf '%s\n' "$after") \
+				2>/dev/null | head -n1 || true
+			)
+
+			# Normaliza "./foo" -> "foo"
+			new_top=${new_top#./}
+
+			if [ -n "${new_top:-}" ] && [ -d "$srcdir/$new_top" ]; then
+				srcroot="$srcdir/$new_top"
+			else
+				# Se não houve diretório top-level novo, usa o próprio srcdir.
+				srcroot="$srcdir"
+			fi
+
+			first=0
+		fi
+	done
+
+	# Se por algum motivo não definimos srcroot, fallback.
+	if [ -z "${srcroot:-}" ]; then
+		srcroot="$srcdir"
+	fi
+
+	echo "$srcroot"
+	return 0
 }
 
 apply_patches_dir() {
