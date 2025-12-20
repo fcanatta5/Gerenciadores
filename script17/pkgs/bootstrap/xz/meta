@@ -1,0 +1,4 @@
+PKGNAME=xz
+PKGVER=5.8.1
+DEPS=""
+DESC="XZ Utils (bootstrap) - liblzma + xz tool, traditional /bin layout"
