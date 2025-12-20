@@ -1,18 +1,12 @@
 #!/bin/sh
 set -eu
 
-# Linux kernel headers 6.18.1
-# Fonte: https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.1.tar.xz  2
-# SHA256 (linux-6.18.1.tar.xz): d0a78bf3f0d12aaa10af3b5adcaed5bc767b5b78705e5ef885d5e930b72e25d5 3
+# Linux headers 6.18.1 (tarball oficial do kernel.org)
+K_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${PKGVER}.tar.xz"
+K_TARBALL="${WORKDIR}/linux-${PKGVER}.tar.xz"
 
-KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${PKGVER}.tar.xz"
-KERNEL_TARBALL="${WORKDIR}/linux-${PKGVER}.tar.xz"
-KERNEL_SHA256="d0a78bf3f0d12aaa10af3b5adcaed5bc767b5b78705e5ef885d5e930b72e25d5"
-
-# Esperado do pm-bootstrap.sh:
-: "${TARGET:=x86_64-linux-musl}"
-: "${TC_SYSROOT:=}"
-: "${BOOTSTRAP:=0}"
+# SHA256 do linux-6.18.1.tar.xz
+K_SHA256="d0a78bf3f0d12aaa10af3b5adcaed5bc767b5b78705e5ef885d5e930b72e25d5"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -45,69 +39,64 @@ hook_post_install() { :; }
 hook_pre_remove() { :; }
 hook_post_remove() { :; }
 
-karch_from_target() {
-  # Kernel usa ARCH "x86" para x86_64/i386. Mantemos o resto simples.
-  t=${TARGET%%-*}
-  case "$t" in
-    x86_64|i386|i486|i586|i686) echo x86 ;;
-    aarch64) echo arm64 ;;
-    arm*) echo arm ;;
-    riscv64) echo riscv ;;
-    mips*) echo mips ;;
-    powerpc64le|ppc64le) echo powerpc ;;
-    powerpc*|ppc*) echo powerpc ;;
-    s390x) echo s390 ;;
-    *) echo "$t" ;;
-  esac
-}
-
 pkg_fetch() {
   mkdir -p "$WORKDIR"
-  if [ -f "$KERNEL_TARBALL" ]; then
-    sha256_check "$KERNEL_TARBALL" "$KERNEL_SHA256"
+  if [ -f "$K_TARBALL" ]; then
+    sha256_check "$K_TARBALL" "$K_SHA256"
     return 0
   fi
-  fetch_file "$KERNEL_URL" "$KERNEL_TARBALL"
-  sha256_check "$KERNEL_TARBALL" "$KERNEL_SHA256"
+  fetch_file "$K_URL" "$K_TARBALL"
+  sha256_check "$K_TARBALL" "$K_SHA256"
 }
 
 pkg_unpack() {
   rm -rf "$SRCDIR"
   mkdir -p "$SRCDIR"
-  tar -C "$SRCDIR" --strip-components=1 -xJf "$KERNEL_TARBALL"
+
+  # Extração robusta de .tar.xz:
+  # 1) tenta tar -xJf
+  # 2) fallback: xz -dc | tar -xf -
+  if tar -C "$SRCDIR" --strip-components=1 -xJf "$K_TARBALL" >/dev/null 2>&1; then
+    :
+  else
+    if have xz; then
+      xz -dc "$K_TARBALL" | tar -C "$SRCDIR" --strip-components=1 -xf -
+    else
+      echo "ERRO: não foi possível extrair .tar.xz (precisa tar com -J ou xz)." >&2
+      exit 1
+    fi
+  fi
 }
 
 pkg_build() {
-  # Para headers_install, não precisamos compilar kernel.
-  # Ainda assim, garantimos limpeza mínima de artefatos.
+  # linux-headers não precisa “compilar” o kernel.
+  # Apenas garantimos uma tree limpa o suficiente para headers_install.
   cd "$SRCDIR"
   make mrproper >/dev/null 2>&1 || true
 }
 
 pkg_install() {
-  # Headers devem ir para o SYSROOT temporário.
-  # O pm instala extraindo em '/', então colocamos os paths absolutos do sysroot
-  # *dentro do DESTDIR* para o tarball produzir /<TC_SYSROOT>/usr/include.
-  [ -n "${TC_SYSROOT:-}" ] || { echo "ERRO: TC_SYSROOT vazio (bootstrap)"; exit 1; }
-
-  case "$TC_SYSROOT" in
-    /*) : ;;
-    *) echo "ERRO: TC_SYSROOT deve ser path absoluto: '$TC_SYSROOT'" >&2; exit 1 ;;
-  esac
-
-  karch=$(karch_from_target)
-
   cd "$SRCDIR"
 
-  # Instala em: <TC_SYSROOT>/usr/include
-  # O alvo é: DESTDIR/<TC_SYSROOT>/usr/include (para o tarball criar /<TC_SYSROOT>/usr/include)
-  hdr_root="${DESTDIR}${TC_SYSROOT}/usr"
-  mkdir -p "$hdr_root"
+  # Este pacote é para o pm-bootstrap.sh:
+  # - TC_SYSROOT aponta para o sysroot temporário.
+  # - Precisamos instalar headers em: $TC_SYSROOT/usr/include
+  #
+  # IMPORTANTE: não use PM_PREFIX aqui. Headers vão para /usr/include do SYSROOT.
+  if [ -z "${TC_SYSROOT:-}" ]; then
+    echo "ERRO: TC_SYSROOT não definido. Esta receita é para uso com pm-bootstrap.sh." >&2
+    exit 1
+  fi
 
-  make ARCH="$karch" \
-    INSTALL_HDR_PATH="$hdr_root" \
-    headers_install
+  # INSTALAÇÃO NO SYSROOT:
+  # DESTDIR é staging do pm; adicionamos TC_SYSROOT por fora.
+  mkdir -p "$DESTDIR$TC_SYSROOT/usr"
 
-  # Limpeza padrão de headers_install (remove arquivos de build markers)
-  find "$hdr_root/include" -name '.install' -o -name '..install.cmd' 2>/dev/null | xargs -r rm -f 2>/dev/null || true
+  # headers_install cria /usr/include/linux etc.
+  make -j"$PM_JOBS" headers_install INSTALL_HDR_PATH="$DESTDIR$TC_SYSROOT/usr"
+
+  # Algumas árvores deixam lixo de build; removemos o que não deve ir para headers.
+  # (melhor esforço; não falhar se não existir)
+  rm -rf "$DESTDIR$TC_SYSROOT/usr/include/.install" 2>/dev/null || true
+  find "$DESTDIR$TC_SYSROOT/usr/include" -name '.*' -type f -delete 2>/dev/null || true
 }
