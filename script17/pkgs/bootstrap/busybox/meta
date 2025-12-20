@@ -1,0 +1,4 @@
+PKGNAME=busybox
+PKGVER=1.36.1
+DEPS="bootstrap/gcc-final"
+DESC="Bootstrap BusyBox (static) installed into the temporary sysroot for chroot/shell/tools"
