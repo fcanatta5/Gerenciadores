@@ -1,0 +1,4 @@
+PKGNAME=binutils
+PKGVER=2.45
+DEPS=""
+DESC="Bootstrap GNU Binutils for temporary toolchain"
