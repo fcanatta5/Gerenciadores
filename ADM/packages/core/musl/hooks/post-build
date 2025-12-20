@@ -1,0 +1,118 @@
+#!/bin/sh
+set -eu
+
+# Hook post-build para musl: validação do DESTDIR antes do empacotamento.
+# Objetivo: garantir layout e arquivos essenciais do runtime musl no sistema final.
+
+: "${PKG:=musl}"
+: "${VER:=unknown}"
+: "${PREFIX:=/usr}"
+: "${DESTDIR:?DESTDIR não definido no ambiente do hook}"
+
+fail() {
+  echo "adm: ${PKG}:${VER}: post-build lint: ERRO: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "adm: ${PKG}:${VER}: post-build lint: AVISO: $*" >&2
+}
+
+info() {
+  echo "adm: ${PKG}:${VER}: post-build lint: $*" >&2
+}
+
+# Caminhos esperados no DESTDIR (layout típico musl final)
+syslib="$DESTDIR/lib"
+usrinc="$DESTDIR$PREFIX/include"
+usrlib="$DESTDIR$PREFIX/lib"
+usrbin="$DESTDIR$PREFIX/bin"
+
+# 1) Loader (dinlinker) é obrigatório em x86_64
+[ -e "$syslib/ld-musl-x86_64.so.1" ] || fail "Loader ausente: /lib/ld-musl-x86_64.so.1"
+
+# 2) libc runtime
+# Em musl, normalmente:
+# - /lib/libc.so é o dynamic linker script/soname helper
+# - /lib/libc.musl-x86_64.so.1 é a libc real (ou nome equivalente instalado)
+if [ ! -e "$syslib/libc.so" ]; then
+  fail "libc.so ausente em /lib (esperado para runtime musl)"
+fi
+
+# Aceita uma das variações comuns do arquivo real
+if [ -e "$syslib/libc.musl-x86_64.so.1" ]; then
+  :
+else
+  # fallback: algumas instalações usam apenas o loader + libc.so; ainda assim, é anormal no sistema final.
+  # Mantemos como erro para policy mais rígida.
+  fail "Arquivo libc real ausente: /lib/libc.musl-x86_64.so.1"
+fi
+
+# 3) Headers essenciais (musl dev)
+[ -d "$usrinc" ] || fail "Diretório include ausente: ${PREFIX}/include"
+
+req_headers="
+$usrinc/errno.h
+$usrinc/stdlib.h
+$usrinc/stdio.h
+$usrinc/string.h
+$usrinc/unistd.h
+$usrinc/stdint.h
+$usrinc/sys/types.h
+$usrinc/sys/stat.h
+"
+for h in $req_headers; do
+  [ -f "$h" ] || fail "Header obrigatório ausente: ${h#"$DESTDIR"}"
+done
+
+# 4) Ferramentas auxiliares (não são estritamente runtime, mas típicas em install final)
+# musl instala ldd como script (pode existir em /usr/bin)
+if [ -d "$usrbin" ]; then
+  if [ ! -e "$usrbin/ldd" ]; then
+    warn "ldd não encontrado em ${PREFIX}/bin (ok, mas incomum para install padrão do musl)"
+  fi
+else
+  warn "${PREFIX}/bin não existe no DESTDIR (ok se você empacota ferramentas em outro pacote)"
+fi
+
+# 5) Sanidade: não permitir resíduos óbvios dentro de include (dotfiles/Makefile)
+if find "$usrinc" -type f -name '.*' -print -quit | grep -q .; then
+  fail "Encontrados arquivos ocultos em ${PREFIX}/include (ex.: .*) — remova antes de empacotar"
+fi
+if [ -f "$usrinc/Makefile" ]; then
+  fail "Encontrado ${PREFIX}/include/Makefile — remova antes de empacotar"
+fi
+
+# 6) Política de diretórios esperados:
+# Para musl final, é normal ver conteúdo em /lib e /usr/include (e opcionalmente /usr/lib, /usr/bin).
+# Se houver arquivos fora desse conjunto, alertar (ou endurecer para erro, se desejar).
+allowed_prefixes="
+lib/
+usr/include/
+usr/lib/
+usr/bin/
+"
+other_paths="$(cd "$DESTDIR" && find . -mindepth 1 -type f | sed 's|^\./||' \
+  | awk -v ap="$allowed_prefixes" '
+    BEGIN{
+      n=split(ap,a,"\n")
+    }
+    {
+      ok=0
+      for(i=1;i<=n;i++){
+        if(a[i]!=""){
+          if(index($0,a[i])==1){ ok=1; break }
+        }
+      }
+      if(!ok) print $0
+    }'
+)" || true
+
+if [ -n "$other_paths" ]; then
+  warn "Arquivos fora do conjunto esperado (revise se é intencional):"
+  echo "$other_paths" | sed 's/^/  - /' >&2
+  # Para policy hard, troque warn por fail:
+  # fail "Arquivos fora do layout permitido para musl"
+fi
+
+info "OK: validação post-build passou (loader, libc e headers essenciais presentes)"
