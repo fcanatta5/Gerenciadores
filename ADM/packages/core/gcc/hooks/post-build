@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+: "${PKG:=gcc}"
+: "${VER:=15.2.0}"
+: "${PREFIX:=/usr}"
+: "${DESTDIR:?DESTDIR não definido no ambiente do hook}"
+
+triplet="x86_64-linux-musl"
+
+fail() { echo "adm: ${PKG}:${VER}: post-build lint: ERRO: $*" >&2; exit 1; }
+warn() { echo "adm: ${PKG}:${VER}: post-build lint: AVISO: $*" >&2; }
+info() { echo "adm: ${PKG}:${VER}: post-build lint: $*" >&2; }
+
+# Caminhos no DESTDIR
+usr="$DESTDIR$PREFIX"
+bindir="$usr/bin"
+libgccdir="$usr/lib/gcc/$triplet/$VER"
+libexecgcc="$usr/libexec/gcc/$triplet/$VER"
+libdir="$usr/lib"
+
+# 1) Binários front-end
+[ -x "$bindir/gcc" ] || fail "Binário ausente/inexecutável: ${PREFIX}/bin/gcc"
+[ -x "$bindir/g++" ] || fail "Binário ausente/inexecutável: ${PREFIX}/bin/g++"
+
+# 2) Componentes internos do GCC (cc1/cc1plus/collect2)
+# Dependendo do configure, estes podem ir para libexecdir ou para libgccdir.
+cc1=""
+cc1plus=""
+collect2=""
+
+for p in \
+  "$libexecgcc/cc1" "$libgccdir/cc1"; do
+  [ -x "$p" ] && cc1="$p" && break || true
+done
+[ -n "$cc1" ] || fail "Componente cc1 não encontrado em ${PREFIX}/libexec/gcc/... ou ${PREFIX}/lib/gcc/..."
+
+for p in \
+  "$libexecgcc/cc1plus" "$libgccdir/cc1plus"; do
+  [ -x "$p" ] && cc1plus="$p" && break || true
+done
+[ -n "$cc1plus" ] || fail "Componente cc1plus não encontrado"
+
+for p in \
+  "$libexecgcc/collect2" "$libgccdir/collect2"; do
+  [ -x "$p" ] && collect2="$p" && break || true
+done
+[ -n "$collect2" ] || fail "Componente collect2 não encontrado"
+
+# 3) Specs (muito útil para diagnóstico)
+[ -f "$libgccdir/specs" ] || warn "Arquivo specs não encontrado em ${libgccdir#"$DESTDIR"} (ok, mas incomum)"
+
+# 4) Runtime libs essenciais: libgcc e libstdc++
+# libgcc pode vir como .a e/ou .so; exigimos ao menos uma.
+have_libgcc=0
+for f in "$libgccdir"/libgcc.a "$libgccdir"/libgcc_s.so "$libdir"/libgcc_s.so*; do
+  [ -e "$f" ] && have_libgcc=1 && break || true
+done
+[ "$have_libgcc" -eq 1 ] || fail "libgcc não encontrado (esperava libgcc.a ou libgcc_s.so*)"
+
+# libstdc++ (para C++) — exigimos ao menos uma presença.
+have_libstdcxx=0
+for f in "$libdir"/libstdc++.so* "$libdir"/libstdc++.a; do
+  [ -e "$f" ] && have_libstdcxx=1 && break || true
+done
+[ "$have_libstdcxx" -eq 1 ] || fail "libstdc++ não encontrado em ${PREFIX}/lib"
+
+# 5) Sanidade: evitar lixo em /usr/include (dotfiles/Makefile) — GCC instala headers próprios;
+# não falhamos por conter Makefile, mas dotfiles não devem aparecer.
+if [ -d "$usr/include" ] && find "$usr/include" -type f -name '.*' -print -quit | grep -q .; then
+  fail "Encontrados arquivos ocultos em ${PREFIX}/include (ex.: .*) — revise instalação"
+fi
+
+info "OK: validação post-build passou (gcc/g++, cc1/cc1plus/collect2 e libs essenciais presentes)"
