@@ -1,0 +1,4 @@
+PKGNAME=musl
+PKGVER=1.2.5
+DEPS="bootstrap/linux-headers bootstrap/gcc-stage1"
+DESC="Bootstrap musl libc (install into temporary sysroot)"
