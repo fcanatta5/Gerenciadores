@@ -1,19 +1,15 @@
 #!/bin/sh
 set -eu
 
-# Receita: zlib 1.3.1 (tar.xz) - musl-friendly, makefile clássico
+# zlib 1.3.1
 # Fonte oficial: https://zlib.net/zlib-1.3.1.tar.xz
-# SHA256 (tar.xz): 38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32
+# SHA256: 38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32 1
 
-ZLIB_URL="https://zlib.net/zlib-${PKGVER}.tar.xz"
+ZLIB_URL_PRIMARY="https://zlib.net/zlib-${PKGVER}.tar.xz"
+# fallback opcional (mesmo conteúdo/versão; útil se zlib.net estiver instável)
+ZLIB_URL_FALLBACK="https://github.com/madler/zlib/releases/download/v${PKGVER}/zlib-${PKGVER}.tar.xz" 2
 ZLIB_TARBALL="${WORKDIR}/zlib-${PKGVER}.tar.xz"
 ZLIB_SHA256="38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32"
-
-# Hooks opcionais (se você não quiser, pode remover)
-hook_pre_install() { :; }
-hook_post_install() { :; }
-hook_pre_remove() { :; }
-hook_post_remove() { :; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -30,63 +26,70 @@ fetch_file() {
   mv -f "$out.tmp" "$out"
 }
 
-verify_sha256() {
+sha256_check() {
   file=$1 expected=$2
-  if have sha256sum; then
-    got=$(sha256sum "$file" | awk '{print $1}')
-  else
-    echo "ERRO: sha256sum não encontrado (BusyBox normalmente fornece)." >&2
-    exit 1
-  fi
+  got=$(sha256sum "$file" | awk '{print $1}')
   if [ "$got" != "$expected" ]; then
-    echo "ERRO: sha256 inválido para $(basename "$file")" >&2
+    echo "ERRO: SHA256 inválido para $(basename "$file")" >&2
     echo "Esperado: $expected" >&2
     echo "Obtido:   $got" >&2
     exit 1
   fi
 }
 
+# Hooks opcionais (o seu pm.sh chama se existirem)
+hook_pre_install() { :; }
+hook_post_install() { :; }
+hook_pre_remove() { :; }
+hook_post_remove() { :; }
+
 pkg_fetch() {
   mkdir -p "$WORKDIR"
-  # Se já existe e checksum bate, reaproveita (economiza rede)
+
+  # Reaproveita tarball se já estiver presente e válido
   if [ -f "$ZLIB_TARBALL" ]; then
-    if verify_sha256 "$ZLIB_TARBALL" "$ZLIB_SHA256"; then
-      return 0
-    fi
-    rm -f "$ZLIB_TARBALL"
+    sha256_check "$ZLIB_TARBALL" "$ZLIB_SHA256"
+    return 0
   fi
 
-  fetch_file "$ZLIB_URL" "$ZLIB_TARBALL"
-  verify_sha256 "$ZLIB_TARBALL" "$ZLIB_SHA256"
+  # Tenta fonte primária; se falhar, tenta fallback
+  if fetch_file "$ZLIB_URL_PRIMARY" "$ZLIB_TARBALL"; then
+    :
+  else
+    echo "WARN: falha ao baixar de $ZLIB_URL_PRIMARY; tentando fallback..." >&2
+    fetch_file "$ZLIB_URL_FALLBACK" "$ZLIB_TARBALL"
+  fi
+
+  sha256_check "$ZLIB_TARBALL" "$ZLIB_SHA256"
 }
 
 pkg_unpack() {
+  # sempre preparar árvore limpa
   rm -rf "$SRCDIR"
   mkdir -p "$SRCDIR"
-  # strip-components=1 para não ficar zlib-1.3.1/ dentro do SRCDIR
+
+  # zlib vem como zlib-<ver>/...
   tar -C "$SRCDIR" --strip-components=1 -xJf "$ZLIB_TARBALL"
 }
 
 pkg_build() {
   cd "$SRCDIR"
 
-  # zlib usa ./configure próprio; define prefix e opções de shared.
-  # Para musl normalmente é tranquilo. Você pode adicionar CFLAGS/LDFLAGS via ambiente.
+  # zlib usa configure próprio.
+  # --prefix define o prefix final (ex.: /usr/local)
   #
-  # --prefix deve ser o prefix final dentro do sistema (PM_PREFIX)
+  # Você pode exportar CC/CFLAGS/LDFLAGS fora do pm.sh; zlib respeita.
   ./configure --prefix="$PM_PREFIX"
 
-  # build
   make -j"$PM_JOBS"
 }
 
 pkg_install() {
   cd "$SRCDIR"
 
-  # Instala em DESTDIR (nunca em / diretamente)
+  # Instala somente em DESTDIR (o pm.sh empacota e extrai em /)
   make DESTDIR="$DESTDIR" install
 
-  # Opcional: também instalar shared se o build gerar e você quiser garantir:
-  # (zlib normalmente instala libz.so e libz.a via 'install' dependendo do sistema)
-  # make DESTDIR="$DESTDIR" install-shared || true
+  # Remover artefatos que costumam ser dispensáveis
+  find "$DESTDIR" -type f -name "*.la" -delete 2>/dev/null || true
 }
