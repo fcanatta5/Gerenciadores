@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+DESTDIR=${1:?uso: build DESTDIR}
+
+: "${PREFIX:=/usr}"
+: "${SRCROOT:=$(pwd)}"
+: "${BUILD_DIR:=$SRCROOT/.build}"
+
+# Musl em sistema final costuma usar /lib como syslibdir (libc.so, ld-musl-*.so.1)
+# e /usr para headers e utilitários.
+mkdir -p "$BUILD_DIR"
+cd "$SRCROOT"
+
+# Configuração direta in-tree (musl não precisa out-of-tree)
+# --syslibdir=/lib: garante layout correto para runtime/loader
+# --disable-shared: NÃO usar; musl precisa do loader/so adequado conforme upstream
+./configure \
+  --prefix="$PREFIX" \
+  --syslibdir=/lib
+
+make ${MAKEFLAGS:-}
+
+# instala tudo no DESTDIR
+make DESTDIR="$DESTDIR" install
+
+# Sanidade mínima: garanta que o loader foi instalado no lugar esperado para x86_64
+[ -e "$DESTDIR/lib/ld-musl-x86_64.so.1" ] || {
+  echo "ERRO: loader não encontrado em /lib/ld-musl-x86_64.so.1 dentro do DESTDIR" >&2
+  exit 1
+}
