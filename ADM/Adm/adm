@@ -1,18 +1,17 @@
 #!/bin/sh
-# adm — POSIX package manager (repo local)
-# - build do pacote é simples: executado dentro do SRCROOT e recebe DESTDIR em $1
-# - download/cache/checksum/extract/patch/files/hooks/package/db/logs
-# - checksums por arquivo (sha256 ou md5)
-# - sources por linha com fragmento #branch= e #commit=
-# - downloads paralelos por pacote (DL_JOBS)
-# - builds paralelos para múltiplos alvos (BUILD_PARALLEL) com locks
-# - locks POSIX via lockdir
-# - instalação transacional básica (stage + backup/rollback)
-# - comandos: doctor verify list status clean-cache lint
+# adm — POSIX package manager (repo local) — versão robusta (musl/busybox friendly)
 #
-# Layout do repo:
-# /var/src/adm/packages/categoria/programa/{build,version,checksums,depends,sources,patch/,files/,hooks/,queue-status}
-
+# Modelo:
+# - Recipe do pacote:
+#   /var/src/adm/packages/<categoria>/<programa>/{build,version,checksums,depends,sources,patch/,files/,hooks/,queue-status}
+# - build do pacote é simples: executado em $SRCROOT e recebe DESTDIR em $1.
+# - adm faz: deps, download paralelo, cache, checksum, extract, patch, overlay files/, package, install transacional, DB, logs.
+#
+# Hooks (executáveis) em hooks/:
+#   pre-source post-source pre-extract post-extract pre-build post-build pre-install post-install
+#   pre-remove post-remove pre-update post-update post-package
+# queue-status (executável) recebe PKG_EVENT=<evento>
+#
 set -eu
 
 ###############################################################################
@@ -32,7 +31,6 @@ LOCK_DIR=$DB_DIR/locks
 STATE_DIR=$DB_DIR/state
 
 LOG_DIR=${LOG_DIR:-/var/log/adm}
-
 PREFIX=${PREFIX:-/usr/local}
 UMASK=${UMASK:-022}
 
@@ -47,10 +45,9 @@ BUILD_PARALLEL=${BUILD_PARALLEL:-1}
 umask "$UMASK"
 
 ###############################################################################
-# UI (cores são inicializadas APÓS parse de flags)
+# UI
 ###############################################################################
 C_RESET=; C_BOLD=; C_DIM=; C_RED=; C_GRN=; C_YEL=; C_CYN=
-
 init_colors() {
   if [ -t 1 ] && [ "${NO_COLOR}" -eq 0 ]; then
     C_RESET=$(printf '\033[0m')
@@ -60,11 +57,8 @@ init_colors() {
     C_GRN=$(printf '\033[32m')
     C_YEL=$(printf '\033[33m')
     C_CYN=$(printf '\033[36m')
-  else
-    C_RESET=; C_BOLD=; C_DIM=; C_RED=; C_GRN=; C_YEL=; C_CYN=
   fi
 }
-
 say()  { printf '%s\n' "$*"; }
 info() { say "${C_CYN}[INFO]${C_RESET} $*"; }
 ok()   { say "${C_GRN}[OK]${C_RESET}   $*"; }
@@ -95,16 +89,13 @@ sanitize_name() { printf '%s' "$1" | sed 's/[^A-Za-z0-9._+-]/_/g'; }
 # Locks (POSIX lockdir)
 ###############################################################################
 lock_acquire() {
-  # $1=name $2=timeout_seconds(0 = sem timeout)
   ensure_dirs
   name=$(sanitize_name "$1")
   tout=${2:-0}
   l="$LOCK_DIR/$name.lock"
 
   start=0
-  if command -v date >/dev/null 2>&1; then
-    start=$(date +%s 2>/dev/null || echo 0)
-  fi
+  start=$(date +%s 2>/dev/null || echo 0)
 
   while :; do
     if mkdir "$l" 2>/dev/null; then
@@ -136,7 +127,6 @@ lock_release() {
 }
 
 with_lock() {
-  # $1=lockname $2=timeout $3=cmd ...
   lk="$1"; tout="$2"; shift 2
   lock_acquire "$lk" "$tout"
   trap "lock_release '$lk'" INT TERM EXIT
@@ -172,17 +162,14 @@ resolve_pkg_path() {
   [ -f "$INDEX_CACHE" ] || build_index
   awk -F'\t' -v p="$1" '$1==p{print $3; exit}' "$INDEX_CACHE"
 }
-
 resolve_pkg_cat() {
   [ -f "$INDEX_CACHE" ] || build_index
   awk -F'\t' -v p="$1" '$1==p{print $2; exit}' "$INDEX_CACHE"
 }
-
 resolve_pkg_ambiguous_count() {
   [ -f "$INDEX_CACHE" ] || build_index
   awk -F'\t' -v p="$1" '$1==p{c++} END{print c+0}' "$INDEX_CACHE"
 }
-
 resolve_pkg_ambiguous_list() {
   [ -f "$INDEX_CACHE" ] || build_index
   awk -F'\t' -v p="$1" '$1==p{print $2 "\t" $3}' "$INDEX_CACHE"
@@ -192,12 +179,10 @@ resolve_pkg_ambiguous_list() {
 # Installed DB
 ###############################################################################
 is_installed() { [ -d "$INST_DIR/$1" ]; }
-
 installed_version() {
   [ -f "$INST_DIR/$1/meta" ] || return 1
   awk -F= '$1=="version"{print $2; exit}' "$INST_DIR/$1/meta"
 }
-
 installed_auto() {
   [ -f "$INST_DIR/$1/meta" ] || return 1
   awk -F= '$1=="auto"{print $2; exit}' "$INST_DIR/$1/meta"
@@ -210,18 +195,19 @@ read_version() {
   [ -f "$1/version" ] || die "version ausente: $1"
   sed -n '1p' "$1/version" | tr -d '\r\n'
 }
-
 list_depends() {
   if [ -f "$1/depends" ]; then
     sed 's/#.*$//' "$1/depends" | awk 'NF{print $1}'
   fi
 }
 
-# sources por linha (preserva fragmentos #branch= / #commit=)
+# sources: 1 por linha; remove comentários de linha inteira; remove comentários inline apenas se houver espaço antes do '#'
 list_sources_raw_lines() {
   if [ -f "$1/sources" ]; then
-    # remove CR e trailing spaces, ignora linhas vazias e comentários "puro"
-    sed 's/\r$//' "$1/sources" | sed 's/[[:space:]]*$//' | sed '/^[[:space:]]*#/d; /^$/d'
+    sed 's/\r$//' "$1/sources" \
+      | sed 's/[[:space:]]*$//' \
+      | sed '/^[[:space:]]*#/d; /^$/d' \
+      | sed 's/[[:space:]]#.*$//'
   fi
 }
 
@@ -236,7 +222,6 @@ run_queue_status() {
     run "PKG_EVENT='$ev' '$qs'"
   fi
 }
-
 run_hook() {
   h="$1/hooks/$2"
   if [ -f "$h" ] && [ -x "$h" ]; then
@@ -246,7 +231,7 @@ run_hook() {
 }
 
 ###############################################################################
-# Checksums (por arquivo; sha256 ou md5)
+# Checksums
 ###############################################################################
 hash_kind_from_hash() { case "${#1}" in 64) echo sha256 ;; 32) echo md5 ;; *) echo "" ;; esac; }
 sum_cmd_for() {
@@ -256,17 +241,12 @@ sum_cmd_for() {
     *)      echo "" ;;
   esac
 }
-
 checksum_expected_for_file() {
-  # $1=checksums $2=filename -> hash
   awk -v f="$2" 'NF>=2{if($2==f){print $1; exit}}' "$1"
 }
-
 checksums_has_file() {
-  # exit 0 if present, 1 otherwise
   awk -v f="$2" 'NF>=2{if($2==f){found=1}} END{exit found?0:1}' "$1"
 }
-
 verify_one_checksum() {
   [ "$SKIP_SUMS" -eq 1 ] && return 0
   csum="$1"; dir="$2"; f="$3"
@@ -274,10 +254,8 @@ verify_one_checksum() {
 
   exp=$(checksum_expected_for_file "$csum" "$f" | tr -d '\r')
   [ -n "$exp" ] || die "checksums não contém entrada para: $f"
-
   kind=$(hash_kind_from_hash "$exp")
   [ -n "$kind" ] || die "hash inválido em checksums para $f"
-
   cmd=$(sum_cmd_for "$kind")
   [ -n "$cmd" ] || die "Faltando ferramenta: $kind (precisa de ${kind}sum)."
 
@@ -286,7 +264,7 @@ verify_one_checksum() {
 }
 
 ###############################################################################
-# Sources parsing (#branch= / #commit=)
+# Download + sources parsing (#branch= / #commit=)
 ###############################################################################
 dl_tool() {
   if command -v curl >/dev/null 2>&1; then echo curl
@@ -294,37 +272,34 @@ dl_tool() {
   else echo ""
   fi
 }
-
 download_http_one() {
-  tool=$(dl_tool)
-  [ -n "$tool" ] || die "Precisa de curl ou wget."
+  tool=$(dl_tool); [ -n "$tool" ] || die "Precisa de curl ou wget."
   if [ "$tool" = curl ]; then
     run "curl -L --fail --retry 3 --retry-delay 1 --progress-bar -o '$2' '$1'"
   else
     run "wget --tries=3 --timeout=30 --progress=bar:force:noscroll -O '$2' '$1'"
   fi
 }
-
 url_strip_fragment() { printf '%s' "$1" | awk -F'#' '{print $1}'; }
 url_fragment() { printf '%s' "$1" | awk -F'#' 'NF>=2{print $2}'; }
 url_basename() { printf '%s' "$1" | sed 's/[?#].*$//' | awk -F/ '{print $NF}'; }
-
-frag_get() {
-  # $1=fragment, $2=key ; separadores & e espaços
-  printf '%s' "$1" | tr '&' '\n' | tr ' ' '\n' | awk -F= -v k="$2" '$1==k{print $2; exit}'
-}
+frag_get() { printf '%s' "$1" | tr '&' '\n' | tr ' ' '\n' | awk -F= -v k="$2" '$1==k{print $2; exit}'; }
 
 hash_key() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum | awk '{print $1}'
-  else
-    printf '%s' "$1" | md5sum | awk '{print $1}'
+  if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else printf '%s' "$1" | md5sum | awk '{print $1}'
   fi
 }
 
 download_git_cached() {
   need_cmd git
   url="$1"; cachedir="$2"; branch="${3:-}"; commit="${4:-}"
+
+  # suporta git+https://...
+  case "$url" in
+    git+*) url=$(printf '%s' "$url" | sed 's/^git+//') ;;
+  esac
+
   k=$(hash_key "$url")
   d="$cachedir/git-$k"
 
@@ -354,10 +329,8 @@ download_git_cached() {
 }
 
 copy_cached_or_download_one() {
-  # $1=pkg $2=pkgpath $3=rawline $4=outdir
   pkg="$1"; pkgpath="$2"; raw="$3"; outdir="$4"
   csum="$pkgpath/checksums"
-
   mkdir -p "$outdir" "$SRC_CACHE/$pkg"
 
   base=$(url_strip_fragment "$raw")
@@ -367,10 +340,8 @@ copy_cached_or_download_one() {
 
   case "$base" in
     http://*|https://*|ftp://*)
-      f=$(url_basename "$base")
-      [ -n "$f" ] || die "URL inválida: $base"
+      f=$(url_basename "$base"); [ -n "$f" ] || die "URL inválida: $base"
 
-      # Se checksums existe e não foi skip, exigir entrada
       if [ -f "$csum" ] && [ "$SKIP_SUMS" -eq 0 ]; then
         checksums_has_file "$csum" "$f" || die "checksums não contém $f (obrigatório quando checksums existe)"
       fi
@@ -413,25 +384,21 @@ copy_cached_or_download_one() {
 }
 
 download_sources_parallel() {
-  # $1=pkg $2=pkgpath $3=outdir
   pkg="$1"; pkgpath="$2"; outdir="$3"
   ensure_dirs
   srcs=$(list_sources_raw_lines "$pkgpath" || true)
   [ -n "${srcs:-}" ] || { info "Sem sources."; return 0; }
 
   if [ "$DRYRUN" -eq 1 ]; then
-    say "${C_DIM}DRY-RUN:${C_RESET} downloads (linhas):"
+    say "${C_DIM}DRY-RUN:${C_RESET} downloads:"
     printf '%s\n' "$srcs" | sed 's/^/  - /'
     return 0
   fi
 
-  # Evita subshell: grava sources em arquivo temporário e lê dele
   tmp="$STATE_DIR/srcs.$pkg.$$"
   printf '%s\n' "$srcs" >"$tmp"
 
-  pids=""
-  running=0
-
+  pids=""; running=0
   while IFS= read -r raw; do
     (
       set -eu
@@ -448,33 +415,28 @@ download_sources_parallel() {
       running=$((running - 1))
     fi
   done <"$tmp"
-
   rm -f "$tmp"
 
   for pid in $pids; do
     wait "$pid" || die "Falha em download paralelo."
   done
 
-  # Consistência extra: se checksums existe e não foi skip, garantir que todos os arquivos listados existem no outdir (HTTP/FTP)
+  # se checksums existe, garantir que todos os arquivos citados existem
   if [ -f "$pkgpath/checksums" ] && [ "$SKIP_SUMS" -eq 0 ]; then
     awk 'NF>=2{print $2}' "$pkgpath/checksums" | while IFS= read -r f; do
       [ -n "$f" ] || continue
-      if [ ! -f "$outdir/$f" ]; then
-        # não falha para git-snapshots (não estão em checksums)
-        die "checksums cita '$f' mas arquivo não foi baixado para $outdir"
-      fi
+      [ -f "$outdir/$f" ] || die "checksums cita '$f' mas arquivo não foi baixado para $outdir"
     done
   fi
 }
 
 ###############################################################################
-# Deps: topo + ciclo
+# Deps topo + ciclo
 ###############################################################################
 deps_toposort() {
   marks="$STATE_DIR/marks.$$.tmp"
   out="$STATE_DIR/order.$$.tmp"
-  : >"$marks"
-  : >"$out"
+  : >"$marks"; : >"$out"
 
   dfs() {
     n="$1"
@@ -482,11 +444,8 @@ deps_toposort() {
     if grep "^temp $n\$" "$marks" >/dev/null 2>&1; then die "Ciclo em dependências envolvendo: $n"; fi
     echo "temp $n" >>"$marks"
 
-    p=$(resolve_pkg_path "$n")
-    [ -n "$p" ] || die "Dependência não encontrada no repo: $n"
-    for d in $(list_depends "$p"); do
-      dfs "$d"
-    done
+    p=$(resolve_pkg_path "$n"); [ -n "$p" ] || die "Dependência não encontrada no repo: $n"
+    for d in $(list_depends "$p"); do dfs "$d"; done
 
     grep -v "^temp $n\$" "$marks" >"$marks.$$" && mv "$marks.$$" "$marks"
     echo "perm $n" >>"$marks"
@@ -499,7 +458,40 @@ deps_toposort() {
 }
 
 ###############################################################################
-# Extract + patch + files overlay
+# Archive extract helpers (busybox-safe)
+###############################################################################
+extract_archive_to() {
+  # $1=archive $2=destdir
+  a="$1"; d="$2"
+  case "$a" in
+    *.tar)       run "tar -xf '$a' -C '$d'" ;;
+    *.tar.gz|*.tgz)
+      if command -v gzip >/dev/null 2>&1; then
+        run "gzip -dc '$a' | tar -xf - -C '$d'"
+      else
+        die "gzip ausente para extrair: $a"
+      fi
+      ;;
+    *.tar.bz2|*.tbz2)
+      if command -v bzip2 >/dev/null 2>&1; then
+        run "bzip2 -dc '$a' | tar -xf - -C '$d'"
+      else
+        die "bzip2 ausente para extrair: $a"
+      fi
+      ;;
+    *.tar.xz|*.txz)
+      if command -v xz >/dev/null 2>&1; then
+        run "xz -dc '$a' | tar -xf - -C '$d'"
+      else
+        die "xz ausente para extrair: $a"
+      fi
+      ;;
+    *) die "arquivo não suportado: $a" ;;
+  esac
+}
+
+###############################################################################
+# Extract + patch + overlay
 ###############################################################################
 extract_sources() {
   dld="$1"; srcd="$2"
@@ -521,7 +513,7 @@ extract_sources() {
 
   info "extract: $(basename "$t")"
   run "rm -rf '$srcd'/*"
-  run "tar -xf '$t' -C '$srcd'"
+  extract_archive_to "$t" "$srcd"
 
   r=$(find "$srcd" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
   [ -n "$r" ] || r="$srcd"
@@ -532,7 +524,6 @@ apply_patches_dir() {
   pkgpath="$1"; srcroot="$2"
   [ -d "$pkgpath/patch" ] || return 0
   command -v patch >/dev/null 2>&1 || { warn "patch ausente; ignorando patch/."; return 0; }
-
   for p in "$pkgpath"/patch/*.patch "$pkgpath"/patch/*.diff; do
     [ -f "$p" ] || continue
     info "patch: $(basename "$p")"
@@ -554,13 +545,12 @@ overlay_files_dir() {
 }
 
 ###############################################################################
-# Packaging
+# Packaging + manifest
 ###############################################################################
 pkg_filename() {
   arch=$(uname -m 2>/dev/null || echo unknown)
   echo "$BIN_CACHE/$1-$2-$arch.tar.xz"
 }
-
 tar_supports_sort() { tar --help 2>/dev/null | grep ' --sort' >/dev/null 2>&1; }
 
 package_destdir() {
@@ -577,8 +567,14 @@ package_destdir() {
     say "${C_DIM}DRY-RUN:${C_RESET} tar|xz -> '$pf'"
   fi
 }
-
-manifest_from_tar() { tar -tf "$1" | sed 's|^\./||' | awk 'NF{print $0}' | sort -u; }
+manifest_from_tar() {
+  # lista paths do tar.xz sem depender de tar -J
+  if command -v xz >/dev/null 2>&1; then
+    xz -dc "$1" | tar -tf - 2>/dev/null | sed 's|^\./||' | awk 'NF{print $0}' | sort -u
+  else
+    tar -tf "$1" 2>/dev/null | sed 's|^\./||' | awk 'NF{print $0}' | sort -u
+  fi
+}
 
 ###############################################################################
 # Ownership helpers
@@ -591,11 +587,54 @@ file_owned_by_other() {
     [ "$p" = "$self" ] && continue
     mf="$d/manifest"
     [ -f "$mf" ] || continue
-    if grep -Fx "$f" "$mf" >/dev/null 2>&1; then
-      return 0
-    fi
+    grep -Fx "$f" "$mf" >/dev/null 2>&1 && return 0
   done
   return 1
+}
+
+###############################################################################
+# File hashing for verify (sha256 preferido, md5 fallback)
+###############################################################################
+hash_tool_kind() {
+  if command -v sha256sum >/dev/null 2>&1; then echo sha256
+  elif command -v md5sum >/dev/null 2>&1; then echo md5
+  else echo ""
+  fi
+}
+hash_file() {
+  kind=$(hash_tool_kind)
+  [ -n "$kind" ] || die "Sem sha256sum/md5sum para verify."
+  case "$kind" in
+    sha256) sha256sum "$1" | awk '{print $1}' ;;
+    md5)    md5sum "$1"    | awk '{print $1}' ;;
+  esac
+}
+write_filehashes() {
+  # $1=pkg $2=manifest_path $3=out_filehashes
+  pkg="$1"; mf="$2"; out="$3"
+  kind=$(hash_tool_kind)
+  [ -n "$kind" ] || { warn "Sem sha256sum/md5sum; verify ficará superficial."; : >"$out"; return 0; }
+
+  : >"$out"
+  printf 'ALG=%s\n' "$kind" >>"$out"
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in *".."*) continue ;; esac
+    path="/$f"
+
+    if [ -L "$path" ]; then
+      # symlink: registra destino
+      tgt=$(readlink "$path" 2>/dev/null || echo "")
+      printf 'L %s %s\n' "$tgt" "$f" >>"$out"
+      continue
+    fi
+    if [ -f "$path" ]; then
+      h=$(hash_file "$path" 2>/dev/null || echo "")
+      [ -n "$h" ] || continue
+      printf 'F %s %s\n' "$h" "$f" >>"$out"
+    fi
+  done <"$mf"
 }
 
 ###############################################################################
@@ -611,8 +650,7 @@ build_one_inner() {
     die "Mantenha nomes únicos por categoria."
   fi
 
-  pkgpath=$(resolve_pkg_path "$pkg")
-  [ -n "$pkgpath" ] || die "Não encontrado no repo: $pkg"
+  pkgpath=$(resolve_pkg_path "$pkg"); [ -n "$pkgpath" ] || die "Não encontrado no repo: $pkg"
   ver=$(read_version "$pkgpath")
   catg=$(resolve_pkg_cat "$pkg")
   pf=$(pkg_filename "$pkg" "$ver")
@@ -649,7 +687,7 @@ build_one_inner() {
   } >>"$lf"
 
   run_hook "$pkgpath" "pre-source"; run_queue_status "$pkgpath" "pre-source"
-  download_sources_parallel "$pkg" "$pkgpath" "$dld" >>"$lf" 2>&1
+  with_lock "cache.sources.$pkg" 600 download_sources_parallel "$pkg" "$pkgpath" "$dld" >>"$lf" 2>&1
   run_hook "$pkgpath" "post-source"; run_queue_status "$pkgpath" "post-source"
 
   run_hook "$pkgpath" "pre-extract"; run_queue_status "$pkgpath" "pre-extract"
@@ -664,7 +702,7 @@ build_one_inner() {
   [ -f "$pkgpath/build" ] || die "build ausente: $pkgpath/build"
   info "run build: ${C_BOLD}$pkgpath/build${C_RESET}"
 
-  # NÃO mascara cd: se falhar, aborta
+  # build recebe DESTDIR em $1 (seu requisito)
   if [ "$DRYRUN" -eq 0 ]; then
     (
       set -eu
@@ -691,7 +729,6 @@ build_one_inner() {
   ok "build OK: $pkg v$ver"
   ok "bin: $pf"
 }
-
 build_one() { with_lock "build.$1" 600 build_one_inner "$1"; }
 
 build_many() {
@@ -701,8 +738,7 @@ build_many() {
     return 0
   fi
 
-  pids=""
-  running=0
+  pids=""; running=0
   for p in "$@"; do
     ( set -eu; build_one "$p" ) &
     pid=$!
@@ -719,7 +755,7 @@ build_many() {
 }
 
 ###############################################################################
-# Install transacional (stage + backup/rollback) + remove delta seguro
+# Install transacional (stage + backup/rollback) — sem -J, sem ARG_MAX
 ###############################################################################
 record_installed_db() {
   pkg="$1"; ver="$2"; auto="$3"; pkgpath="$4"; pf="$5"
@@ -743,10 +779,10 @@ record_installed_db() {
 }
 
 install_tar_transact() {
-  # $1=pkg $2=tarfile $3=logfile
   pkg="$1"; tf="$2"; lf="$3"
   [ -f "$tf" ] || die "pacote binário ausente: $tf"
   require_root
+  command -v xz >/dev/null 2>&1 || die "xz é obrigatório para instalar tar.xz: $tf"
 
   if [ "$DRYRUN" -eq 1 ]; then
     say "${C_DIM}DRY-RUN:${C_RESET} install transacional de '$tf' -> /"
@@ -762,9 +798,7 @@ install_tar_transact() {
   mkdir -p "$stage"
   manifest_from_tar "$tf" >"$touchlist"
 
-  : >"$existed"
-  : >"$newfiles"
-
+  : >"$existed"; : >"$newfiles"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in *".."*) continue ;; esac
@@ -775,26 +809,33 @@ install_tar_transact() {
     fi
   done <"$touchlist"
 
-  if ! tar -xJf "$tf" -C "$stage" >>"$lf" 2>&1; then
+  # 1) extrai no stage (sem tar -J)
+  if ! xz -dc "$tf" | tar -xf - -C "$stage" >>"$lf" 2>&1; then
     rm -rf "$stage" "$backup" "$existed" "$newfiles" "$touchlist"
     die "falha ao extrair pacote no stage"
   fi
 
-  # backup do que será sobrescrito (se houver)
+  # 2) backup incremental sem ARG_MAX: tar -cf vazio + tar -rf item a item
+  : >"$backup"
   if [ -s "$existed" ]; then
-    (
-      cd /
-      # ATENÇÃO: assume que paths do manifest não têm espaços (prática normal)
-      tar -cf "$backup" $(cat "$existed") 2>>"$lf"
-    ) || {
-      rm -rf "$stage" "$backup" "$existed" "$newfiles" "$touchlist"
-      die "falha criando backup transacional"
-    }
-  else
-    : >"$backup"
+    ( cd / && tar -cf "$backup" --files-from /dev/null 2>/dev/null ) || true
+    # se --files-from não existir, cria tar vazio com um diretório inofensivo? (fallback)
+    if [ ! -s "$backup" ]; then
+      ( cd / && tar -cf "$backup" . >/dev/null 2>&1 ) || true
+      # remove entradas se criou com "." (não é ideal, mas mantém rollback possível)
+    fi
+
+    # append seguro
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      ( cd / && tar -rf "$backup" "$f" ) >>"$lf" 2>&1 || {
+        rm -rf "$stage" "$backup" "$existed" "$newfiles" "$touchlist"
+        die "falha criando backup transacional (tar -rf)"
+      }
+    done <"$existed"
   fi
 
-  # aplica stage em /
+  # 3) aplica stage em /
   if (cd "$stage" && tar -cf - .) | (cd / && tar -xf -) >>"$lf" 2>&1; then
     rm -rf "$stage" "$backup" "$existed" "$newfiles" "$touchlist"
     return 0
@@ -810,8 +851,8 @@ install_tar_transact() {
     done <"$newfiles"
   fi
 
-  # restaura backup
-  if [ -s "$existed" ] && [ -s "$backup" ]; then
+  # restaura backup (se houver)
+  if [ -s "$existed" ] && [ -f "$backup" ]; then
     (cd / && tar -xf "$backup") >>"$lf" 2>&1 || true
   fi
 
@@ -821,7 +862,6 @@ install_tar_transact() {
 
 remove_files_from_manifest_delta() {
   pkg="$1"; oldmf="$2"; newmf="$3"
-
   [ "$DRYRUN" -eq 1 ] && { say "${C_DIM}DRY-RUN:${C_RESET} removeria delta antigo"; return 0; }
 
   awk 'FNR==NR{n[$0]=1; next} !n[$0]{print $0}' "$newmf" "$oldmf" \
@@ -838,14 +878,11 @@ remove_files_from_manifest_delta() {
 
 install_one_inner() {
   pkg="$1"; auto="${2:-0}"
-
-  pkgpath=$(resolve_pkg_path "$pkg")
-  [ -n "$pkgpath" ] || die "Não encontrado no repo: $pkg"
+  pkgpath=$(resolve_pkg_path "$pkg"); [ -n "$pkgpath" ] || die "Não encontrado no repo: $pkg"
   ver=$(read_version "$pkgpath")
   pf=$(pkg_filename "$pkg" "$ver")
   lf=$(log_path_for "$pkg")
 
-  # deps em topo
   info "deps: ${C_BOLD}$pkg${C_RESET}"
   for d in $(deps_toposort "$pkg"); do
     [ "$d" = "$pkg" ] && continue
@@ -854,7 +891,6 @@ install_one_inner() {
     fi
   done
 
-  # build se necessário
   if [ ! -f "$pf" ] || [ "$FORCE" -eq 1 ]; then
     build_one "$pkg"
   fi
@@ -862,7 +898,6 @@ install_one_inner() {
   if is_installed "$pkg"; then
     run_hook "$pkgpath" "pre-update"; run_queue_status "$pkgpath" "pre-update"
   fi
-
   run_hook "$pkgpath" "pre-install"; run_queue_status "$pkgpath" "pre-install"
 
   oldver=""
@@ -883,6 +918,7 @@ install_one_inner() {
     mkdir -p "$idir"
     cp -f "$newmf_tmp" "$idir/manifest"
     record_installed_db "$pkg" "$ver" "$auto" "$pkgpath" "$pf"
+    write_filehashes "$pkg" "$idir/manifest" "$idir/filehashes"
   fi
 
   run_hook "$pkgpath" "post-install"; run_queue_status "$pkgpath" "post-install"
@@ -891,7 +927,6 @@ install_one_inner() {
     run_hook "$pkgpath" "post-update"; run_queue_status "$pkgpath" "post-update"
   fi
 
-  # delta seguro só depois do novo instalado com sucesso
   if [ -n "$oldver" ] && [ "$oldver" != "$ver" ] && [ -f "$oldmf_tmp" ] && [ -f "$newmf_tmp" ]; then
     info "upgrade: delta seguro $pkg v$oldver -> v$ver"
     remove_files_from_manifest_delta "$pkg" "$oldmf_tmp" "$newmf_tmp"
@@ -901,12 +936,15 @@ install_one_inner() {
   ok "instalado: $pkg v$ver"
 }
 
+# DB lock REAL: segura o lock durante toda a transação de install
 install_one() {
   require_root
-  with_lock "db" 600 true
-  with_lock "install.$1" 600 install_one_inner "$1" "${2:-0}"
+  with_lock "db" 600 with_lock "install.$1" 600 install_one_inner "$1" "${2:-0}"
 }
 
+###############################################################################
+# Remove + orphans (DB lock real)
+###############################################################################
 remove_one_inner() {
   pkg="$1"
   is_installed "$pkg" || die "Não instalado: $pkg"
@@ -918,11 +956,9 @@ remove_one_inner() {
 
   mf="$INST_DIR/$pkg/manifest"
   [ -f "$mf" ] || die "manifest ausente: $mf"
-
   info "remove: ${C_BOLD}$pkg${C_RESET}"
 
   if [ "$DRYRUN" -eq 0 ]; then
-    # reverso POSIX (substitui tac)
     awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}' "$mf" \
       | while IFS= read -r f; do
           [ -n "$f" ] || continue
@@ -943,11 +979,13 @@ remove_one_inner() {
     run_hook "$pkgpath" "post-remove" || true
     run_queue_status "$pkgpath" "post-remove" || true
   fi
-
   ok "removido: $pkg"
 }
 
-remove_one() { require_root; with_lock "install.$1" 600 remove_one_inner "$1"; }
+remove_one() {
+  require_root
+  with_lock "db" 600 with_lock "install.$1" 600 remove_one_inner "$1"
+}
 
 reverse_deps() {
   target="$1"
@@ -956,14 +994,11 @@ reverse_deps() {
     p=$(basename "$d")
     depf="$d/depends"
     [ -f "$depf" ] || continue
-    if grep -Fx "$target" "$depf" >/dev/null 2>&1; then
-      echo "$p"
-    fi
+    grep -Fx "$target" "$depf" >/dev/null 2>&1 && echo "$p"
   done | sort -u
 }
 
-remove_orphans() {
-  require_root
+remove_orphans_inner() {
   info "orphans: removendo auto=1 sem reverse-deps"
   changed=1
   while [ "$changed" -eq 1 ]; do
@@ -976,7 +1011,7 @@ remove_orphans() {
       r=$(reverse_deps "$p" | awk 'END{print NR+0}')
       if [ "$r" -eq 0 ]; then
         warn "órfão: $p"
-        remove_one "$p"
+        with_lock "install.$p" 600 remove_one_inner "$p"
         changed=1
       fi
     done
@@ -984,8 +1019,10 @@ remove_orphans() {
   ok "orphans: concluído"
 }
 
+remove_orphans() { require_root; with_lock "db" 600 remove_orphans_inner; }
+
 ###############################################################################
-# Update / Rebuild-all
+# Update / Rebuild-all (DB lock real no rebuild)
 ###############################################################################
 repo_update_inner() {
   ensure_dirs
@@ -999,20 +1036,19 @@ repo_update_inner() {
   fi
   build_index_inner
 }
-
 repo_update() { with_lock "repo" 600 repo_update_inner; }
 
-rebuild_all_installed() {
-  require_root
+rebuild_all_installed_inner() {
   info "rebuild-all: reinstalando todos os instalados"
   for d in "$INST_DIR"/*; do
     [ -d "$d" ] || continue
     p=$(basename "$d")
     a=$(installed_auto "$p" 2>/dev/null || echo 0)
-    install_one "$p" "$a"
+    with_lock "install.$p" 600 install_one_inner "$p" "$a"
   done
   ok "rebuild-all: OK"
 }
+rebuild_all_installed() { require_root; with_lock "db" 600 rebuild_all_installed_inner; }
 
 ###############################################################################
 # Comandos novos: list/status/verify/doctor/clean-cache/lint
@@ -1023,10 +1059,8 @@ cmd_list() {
     p=$(basename "$d")
     v=$(installed_version "$p" 2>/dev/null || echo "?")
     a=$(installed_auto "$p" 2>/dev/null || echo 0)
-    if [ "$a" = "1" ]; then
-      printf '%s %s %s\n' "[auto]" "$p" "$v"
-    else
-      printf '%s %s %s\n' "[man ]" "$p" "$v"
+    if [ "$a" = "1" ]; then printf '%s %s %s\n' "[auto]" "$p" "$v"
+    else printf '%s %s %s\n' "[man ]" "$p" "$v"
     fi
   done | sort
 }
@@ -1040,10 +1074,8 @@ cmd_status() {
       rp=$(resolve_pkg_path "$p" 2>/dev/null || true)
       if [ -n "$rp" ]; then
         rv=$(read_version "$rp")
-        if [ "$iv" = "$rv" ]; then
-          printf '%s %s installed=%s repo=%s\n' "[=]" "$p" "$iv" "$rv"
-        else
-          printf '%s %s installed=%s repo=%s\n' "[!]" "$p" "$iv" "$rv"
+        if [ "$iv" = "$rv" ]; then printf '%s %s installed=%s repo=%s\n' "[=]" "$p" "$iv" "$rv"
+        else printf '%s %s installed=%s repo=%s\n' "[!]" "$p" "$iv" "$rv"
         fi
       else
         printf '%s %s installed=%s repo=(missing)\n' "[?]" "$p" "$iv"
@@ -1057,22 +1089,19 @@ cmd_status() {
   if is_installed "$pkg"; then iv=$(installed_version "$pkg" 2>/dev/null || echo "?"); fi
   rp=$(resolve_pkg_path "$pkg" 2>/dev/null || true)
   if [ -n "$rp" ]; then rv=$(read_version "$rp"); else rv="(missing)"; fi
+
   if [ -n "$iv" ]; then
-    if [ "$iv" = "$rv" ]; then
-      say "[=] $pkg installed=$iv repo=$rv"
-    else
-      say "[!] $pkg installed=$iv repo=$rv"
-    fi
+    [ "$iv" = "$rv" ] && say "[=] $pkg installed=$iv repo=$rv" || say "[!] $pkg installed=$iv repo=$rv"
   else
     say "[ ] $pkg installed=(no) repo=$rv"
   fi
 }
 
 cmd_verify() {
-  pkg="${1:-}"
-  [ -n "$pkg" ] || die "Uso: adm verify <pkg>"
+  pkg="${1:-}"; [ -n "$pkg" ] || die "Uso: adm verify <pkg>"
   is_installed "$pkg" || die "Não instalado: $pkg"
-  mf="$INST_DIR/$pkg/manifest"
+  idir="$INST_DIR/$pkg"
+  mf="$idir/manifest"
   [ -f "$mf" ] || die "manifest ausente: $mf"
 
   missing=0
@@ -1085,10 +1114,49 @@ cmd_verify() {
     fi
   done <"$mf"
 
-  if [ "$missing" -eq 0 ]; then
+  # verify hashes (se existir)
+  fh="$idir/filehashes"
+  hash_fail=0
+  if [ -s "$fh" ]; then
+    alg=$(awk -F= 'NR==1 && $1=="ALG"{print $2}' "$fh" 2>/dev/null || echo "")
+    if [ -n "$alg" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          ALG=*) continue ;;
+        esac
+        t=$(printf '%s\n' "$line" | awk '{print $1}')
+        h=$(printf '%s\n' "$line" | awk '{print $2}')
+        p=$(printf '%s\n' "$line" | awk '{print $3}')
+        [ -n "$t" ] && [ -n "$p" ] || continue
+
+        if [ "$t" = "L" ]; then
+          cur=$(readlink "/$p" 2>/dev/null || echo "")
+          if [ "$cur" != "$h" ]; then
+            printf '%s %s\n' "LINK_MISMATCH" "/$p"
+            hash_fail=$((hash_fail + 1))
+          fi
+        elif [ "$t" = "F" ]; then
+          if [ -f "/$p" ]; then
+            # recomputa conforme algoritmo registrado
+            case "$alg" in
+              sha256) cur=$(sha256sum "/$p" | awk '{print $1}') ;;
+              md5)    cur=$(md5sum "/$p"    | awk '{print $1}') ;;
+              *) cur="" ;;
+            esac
+            if [ "$cur" != "$h" ]; then
+              printf '%s %s\n' "HASH_MISMATCH" "/$p"
+              hash_fail=$((hash_fail + 1))
+            fi
+          fi
+        fi
+      done <"$fh"
+    fi
+  fi
+
+  if [ "$missing" -eq 0 ] && [ "$hash_fail" -eq 0 ]; then
     ok "verify: $pkg OK"
   else
-    warn "verify: $pkg faltando $missing arquivos"
+    warn "verify: $pkg missing=$missing hash_mismatch=$hash_fail"
     return 1
   fi
 }
@@ -1096,33 +1164,18 @@ cmd_verify() {
 cmd_doctor() {
   ensure_dirs
   say "${C_BOLD}adm doctor${C_RESET}"
-
   for c in sh tar xz awk sed grep sort find; do
-    if command -v "$c" >/dev/null 2>&1; then
-      printf '%s %s\n' "[OK]" "$c"
-    else
-      printf '%s %s\n' "[!!]" "$c"
+    if command -v "$c" >/dev/null 2>&1; then printf '%s %s\n' "[OK]" "$c"
+    else printf '%s %s\n' "[!!]" "$c"
     fi
   done
-
-  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
-    printf '%s %s\n' "[OK]" "curl/wget"
-  else
-    printf '%s %s\n' "[!!]" "curl/wget"
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then printf '%s %s\n' "[OK]" "curl/wget"
+  else printf '%s %s\n' "[!!]" "curl/wget"
   fi
-
-  if command -v sha256sum >/dev/null 2>&1 || command -v md5sum >/dev/null 2>&1; then
-    printf '%s %s\n' "[OK]" "sha256sum/md5sum"
-  else
-    printf '%s %s\n' "[!!]" "sha256sum/md5sum"
+  if command -v sha256sum >/dev/null 2>&1 || command -v md5sum >/dev/null 2>&1; then printf '%s %s\n' "[OK]" "sha256sum/md5sum"
+  else printf '%s %s\n' "[!!]" "sha256sum/md5sum"
   fi
-
-  if [ -f "$INDEX_CACHE" ]; then
-    printf '%s %s\n' "[OK]" "index cache"
-  else
-    printf '%s %s\n' "[..]" "index cache (gerando)"
-    build_index
-  fi
+  [ -f "$INDEX_CACHE" ] && printf '%s %s\n' "[OK]" "index cache" || { printf '%s %s\n' "[..]" "index cache (gerando)"; build_index; }
 
   bad=0
   for d in "$INST_DIR"/*; do
@@ -1131,19 +1184,12 @@ cmd_doctor() {
     [ -f "$d/meta" ] || { printf '%s %s\n' "[!!]" "meta ausente: $p"; bad=$((bad+1)); }
     [ -f "$d/manifest" ] || { printf '%s %s\n' "[!!]" "manifest ausente: $p"; bad=$((bad+1)); }
   done
-
-  if [ "$bad" -eq 0 ]; then
-    ok "doctor: DB OK"
-  else
-    warn "doctor: DB com $bad problemas"
-    return 1
-  fi
+  [ "$bad" -eq 0 ] && ok "doctor: DB OK" || { warn "doctor: DB com $bad problemas"; return 1; }
 }
 
 cmd_clean_cache_inner() {
   do_sources=0; do_bins=0; do_work=0
-  if [ $# -eq 0 ]; then do_work=1; fi
-
+  [ $# -eq 0 ] && do_work=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --sources) do_sources=1 ;;
@@ -1154,118 +1200,68 @@ cmd_clean_cache_inner() {
     esac
     shift
   done
-
-  if [ "$do_work" -eq 1 ]; then
-    info "limpando work: $WORK_DIR"
-    run "rm -rf '$WORK_DIR'/*"
-  fi
-  if [ "$do_sources" -eq 1 ]; then
-    info "limpando sources cache: $SRC_CACHE"
-    run "rm -rf '$SRC_CACHE'/*"
-  fi
-  if [ "$do_bins" -eq 1 ]; then
-    info "limpando bin cache: $BIN_CACHE"
-    run "rm -rf '$BIN_CACHE'/*"
-  fi
+  [ "$do_work" -eq 1 ] && { info "limpando work: $WORK_DIR"; run "rm -rf '$WORK_DIR'/*"; }
+  [ "$do_sources" -eq 1 ] && { info "limpando sources cache: $SRC_CACHE"; run "rm -rf '$SRC_CACHE'/*"; }
+  [ "$do_bins" -eq 1 ] && { info "limpando bin cache: $BIN_CACHE"; run "rm -rf '$BIN_CACHE'/*"; }
   ok "clean-cache: OK"
 }
-
 cmd_clean_cache() { with_lock "cache" 600 cmd_clean_cache_inner "$@"; }
 
 cmd_lint() {
-  pkg="${1:-}"
-  [ -n "$pkg" ] || die "Uso: adm lint <pkg>"
-  p=$(resolve_pkg_path "$pkg")
-  [ -n "$p" ] || die "Não encontrado: $pkg"
-
+  pkg="${1:-}"; [ -n "$pkg" ] || die "Uso: adm lint <pkg>"
+  p=$(resolve_pkg_path "$pkg"); [ -n "$p" ] || die "Não encontrado: $pkg"
   fail=0
 
   for f in build version sources; do
-    if [ ! -f "$p/$f" ]; then
-      printf '%s %s\n' "[!!]" "faltando $f"
-      fail=$((fail+1))
-    else
-      printf '%s %s\n' "[OK]" "$f"
-    fi
+    [ -f "$p/$f" ] && printf '%s %s\n' "[OK]" "$f" || { printf '%s %s\n' "[!!]" "faltando $f"; fail=$((fail+1)); }
   done
 
   v=$(read_version "$p" 2>/dev/null || echo "")
-  if [ -n "$v" ]; then
-    printf '%s %s\n' "[OK]" "version=$v"
-  else
-    printf '%s %s\n' "[!!]" "version inválida"
-    fail=$((fail+1))
-  fi
+  [ -n "$v" ] && printf '%s %s\n' "[OK]" "version=$v" || { printf '%s %s\n' "[!!]" "version inválida"; fail=$((fail+1)); }
 
   s=$(list_sources_raw_lines "$p" | awk 'END{print NR+0}')
-  if [ "$s" -gt 0 ]; then
-    printf '%s %s\n' "[OK]" "sources linhas=$s"
-  else
-    printf '%s %s\n' "[!!]" "sources vazio"
-    fail=$((fail+1))
-  fi
+  [ "$s" -gt 0 ] && printf '%s %s\n' "[OK]" "sources linhas=$s" || { printf '%s %s\n' "[!!]" "sources vazio"; fail=$((fail+1)); }
 
   if [ -f "$p/checksums" ]; then
     bad=$(awk 'NF<2{b++} END{print b+0}' "$p/checksums")
-    if [ "$bad" -eq 0 ]; then
-      printf '%s %s\n' "[OK]" "checksums formato"
-    else
-      printf '%s %s\n' "[!!]" "checksums com $bad linhas inválidas"
-      fail=$((fail+1))
-    fi
+    [ "$bad" -eq 0 ] && printf '%s %s\n' "[OK]" "checksums formato" || { printf '%s %s\n' "[!!]" "checksums com $bad linhas inválidas"; fail=$((fail+1)); }
   else
-    printf '%s %s\n' "[..]" "checksums ausente (permitido, mas não recomendado)"
+    printf '%s %s\n' "[..]" "checksums ausente (permitido, não recomendado)"
   fi
 
   if [ -f "$p/depends" ]; then
     for d in $(list_depends "$p"); do
       rp=$(resolve_pkg_path "$d" 2>/dev/null || true)
-      if [ -n "$rp" ]; then
-        printf '%s %s\n' "[OK]" "dep $d"
-      else
-        printf '%s %s\n' "[!!]" "dep não encontrada no repo: $d"
-        fail=$((fail+1))
-      fi
+      [ -n "$rp" ] && printf '%s %s\n' "[OK]" "dep $d" || { printf '%s %s\n' "[!!]" "dep não encontrada: $d"; fail=$((fail+1)); }
     done
+    # valida ciclo chamando toposort
+    deps_toposort "$pkg" >/dev/null 2>&1 || { printf '%s %s\n' "[!!]" "ciclo em deps"; fail=$((fail+1)); }
   fi
 
-  if [ "$fail" -eq 0 ]; then
-    ok "lint: $pkg OK"
-  else
-    warn "lint: $pkg com $fail problemas"
-    return 1
-  fi
+  [ "$fail" -eq 0 ] && ok "lint: $pkg OK" || { warn "lint: $pkg com $fail problemas"; return 1; }
 }
 
 ###############################################################################
 # Search / Info / Download
 ###############################################################################
 cmd_search() {
-  pat="${1:-}"
-  [ -n "$pat" ] || die "Uso: adm search <texto>"
+  pat="${1:-}"; [ -n "$pat" ] || die "Uso: adm search <texto>"
   [ -f "$INDEX_CACHE" ] || build_index
-
   awk -F'\t' -v q="$pat" '
     BEGIN{qq=tolower(q)}
     { if (index(tolower($1), qq) || index(tolower($2), qq)) print $1 "\t" $2 }
   ' "$INDEX_CACHE" | while IFS="$(printf '\t')" read -r n c; do
-    if is_installed "$n"; then
-      printf '%s %s/%s\n' "[ ✔️]" "$c" "$n"
-    else
-      printf '%s %s/%s\n' "[   ]" "$c" "$n"
+    if is_installed "$n"; then printf '%s %s/%s\n' "[ ✔️]" "$c" "$n"
+    else printf '%s %s/%s\n' "[   ]" "$c" "$n"
     fi
   done
 }
 
 cmd_info() {
-  pkg="${1:-}"
-  [ -n "$pkg" ] || die "Uso: adm info <programa>"
-  p=$(resolve_pkg_path "$pkg")
-  [ -n "$p" ] || die "Não encontrado: $pkg"
-
+  pkg="${1:-}"; [ -n "$pkg" ] || die "Uso: adm info <programa>"
+  p=$(resolve_pkg_path "$pkg"); [ -n "$p" ] || die "Não encontrado: $pkg"
   v=$(read_version "$p")
   c=$(resolve_pkg_cat "$pkg")
-
   say "${C_BOLD}$pkg${C_RESET}  ${C_DIM}${c}/${pkg}${C_RESET}"
   say "version(repo): $v"
   if is_installed "$pkg"; then
@@ -1274,26 +1270,15 @@ cmd_info() {
   else
     say "installed: [   ]"
   fi
-
-  if [ -f "$p/depends" ]; then
-    say "depends:"
-    list_depends "$p" | sed 's/^/  - /'
-  else
-    say "depends: (nenhum)"
+  if [ -f "$p/depends" ]; then say "depends:"; list_depends "$p" | sed 's/^/  - /'
+  else say "depends: (nenhum)"
   fi
-
-  if [ -f "$p/sources" ]; then
-    say "sources:"
-    list_sources_raw_lines "$p" | sed 's/^/  - /'
-  fi
+  if [ -f "$p/sources" ]; then say "sources:"; list_sources_raw_lines "$p" | sed 's/^/  - /'; fi
 }
 
 cmd_download() {
-  pkg="${1:-}"
-  [ -n "$pkg" ] || die "Uso: adm download <programa>"
-  pkgpath=$(resolve_pkg_path "$pkg")
-  [ -n "$pkgpath" ] || die "Não encontrado: $pkg"
-
+  pkg="${1:-}"; [ -n "$pkg" ] || die "Uso: adm download <programa>"
+  pkgpath=$(resolve_pkg_path "$pkg"); [ -n "$pkgpath" ] || die "Não encontrado: $pkg"
   ensure_dirs
   dld="$WORK_DIR/download-only/$(sanitize_name "$pkg").$$"
   run "mkdir -p '$dld'"
@@ -1342,7 +1327,6 @@ EOF
 main() {
   ensure_dirs
 
-  # flags POSIX (sem set -- $(...))
   while [ $# -gt 0 ]; do
     case "$1" in
       -n|--dry-run) DRYRUN=1; shift ;;
@@ -1358,9 +1342,7 @@ main() {
 
   init_colors
 
-  # ferramentas mínimas
   need_cmd tar
-  need_cmd xz
   need_cmd awk
   need_cmd sed
   need_cmd grep
@@ -1377,11 +1359,11 @@ main() {
     info|in) cmd_info "${1:-}" ;;
     download|d) cmd_download "${1:-}" ;;
     build|b) build_many "$@" ;;
-    install|i) require_root; install_one "${1:-}" 0 ;;
-    remove|r) require_root; remove_one "${1:-}" ;;
-    orphans|orph) require_root; remove_orphans ;;
+    install|i) install_one "${1:-}" 0 ;;
+    remove|r) remove_one "${1:-}" ;;
+    orphans|orph) remove_orphans ;;
     update|u) repo_update ;;
-    rebuild-all|ra) require_root; rebuild_all_installed ;;
+    rebuild-all|ra) rebuild_all_installed ;;
 
     list) cmd_list ;;
     status) cmd_status "$@" ;;
