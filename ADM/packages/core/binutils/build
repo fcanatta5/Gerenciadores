@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+DESTDIR=${1:?uso: build DESTDIR}
+
+# Variáveis esperadas do adm (exportadas):
+#   PREFIX, SRCROOT, BUILD_DIR
+: "${PREFIX:=/usr/local}"
+: "${SRCROOT:=$(pwd)}"
+: "${BUILD_DIR:=$SRCROOT/.build}"
+
+# Recomendação: build fora da árvore
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+
+# Ajustes comuns/seguros:
+# - --disable-nls: reduz dependências (gettext)
+# - --disable-werror: evita falhas por warnings em toolchains mais novas
+# - --enable-plugins: útil para LTO e integrações
+# - --enable-shared: libs compartilhadas quando aplicável
+# - --with-sysroot=/ : comportamento típico de toolchain "host"
+# Observação: binutils 2.45.x (ramo ímpar) não inclui GOLD; não habilitamos.
+"$SRCROOT/configure" \
+  --prefix="$PREFIX" \
+  --disable-nls \
+  --disable-werror \
+  --enable-plugins \
+  --enable-shared \
+  --with-sysroot=/ \
+  --disable-multilib
+
+# Paralelismo (se seu ambiente definir MAKEFLAGS/JOBS, ok)
+make ${MAKEFLAGS:-}
+
+make DESTDIR="$DESTDIR" install
+
+# Higiene opcional: remover docs/info se você não quer dependência em texinfo
+# (deixe comentado inicialmente; ajuste conforme sua política)
+# rm -rf "$DESTDIR$PREFIX/share/info" || true
