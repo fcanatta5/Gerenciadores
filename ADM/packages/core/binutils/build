@@ -3,40 +3,52 @@ set -eu
 
 DESTDIR=${1:?uso: build DESTDIR}
 
-# Instalação final no sistema: /usr
+# Instalação final no sistema:
 : "${PREFIX:=/usr}"
 : "${SRCROOT:=$(pwd)}"
 : "${BUILD_DIR:=$SRCROOT/.build}"
 
+# Evita depender de texinfo/makeinfo para info pages
+export MAKEINFO=true
+
+# Se você padroniza flags globais no ambiente, elas são respeitadas.
+# Caso não, isto deixa previsível em musl:
+: "${CFLAGS:=-O2}"
+: "${CXXFLAGS:=-O2}"
+: "${LDFLAGS:=}"
+
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# Evita exigir texinfo/makeinfo para gerar documentação info:
-# (na prática, "MAKEINFO=true" faz o build prosseguir sem criar info pages)
-export MAKEINFO=true
-
-# Opções alinhadas com um binutils "host" padrão para sistema final.
+# Binutils “host final” para x86_64-linux-musl:
+# - --disable-multilib: sem multilib (sua política)
 # - --disable-nls: reduz dependências (gettext)
 # - --disable-werror: evita falhas por warnings com toolchains novas
 # - --enable-plugins: útil para LTO/integrações
 # - --enable-deterministic-archives: reprodutibilidade
-# - --disable-multilib: mantém simples (ajuste se seu sistema for multilib)
+# - --with-sysroot=/: comportamento típico em sistema final
+# - --libdir=/usr/lib: garante layout esperado em x86_64 sem multilib
 "$SRCROOT/configure" \
+  --build=x86_64-linux-musl \
+  --host=x86_64-linux-musl \
   --prefix="$PREFIX" \
   --sysconfdir=/etc \
   --localstatedir=/var \
+  --libdir=/usr/lib \
   --disable-nls \
   --disable-werror \
+  --disable-multilib \
   --enable-plugins \
   --enable-shared \
   --enable-deterministic-archives \
   --with-sysroot=/ \
-  --disable-multilib
+  CFLAGS="$CFLAGS" \
+  CXXFLAGS="$CXXFLAGS" \
+  LDFLAGS="$LDFLAGS"
 
 make ${MAKEFLAGS:-}
 
 make DESTDIR="$DESTDIR" install
 
-# Opcional: se você não quer instalar info em hipótese alguma, garanta remoção.
-# (Em geral, com MAKEINFO=true elas não são geradas, mas isto reforça.)
+# Reforço: não instalar info pages
 rm -rf "$DESTDIR$PREFIX/share/info" 2>/dev/null || true
