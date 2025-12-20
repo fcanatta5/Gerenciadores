@@ -1,0 +1,4 @@
+PKGNAME=linux-headers
+PKGVER=6.18.1
+DEPS=""
+DESC="Linux kernel headers for temporary musl toolchain sysroot"
