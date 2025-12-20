@@ -1,0 +1,232 @@
+==================================================================
+DIAGRAMA MENTAL — BOOTSTRAP → SISTEMA FINAL (MUSL + ADM)
+==================================================================
+
+[ HOST (qualquer distro Linux) ]
+        |
+        |  (somente ferramentas básicas do host)
+        |  sh, make, tar, xz, gcc-host (temporário)
+        v
+==================================================================
+1. BOOTSTRAP CROSS TOOLCHAIN (TEMPORÁRIO)
+==================================================================
+
+bootstrap-cross.sh
+        |
+        |--> binutils (cross)
+        |--> linux-headers
+        |--> gcc stage1 (sem libc)
+        |--> musl (+ patches segurança)
+        |--> gcc final
+        |--> xz (target)
+        |--> busybox (estático)
+        |
+        v
+[ CROSS TOOLCHAIN ]
+  /tools/bin/x86_64-linux-musl-*
+        |
+        v
+[ SYSROOT ]
+  /sysroot/{usr,lib,include,bin}
+        |
+        |
+        |  (sysroot é BASE do sistema)
+        v
+==================================================================
+2. ROOTFS INICIAL
+==================================================================
+
+sysroot
+   |
+   |--> copiado para →
+   v
+rootfs/
+   |
+   |-- bin/      (busybox, sh)
+   |-- lib/      (musl)
+   |-- usr/
+   |-- etc/
+   |-- var/
+   |-- proc/ sys/ dev/ run/
+   |
+   v
+==================================================================
+3. CHROOT CONTROLADO
+==================================================================
+
+admchroot
+   |
+   |--> monta: proc, sys, dev, devpts, run
+   |--> garante ambiente limpo
+   |
+   v
+chroot(rootfs)
+        |
+        v
+==================================================================
+4. ADM ASSUME CONTROLE TOTAL
+==================================================================
+
+adm (dentro do chroot)
+   |
+   |--> gerencia sources
+   |--> verifica checksums
+   |--> resolve dependências
+   |--> constrói pacotes
+   |--> instala transacionalmente
+   |--> registra manifests
+   |
+   v
+==================================================================
+5. SISTEMA BASE (ORDEM CRÍTICA)
+==================================================================
+
+[1] linux-headers
+[2] musl
+[3] binutils
+[4] gcc
+[5] busybox
+[6] xz
+[7] make, pkgconf, sed, grep, awk
+[8] vim
+
+        |
+        v
+==================================================================
+6. INIT / SERVIÇOS
+==================================================================
+
+runit
+   |
+   |-- /sbin/init -> runit-init
+   |-- /etc/runit/
+   |     |-- sv/
+   |     |-- runsvdir/
+   |
+   |-- serviços:
+         - agetty
+         - dhcpcd
+         - seatd
+         - pipewire
+         - dbus
+         - svlogd
+        |
+        v
+==================================================================
+7. REDE / ÁUDIO / INPUT
+==================================================================
+
+Rede:
+  iproute2
+  dhcpcd
+  iw
+
+Áudio:
+  alsa-lib
+  pipewire
+  wireplumber
+
+Input:
+  libinput
+  seatd
+
+        |
+        v
+==================================================================
+8. GRÁFICOS (WAYLAND)
+==================================================================
+
+Kernel DRM
+   |
+   v
+libdrm
+   |
+   v
+mesa
+   |
+   v
+wayland
+   |
+   v
+wlroots
+   |
+   v
+compositor (sway / wayfire)
+
+        |
+        v
+==================================================================
+9. DESKTOP / APLICAÇÕES
+==================================================================
+
+fontconfig
+freetype
+harfbuzz
+pango
+gtk3
+dbus
+nss/nspr
+   |
+   v
+firefox (Wayland nativo)
+
+Editor:
+  vim
+
+        |
+        v
+==================================================================
+10. SISTEMA FINAL (AUTOSSUFICIENTE)
+==================================================================
+
+[ Sistema MUSL completo ]
+   |
+   |-- init: runit
+   |-- libc: musl
+   |-- shell: busybox
+   |-- build: gcc/binutils
+   |-- gráficos: Wayland + mesa
+   |-- browser: Firefox
+   |-- rede: dhcpcd
+   |-- áudio: PipeWire
+   |-- logs: svlogd
+   |-- gerenciador: adm
+   |
+   v
+==================================================================
+11. BOOT
+==================================================================
+
+Bootloader (grub/syslinux)
+   |
+   v
+Kernel
+   |
+   v
+init=/sbin/init
+   |
+   v
+runit
+   |
+   v
+login → desktop → sistema em produção
+
+==================================================================
+12. O QUE É TEMPORÁRIO VS DEFINITIVO
+==================================================================
+
+TEMPORÁRIO (host):
+  - gcc do host
+  - bootstrap-cross.sh
+  - /tools (cross)
+
+DEFINITIVO (sistema):
+  - gcc/binutils compilados pelo adm
+  - musl
+  - rootfs
+  - adm
+  - runit
+
+==================================================================
+FIM DO DIAGRAMA MENTAL
+==================================================================
