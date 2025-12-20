@@ -1,0 +1,239 @@
+================================================================
+GUIA COMPLETO – CONTINUAÇÃO DA CONSTRUÇÃO DO SISTEMA COM PM
+================================================================
+
+------------------------------------------------
+FASE 0 – PRÉ-REQUISITOS CONFIRMADOS
+------------------------------------------------
+Você já possui:
+
+- Toolchain temporária funcional:
+  /state/toolchain/prefix (binutils + gcc-final)
+  /state/toolchain/sysroot (linux-headers + musl + busybox)
+
+- BusyBox funcional no sysroot (com /bin/sh)
+- pm.sh funcional
+- pm-chroot.sh funcional
+
+------------------------------------------------
+FASE 1 – ENTRAR NO CHROOT E “VIRAR A CHAVE”
+------------------------------------------------
+
+1. Preparar e entrar no chroot:
+
+   export REPO_BIND=/caminho/para/seu-repo-pm
+   export USE_TMPFS=1
+   export PM_PREFIX=/usr
+
+   ./pm-chroot.sh enter /state/toolchain/sysroot
+
+2. Dentro do chroot, confirmar:
+
+   which sh
+   sh --help
+   echo $PM_PREFIX   (deve ser /usr)
+   echo $PATH        (deve conter /bin:/usr/bin)
+
+3. A partir daqui:
+   - O “/” é o NOVO SISTEMA
+   - O pm agora instala DEFINITIVAMENTE no sistema novo
+
+------------------------------------------------
+FASE 2 – BASE ABSOLUTAMENTE MÍNIMA (OBRIGATÓRIA)
+------------------------------------------------
+
+Grupo: base-fundação
+Ordem:
+
+1) busybox        (dinâmico agora, não o bootstrap)
+2) musl           (runtime final em /usr)
+3) linux-headers  (final)
+4) tzdata
+5) ca-certificates
+
+Grupo: build-essencial
+6) make
+7) binutils
+8) gcc            (final, nativo)
+9) pkg-config
+
+Após isso:
+- Pare de usar /state/toolchain
+- PATH passa a preferir /usr/bin
+
+------------------------------------------------
+FASE 3 – BOOT E INIT (runit)
+------------------------------------------------
+
+Grupo: boot
+Ordem:
+
+10) util-linux    (mount, login, agetty)
+11) eudev ou mdev (escolha UM)
+12) kmod
+13) runit
+14) runit-services (base)
+
+Arquivos essenciais:
+- /etc/runit/*
+- /etc/inittab (se usar agetty)
+- /etc/fstab
+
+------------------------------------------------
+FASE 4 – SISTEMA DE ARQUIVOS E USUÁRIOS
+------------------------------------------------
+
+Grupo: sistema
+15) shadow
+16) pambase (ou PAM mínimo)
+17) coreutils
+18) findutils
+19) grep
+20) sed
+21) gawk
+22) file
+23) less
+
+------------------------------------------------
+FASE 5 – REDE
+------------------------------------------------
+
+Grupo: rede-base
+Ordem:
+
+24) iproute2
+25) dhcpcd ou udhcpc
+26) iw (wifi)
+27) wpa_supplicant
+28) ethtool
+29) nftables
+
+Opcional:
+30) curl
+31) wget
+
+------------------------------------------------
+FASE 6 – WAYLAND (SEM X11)
+------------------------------------------------
+
+Grupo: gráficos-base
+Ordem:
+
+32) libdrm
+33) libpciaccess
+34) mesa (EGL + GBM + Vulkan)
+35) wayland
+36) wayland-protocols
+37) seatd
+38) libinput
+
+------------------------------------------------
+FASE 7 – COMPOSITOR WAYLAND
+------------------------------------------------
+
+Escolha UM:
+
+Grupo: compositor
+39) sway        (wlroots)
+OU
+39) wayfire
+OU
+39) river
+
+Dependências implícitas:
+- wlroots
+- xkbcommon
+
+------------------------------------------------
+FASE 8 – ÁUDIO E VÍDEO
+------------------------------------------------
+
+Grupo: áudio
+Ordem:
+
+40) alsa-lib
+41) alsa-utils
+42) pipewire
+43) wireplumber
+
+Grupo: vídeo
+44) ffmpeg
+45) libva
+46) libvdpau
+
+------------------------------------------------
+FASE 9 – FONTES E TEXTO
+------------------------------------------------
+
+Grupo: fontes
+Ordem:
+
+47) fontconfig
+48) freetype
+49) harfbuzz
+50) noto-fonts-core
+51) noto-fonts-emoji
+
+------------------------------------------------
+FASE 10 – FIREFOX (WAYLAND NATIVO)
+------------------------------------------------
+
+Grupo: browser
+Ordem:
+
+52) nss
+53) nspr
+54) sqlite
+55) icu
+56) libevent
+57) firefox
+
+Configuração recomendada:
+- MOZ_ENABLE_WAYLAND=1
+- XDG_SESSION_TYPE=wayland
+
+------------------------------------------------
+FASE 11 – UTILITÁRIOS ESSENCIAIS
+------------------------------------------------
+
+Grupo: utilitários
+58) git
+59) rsync
+60) openssh
+61) nano ou vim
+62) htop
+
+------------------------------------------------
+FASE 12 – LIMPEZA E FINALIZAÇÃO
+------------------------------------------------
+
+1. Remover toolchain temporária:
+   rm -rf /state/toolchain
+
+2. Garantir links:
+   /bin/sh
+   /usr/bin/env
+   /usr/bin/cc
+
+3. Verificar init:
+   ps
+   sv status
+
+4. Criar usuário normal:
+   useradd -m user
+   passwd user
+
+------------------------------------------------
+RESUMO FINAL
+------------------------------------------------
+
+- O pm assume controle TOTAL após o chroot
+- Tudo é instalado em /usr
+- Sem systemd
+- Sem X11
+- Wayland nativo
+- Firefox funcional
+- Sistema mínimo, limpo e auditável
+
+Este é um sistema completo, moderno e enxuto.
+================================================================
