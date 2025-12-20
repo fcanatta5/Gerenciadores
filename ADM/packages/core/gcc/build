@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+DESTDIR=${1:?uso: build DESTDIR}
+
+: "${PREFIX:=/usr}"
+: "${SRCROOT:=$(pwd)}"
+: "${BUILD_DIR:=$SRCROOT/.build}"
+
+# Default flags (respeita se você já exportar globalmente)
+: "${CFLAGS:=-O2}"
+: "${CXXFLAGS:=-O2}"
+: "${LDFLAGS:=}"
+
+# Triplet do seu sistema
+triplet="x86_64-linux-musl"
+
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+
+# Notas importantes para musl:
+# - --enable-clocale=generic: evita assumptions de glibc no libstdc++
+# - --disable-libsanitizer: sanitizers costumam ser problemáticos/limitados em musl
+# - --disable-multilib: sua política
+# - --disable-nls: reduz dependências (gettext)
+# - --disable-bootstrap: reduz tempo e complexidade no build do sistema final
+# - --with-native-system-header-dir=/usr/include: coerente com linux-headers/musl
+# - --libdir=/usr/lib e --libexecdir=/usr/lib: layout sem /usr/lib64
+"$SRCROOT/configure" \
+  --build="$triplet" \
+  --host="$triplet" \
+  --target="$triplet" \
+  --prefix="$PREFIX" \
+  --sysconfdir=/etc \
+  --localstatedir=/var \
+  --libdir=/usr/lib \
+  --libexecdir=/usr/lib \
+  --with-sysroot=/ \
+  --with-native-system-header-dir=/usr/include \
+  --disable-multilib \
+  --disable-nls \
+  --disable-werror \
+  --disable-bootstrap \
+  --enable-languages=c,c++ \
+  --enable-shared \
+  --enable-threads=posix \
+  --enable-__cxa_atexit \
+  --enable-clocale=generic \
+  --disable-libsanitizer \
+  --disable-libssp \
+  --disable-libstdcxx-pch \
+  CFLAGS="$CFLAGS" \
+  CXXFLAGS="$CXXFLAGS" \
+  LDFLAGS="$LDFLAGS"
+
+make ${MAKEFLAGS:-}
+
+make DESTDIR="$DESTDIR" install
+
+# Opcional: evitar instalação de info pages se você não quer texinfo no sistema base
+rm -rf "$DESTDIR$PREFIX/share/info" 2>/dev/null || true
