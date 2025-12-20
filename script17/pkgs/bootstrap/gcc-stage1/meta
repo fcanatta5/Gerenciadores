@@ -1,0 +1,4 @@
+PKGNAME=gcc-stage1
+PKGVER=15.2.0
+DEPS="bootstrap/binutils bootstrap/linux-headers"
+DESC="Bootstrap GCC stage1 (C only) for temporary x86_64-linux-musl toolchain"
