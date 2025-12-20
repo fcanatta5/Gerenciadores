@@ -1,17 +1,11 @@
 #!/bin/sh
 set -eu
 
-# xz (XZ Utils) 5.8.1
-# Fonte (release oficial): https://github.com/tukaani-project/xz/releases/download/v5.8.1/xz-5.8.1.tar.xz
-# SHA256 (tar.xz): 0b54f79df85912504de0b14aec7971e3f964491af1812d83447005807513cd9e 1
-
-XZ_URL_PRIMARY="https://github.com/tukaani-project/xz/releases/download/v${PKGVER}/xz-${PKGVER}.tar.xz"
-# Fallback opcional: "old releases" (útil se GitHub estiver fora)
-# Observação: o SHA256 continua sendo o gate de integridade.
-XZ_URL_FALLBACK="https://tukaani.org/xz/xz-${PKGVER}.tar.xz" 2
-
+# XZ Utils 5.8.1
+# Fonte (release tarball): GitHub Releases (tukaani-project/xz) 1
+XZ_URL="https://github.com/tukaani-project/xz/releases/download/v${PKGVER}/xz-${PKGVER}.tar.xz"
 XZ_TARBALL="${WORKDIR}/xz-${PKGVER}.tar.xz"
-XZ_SHA256="0b54f79df85912504de0b14aec7971e3f964491af1812d83447005807513cd9e"
+XZ_SHA256="ca52a888d7fcfec1f85157beb231bd6d4466632fbdb7411c8e6aa5ca0e0e50c2"  # 2
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -39,7 +33,7 @@ sha256_check() {
   fi
 }
 
-# Hooks opcionais (o seu pm.sh chama se existirem)
+# Hooks opcionais (o pm chama se existirem)
 hook_pre_install() { :; }
 hook_post_install() { :; }
 hook_pre_remove() { :; }
@@ -47,42 +41,48 @@ hook_post_remove() { :; }
 
 pkg_fetch() {
   mkdir -p "$WORKDIR"
-
-  # Reaproveita se já existe e checksum bate
   if [ -f "$XZ_TARBALL" ]; then
     sha256_check "$XZ_TARBALL" "$XZ_SHA256"
     return 0
   fi
-
-  # Primário -> fallback
-  if fetch_file "$XZ_URL_PRIMARY" "$XZ_TARBALL"; then
-    :
-  else
-    echo "WARN: falha ao baixar de $XZ_URL_PRIMARY; tentando fallback..." >&2
-    fetch_file "$XZ_URL_FALLBACK" "$XZ_TARBALL"
-  fi
-
+  fetch_file "$XZ_URL" "$XZ_TARBALL"
   sha256_check "$XZ_TARBALL" "$XZ_SHA256"
 }
 
 pkg_unpack() {
   rm -rf "$SRCDIR"
   mkdir -p "$SRCDIR"
-  tar -C "$SRCDIR" --strip-components=1 -xJf "$XZ_TARBALL"
+
+  # Extração robusta de .tar.xz:
+  # 1) tenta tar -xJf
+  # 2) fallback: xz -dc | tar -xf -
+  if tar -C "$SRCDIR" --strip-components=1 -xJf "$XZ_TARBALL" >/dev/null 2>&1; then
+    :
+  else
+    if have xz; then
+      xz -dc "$XZ_TARBALL" | tar -C "$SRCDIR" --strip-components=1 -xf -
+    else
+      echo "ERRO: não foi possível extrair .tar.xz (precisa tar com -J ou xz)." >&2
+      exit 1
+    fi
+  fi
 }
 
 pkg_build() {
   cd "$SRCDIR"
 
-  # Mantém dependências mínimas:
-  # --disable-nls evita gettext/libintl
-  # --disable-silent-rules melhora logs
+  # Layout tradicional: binários em /bin, libs em /usr/lib
+  # prefix=/usr é padrão para libs/headers/manpages.
   #
-  # CC/CFLAGS/LDFLAGS podem ser fornecidos pelo ambiente externo ao pm.sh.
+  # Nota: bindir=/bin é absoluto (tradicional). Evita /usr/bin (usr-merge).
   ./configure \
-    --prefix="$PM_PREFIX" \
-    --disable-nls \
-    --disable-silent-rules
+    --prefix=/usr \
+    --bindir=/bin \
+    --sbindir=/sbin \
+    --libdir=/usr/lib \
+    --includedir=/usr/include \
+    --mandir=/usr/share/man \
+    --disable-static
 
   make -j"$PM_JOBS"
 }
@@ -90,9 +90,18 @@ pkg_build() {
 pkg_install() {
   cd "$SRCDIR"
 
-  # Instala em DESTDIR (nunca em / diretamente)
   make DESTDIR="$DESTDIR" install
 
-  # Remover .la (se aparecer)
-  find "$DESTDIR" -type f -name "*.la" -delete 2>/dev/null || true
+  # Segurança/consistência: garantir que xz está em /bin no pacote
+  if [ ! -x "$DESTDIR/bin/xz" ] && [ -x "$DESTDIR/usr/bin/xz" ]; then
+    mkdir -p "$DESTDIR/bin"
+    mv -f "$DESTDIR/usr/bin/xz" "$DESTDIR/bin/xz"
+  fi
+
+  # Se algum wrapper caiu em /usr/bin, não queremos usr-merge.
+  # Mantemos /usr/bin apenas para o que for realmente "não essencial" (aqui, melhor não deixar nada).
+  if [ -d "$DESTDIR/usr/bin" ]; then
+    # Se ficou vazio, remove.
+    rmdir "$DESTDIR/usr/bin" 2>/dev/null || true
+  fi
 }
