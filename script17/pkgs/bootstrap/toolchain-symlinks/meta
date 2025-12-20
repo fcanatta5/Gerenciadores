@@ -1,0 +1,4 @@
+PKGNAME=toolchain-symlinks
+PKGVER=1
+DEPS="bootstrap/gcc-final bootstrap/binutils"
+DESC="Convenience symlinks (cc, ld, ar...) -> TARGET-prefixed tools in the temporary toolchain"
