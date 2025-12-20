@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+
+# Hook post-build para linux-headers: validação do DESTDIR antes do empacotamento.
+# O adm normalmente exporta DESTDIR/PREFIX/PKG/VER; ainda assim, damos defaults seguros.
+
+: "${PKG:=linux-headers}"
+: "${VER:=unknown}"
+: "${PREFIX:=/usr}"
+: "${DESTDIR:?DESTDIR não definido no ambiente do hook}"
+
+inc="$DESTDIR$PREFIX/include"
+
+fail() {
+  echo "adm: ${PKG}:${VER}: post-build lint: ERRO: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "adm: ${PKG}:${VER}: post-build lint: AVISO: $*" >&2
+}
+
+info() {
+  echo "adm: ${PKG}:${VER}: post-build lint: $*" >&2
+}
+
+# 1) Diretório base
+[ -d "$inc" ] || fail "Diretório de include não existe: $inc"
+
+# 2) Headers “must-have” para um sistema final
+# Nota: a presença exata pode variar por versão/arquitetura, mas estes são bons sentinelas.
+req_files="
+$inc/linux/version.h
+$inc/linux/types.h
+$inc/linux/limits.h
+"
+
+for f in $req_files; do
+  [ -f "$f" ] || fail "Header obrigatório ausente: ${f#"$DESTDIR"}"
+done
+
+# 3) Verificação de “asm” (x86_64 usa ARCH=x86; o headers_install cria asm/ via asm-generic ou asm-x86)
+# Exigimos pelo menos o diretório asm/ e algum header sentinela.
+[ -d "$inc/asm" ] || fail "Diretório obrigatório ausente: ${inc#"$DESTDIR"}/asm"
+
+asm_sentinels="
+$inc/asm/unistd.h
+$inc/asm/errno.h
+$inc/asm/types.h
+"
+
+have_asm=0
+for f in $asm_sentinels; do
+  if [ -f "$f" ]; then
+    have_asm=1
+    break
+  fi
+done
+[ "$have_asm" -eq 1 ] || fail "Nenhum header sentinela encontrado em asm/: esperava um de: unistd.h errno.h types.h"
+
+# 4) Garantir que /usr/include/linux existe e não está vazio
+[ -d "$inc/linux" ] || fail "Diretório obrigatório ausente: ${inc#"$DESTDIR"}/linux"
+# checa se existe ao menos 1 header dentro
+find "$inc/linux" -maxdepth 1 -type f -name '*.h' -print -quit | grep -q . \
+  || fail "Diretório linux/ não contém headers .h no nível esperado"
+
+# 5) Resíduos indesejados (em geral o recipe já remove, mas o hook valida)
+# Arquivos ocultos (ex.: .install, .tmp) em include
+if find "$inc" -type f -name '.*' -print -quit | grep -q .; then
+  fail "Encontrados arquivos ocultos em ${inc#"$DESTDIR"} (ex.: .*) — remova antes de empacotar"
+fi
+
+# Makefile em include (às vezes sobra do headers_install)
+if [ -f "$inc/Makefile" ]; then
+  fail "Encontrado ${inc#"$DESTDIR"}/Makefile — remova antes de empacotar"
+fi
+
+# 6) Sanidade: proibir caminhos fora de include (para linux-headers este pacote deve instalar somente headers)
+# Permite apenas $PREFIX/include/** dentro do DESTDIR
+# Se você deliberadamente colocar algo em outro lugar via overlay, ajuste esta regra.
+other_paths="$(cd "$DESTDIR" && find . -mindepth 1 -maxdepth 3 -type f | sed 's|^\./||' | grep -v "^${PREFIX#/}/include/")" || true
+if [ -n "$other_paths" ]; then
+  warn "Arquivos fora de ${PREFIX}/include detectados no DESTDIR (revise):"
+  echo "$other_paths" | sed 's/^/  - /' >&2
+  # Para “policy hard”, troque warn por fail:
+  # fail "linux-headers deve instalar somente em ${PREFIX}/include"
+fi
+
+info "OK: validação post-build passou (headers essenciais presentes e sem resíduos comuns)"
