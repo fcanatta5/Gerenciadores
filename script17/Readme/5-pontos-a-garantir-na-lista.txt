@@ -1,0 +1,47 @@
+Os 5 pontos que você PRECISA garantir (ou nada sobe)
+
+1) Kernel Linux + firmware (fora do pm) O pm não constrói o kernel,Você precisa: Kernel Linux configurado com:
+DRM (para Wayland)
+KMS
+input (evdev)
+networking
+Firmware para sua GPU e Wi-Fi (se necessário)
+Sem isso:
+Wayland não inicia
+Firefox não abre
+
+2) Bootloader, Você precisa um:
+GRUB
+systemd-boot
+ou outro loader simples, Isso é fora do pm.
+
+3) init correto (runit),Para bootar: Você precisa:
+/sbin/init → runit
+/etc/runit/1, /etc/runit/2, /etc/runit/3
+getty ativo (tty1)
+
+Se o runit não estiver configurado: O sistema “boota” mas cai num shell quebrado ou reinicia.
+
+4) Seat / sessão Wayland,Wayland não funciona sem seat management. Você precisa de UM:
+seatd (recomendado)
+ou elogind
+E precisa:
+seatd -g video & export XDG_RUNTIME_DIR=/run/user/1000
+
+Sem isso: sway/wayfire falham, Firefox não inicia GUI
+
+5) Variáveis corretas para Firefox, Firefox precisa disso para Wayland:
+export MOZ_ENABLE_WAYLAND=1
+export XDG_SESSION_TYPE=wayland
+
+Sem isso: Ele tenta X11 ou falha silenciosamente, Checklist rápido de “boot OK” Depois do boot, isso tem que funcionar:
+
+ps -p 1        # deve ser runit
+ldd /bin/sh   # deve mostrar musl
+ls /dev/dri   # deve existir
+seatd -v      # deve rodar
+sway          # ou outro compositor
+firefox       # abre GUI
+
+Se isso tudo funciona → sistema válido.
+
