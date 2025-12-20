@@ -1,0 +1,9 @@
+binutils
+linux-headers
+musl
+gmp
+mpfr
+mpc
+isl
+zlib
+zstd
