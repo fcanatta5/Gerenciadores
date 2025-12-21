@@ -1,0 +1,1623 @@
+#!/bin/sh
+
+set -eu
+
+###############################################################################
+: "${ADM_ARCH:=x86_64}"
+: "${ADM_ROOT:=/}"
+: "${ADM_PREFIX:=/usr}"
+: "${ADM_SYSCONFDIR:=/etc}"
+: "${ADM_VAR:=/var}"
+
+: "${ADM_BASE:=$ADM_VAR/adm}"
+: "${ADM_RECIPES:=$ADM_BASE/recipes}"
+: "${ADM_REPO:=$ADM_BASE/repo}"
+: "${ADM_SRC:=$ADM_BASE/src}"
+: "${ADM_BUILD:=$ADM_BASE/build}"
+: "${ADM_PKGS:=$ADM_BASE/pkgs}"
+: "${ADM_STATE:=$ADM_BASE/state}"
+: "${ADM_LOGDIR:=$ADM_BASE/log}"
+: "${ADM_TMP:=${TMPDIR:-/tmp}/adm}"
+
+: "${ADM_MAKE:=make}"
+: "${ADM_JOBS:=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
+: "${ADM_FETCH_PKG_JOBS:=2}"
+: "${ADM_FETCH_URL_JOBS:=4}"
+: "${ADM_FORCE:=0}"              # 1 => allow takeover on conflicts (still prechecked)
+: "${ADM_DRYRUN:=0}"             # 1 => do not execute, only print
+: "${ADM_RESUME:=0}"             # 1 => resume builds using existing dirs when possible
+
+: "${ADM_CC:=cc}"
+: "${ADM_CXX:=c++}"
+: "${ADM_CPPFLAGS:=}"
+: "${ADM_CFLAGS:=-O2 -pipe}"
+: "${ADM_CXXFLAGS:=-O2 -pipe}"
+: "${ADM_LDFLAGS:=}"
+
+# runit (optional)
+: "${ADM_RUNIT_SV:=/etc/runit/sv}"
+: "${ADM_RUNIT_SERVICE:=/run/runit/service}"
+
+# Git sync (recipes repo by default)
+: "${ADM_GIT_DIR:=$ADM_RECIPES}"
+
+# Tools
+: "${ADM_FETCH:=wget}"           # wget or curl only
+: "${ADM_TAR:=tar}"
+: "${ADM_GZIP:=gzip}"
+: "${ADM_SHA256:=sha256sum}"
+: "${ADM_MD5:=md5sum}"
+: "${ADM_SED:=sed}"
+: "${ADM_AWK:=awk}"
+: "${ADM_GREP:=grep}"
+: "${ADM_SORT:=sort}"
+: "${ADM_DATE:=date}"
+: "${ADM_FIND:=find}"
+: "${ADM_HEAD:=head}"
+: "${ADM_WC:=wc}"
+
+###############################################################################
+# Helpers
+###############################################################################
+die() { printf '%s\n' "adm: $*" >&2; exit 1; }
+mkd() { [ -d "$1" ] || mkdir -p "$1"; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "comando requerido não encontrado: $1"; }
+now_utc() { "$ADM_DATE" -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || "$ADM_DATE"; }
+
+log_init() {
+  mkd "$ADM_LOGDIR"
+  [ -f "$ADM_LOGDIR/adm.log" ] || : >"$ADM_LOGDIR/adm.log" 2>/dev/null || true
+}
+log() {
+  log_init
+  printf '%s %s\n' "$(now_utc)" "$*" >>"$ADM_LOGDIR/adm.log" 2>/dev/null || true
+  printf '%s\n' "$*" >&2
+}
+
+need_base_tools() {
+  need_cmd "$ADM_TAR"
+  need_cmd "$ADM_SED"
+  need_cmd "$ADM_AWK"
+  need_cmd "$ADM_GREP"
+  need_cmd "$ADM_SORT"
+  need_cmd "$ADM_FIND"
+  need_cmd "$ADM_DATE"
+  need_cmd "$ADM_GZIP"
+  need_cmd "$ADM_HEAD"
+  need_cmd "$ADM_WC"
+}
+
+# Dry-run wrappers
+run() {
+  # Print command; execute unless ADM_DRYRUN=1
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    printf '%s\n' "DRY-RUN: $*" >&2
+    return 0
+  fi
+  # shellcheck disable=SC2086
+  eval "$@"
+}
+
+run_quiet() {
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    return 0
+  fi
+  # shellcheck disable=SC2086
+  eval "$@"
+}
+
+hash_tool() {
+  if command -v "$ADM_SHA256" >/dev/null 2>&1; then
+    printf '%s\n' "$ADM_SHA256"
+  elif command -v "$ADM_MD5" >/dev/null 2>&1; then
+    printf '%s\n' "$ADM_MD5"
+  else
+    die "requer sha256sum ou md5sum (defina ADM_SHA256/ADM_MD5 ou instale a ferramenta)"
+  fi
+}
+
+hash_stdin_hex() {
+  ht="$(hash_tool)"
+  "$ht" | "$ADM_AWK" '{print $1}'
+}
+
+hash_str_hex() {
+  printf '%s' "$1" | hash_stdin_hex
+}
+
+###############################################################################
+# Locking with global trap cleanup + consistent held list
+###############################################################################
+lock_dir_for() { printf '%s/lock.%s\n' "$ADM_STATE" "$1"; }
+
+ADM_HELD_LOCKS=""   # space-separated list in acquisition order
+ADM_TRAP_SET=0
+
+held_add() { ADM_HELD_LOCKS="$ADM_HELD_LOCKS $1"; }
+
+held_remove() {
+  dom="$1"
+  new=""
+  for h in $ADM_HELD_LOCKS; do
+    [ "$h" = "$dom" ] && continue
+    new="$new $h"
+  done
+  ADM_HELD_LOCKS="$new"
+}
+
+lock_release_raw() {
+  domain="$1"
+  d="$(lock_dir_for "$domain")"
+  rm -rf "$d" 2>/dev/null || true
+}
+
+locks_release_all() {
+  # Release in reverse acquisition order (no sort)
+  # Build a reversed list
+  rev=""
+  for d in $ADM_HELD_LOCKS; do
+    rev="$d $rev"
+  done
+  for d in $rev; do
+    [ -n "$d" ] || continue
+    lock_release_raw "$d"
+  done
+  ADM_HELD_LOCKS=""
+}
+
+setup_trap_once() {
+  if [ "$ADM_TRAP_SET" = "0" ]; then
+    ADM_TRAP_SET=1
+    trap 'locks_release_all' EXIT HUP INT TERM
+  fi
+}
+
+lock_acquire() {
+  domain="$1"
+  mkd "$ADM_STATE"
+  d="$(lock_dir_for "$domain")"
+
+  if mkdir "$d" 2>/dev/null; then
+    printf '%s\n' "$$" >"$d/pid" 2>/dev/null || true
+    printf '%s\n' "$(now_utc)" >"$d/utc" 2>/dev/null || true
+    setup_trap_once
+    held_add "$domain"
+    return 0
+  fi
+
+  # stale detection
+  if [ -f "$d/pid" ]; then
+    pid="$(cat "$d/pid" 2>/dev/null || echo "")"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      die "lock '$domain' ativo (pid $pid). finalize o outro processo ou remova $d se tiver certeza"
+    fi
+    log "lock: stale detectado em '$domain' (pid=$pid); removendo"
+    rm -rf "$d" 2>/dev/null || die "não foi possível remover lock stale: $d"
+    mkdir "$d" 2>/dev/null || die "não foi possível criar lock: $d"
+    printf '%s\n' "$$" >"$d/pid" 2>/dev/null || true
+    printf '%s\n' "$(now_utc)" >"$d/utc" 2>/dev/null || true
+    setup_trap_once
+    held_add "$domain"
+    return 0
+  fi
+
+  die "não foi possível obter lock: $d"
+}
+
+lock_release() {
+  domain="$1"
+  lock_release_raw "$domain"
+  held_remove "$domain"
+}
+
+###############################################################################
+# Identity helpers
+###############################################################################
+pkg_key() {
+  printf '%s\n' "$1" | "$ADM_SED" 's#//*#/#g; s#/#__#g'
+}
+
+pkg_state_dir() { printf '%s/installed/%s\n' "$ADM_STATE" "$(pkg_key "$1")"; }
+
+sanitize_relpath_or_die() {
+  p="$1"
+  [ -n "$p" ] || die "caminho vazio"
+  case "$p" in
+    /*) die "caminho absoluto proibido: $p" ;;
+    "."|".."|"/") die "caminho inválido: $p" ;;
+    ../*|*/../*|*/..|*"/.." ) die "path traversal detectado: $p" ;;
+    *"="*) die "caractere inválido '=' em path: $p" ;;  # IMPORTANT: owner-map parsing safety
+  esac
+  case "$p" in
+    *"
+"*) die "caractere de controle em path: $p" ;;
+  esac
+}
+
+###############################################################################
+# Recipes
+###############################################################################
+reset_recipe_vars() {
+  RECIPE_PATH=""
+  PKG_ID=""
+  NAME=""
+  VER=""
+  DESC=""
+  DEPENDS=""
+  PREFIX="$ADM_PREFIX"
+  SYSCONFDIR="$ADM_SYSCONFDIR"
+  SOURCES=""
+  URL=""
+  SHA256=""
+  MD5=""
+  PRIMARY_SOURCE_URL=""
+}
+
+recipe_find_path() {
+  req="$1"
+
+  if printf '%s' "$req" | "$ADM_GREP" -q '/'; then
+    p="$ADM_RECIPES/$req.recipe"
+    [ -f "$p" ] || return 1
+    printf '%s\n' "$p"
+    return 0
+  fi
+
+  p="$ADM_RECIPES/$req.recipe"
+  if [ -f "$p" ]; then
+    printf '%s\n' "$p"
+    return 0
+  fi
+
+  tmp="$ADM_TMP/matches.$$"
+  mkd "$ADM_TMP"
+  : >"$tmp"
+  "$ADM_FIND" "$ADM_RECIPES" -type f -name "$req.recipe" 2>/dev/null | "$ADM_SORT" >>"$tmp" || true
+
+  n="$("$ADM_WC" -l <"$tmp" 2>/dev/null || echo 0)"
+  case "$n" in
+    0) rm -f "$tmp" 2>/dev/null || true; return 1 ;;
+    1)
+      r="$("$ADM_HEAD" -n 1 "$tmp")"
+      rm -f "$tmp" 2>/dev/null || true
+      printf '%s\n' "$r"
+      return 0
+      ;;
+    *)
+      log "ambiguidade: múltiplas receitas para '$req':"
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        rel="${line#$ADM_RECIPES/}"
+        rel="${rel%.recipe}"
+        log "  - $rel"
+      done <"$tmp"
+      rm -f "$tmp" 2>/dev/null || true
+      die "receita ambígua para '$req'. use caminho completo: categoria/$req"
+      ;;
+  esac
+}
+
+load_recipe() {
+  pkg_req="$1"
+  reset_recipe_vars
+
+  RECIPE_PATH="$(recipe_find_path "$pkg_req" 2>/dev/null || true)"
+  [ -n "$RECIPE_PATH" ] || die "receita não encontrada para: $pkg_req (em $ADM_RECIPES)"
+
+  rel="${RECIPE_PATH#$ADM_RECIPES/}"
+  rel="${rel%.recipe}"
+  PKG_ID="$rel"
+
+  # shellcheck disable=SC1090
+  . "$RECIPE_PATH"
+
+  [ -n "${NAME:-}" ] || NAME="$PKG_ID"
+  [ -n "${VER:-}" ] || die "receita inválida ($RECIPE_PATH): VER não definido"
+
+  : "${DESC:=}"
+  : "${DEPENDS:=}"
+  : "${PREFIX:=$ADM_PREFIX}"
+  : "${SYSCONFDIR:=$ADM_SYSCONFDIR}"
+  : "${PRIMARY_SOURCE_URL:=}"
+
+  if [ -n "${SOURCES:-}" ]; then
+    :
+  else
+    [ -n "${URL:-}" ] || die "receita inválida ($RECIPE_PATH): defina SOURCES ou URL"
+    if [ -n "${SHA256:-}" ]; then
+      SOURCES="$URL sha256:$SHA256"
+    elif [ -n "${MD5:-}" ]; then
+      SOURCES="$URL md5:$MD5"
+    else
+      SOURCES="$URL -"
+    fi
+  fi
+}
+
+###############################################################################
+# URL helpers + cached filename
+###############################################################################
+url_strip_qs() {
+  u="$1"
+  u=${u%%\#*}
+  u=${u%%\?*}
+  printf '%s\n' "$u"
+}
+
+url_cached_name() {
+  u="$1"
+  base="$(url_strip_qs "$u")"
+  b=${base##*/}
+  [ -n "$b" ] || b="src"
+  h="$(hash_str_hex "$u")"
+  printf '%s.%s\n' "$b" "$h"
+}
+
+###############################################################################
+# Fetch + checksum
+###############################################################################
+fetch_cmd() {
+  case "$ADM_FETCH" in
+    wget|*/wget) printf '%s\n' "wget" ;;
+    curl|*/curl) printf '%s\n' "curl" ;;
+    *) printf '%s\n' "$ADM_FETCH" ;;
+  esac
+}
+
+fetch_one_url_to() {
+  url="$1"
+  out="$2"
+  tool="$(fetch_cmd)"
+  case "$tool" in
+    wget)
+      need_cmd wget
+      run "wget -O $(printf %s "$out" | sed 's/"/\\"/g') $(printf %s "$url" | sed 's/"/\\"/g')"
+      ;;
+    curl)
+      need_cmd curl
+      run "curl -L -o $(printf %s "$out" | sed 's/"/\\"/g') $(printf %s "$url" | sed 's/"/\\"/g')"
+      ;;
+    *)
+      die "ADM_FETCH não suportado automaticamente: $ADM_FETCH (use wget ou curl)"
+      ;;
+  esac
+}
+
+checksum_verify_file() {
+  file="$1"
+  spec="$2"
+  case "$spec" in
+    ""|-) return 0 ;;
+    sha256:*)
+      need_cmd "$ADM_SHA256"
+      want="${spec#sha256:}"
+      got="$("$ADM_SHA256" "$file" | "$ADM_AWK" '{print $1}')"
+      [ "$got" = "$want" ] || die "sha256 inválido: $file (esperado $want, obtido $got)"
+      ;;
+    md5:*)
+      need_cmd "$ADM_MD5"
+      want="${spec#md5:}"
+      got="$("$ADM_MD5" "$file" | "$ADM_AWK" '{print $1}')"
+      [ "$got" = "$want" ] || die "md5 inválido: $file (esperado $want, obtido $got)"
+      ;;
+    *) die "checksum spec inválido: $spec" ;;
+  esac
+}
+
+repo_lock_for_url() {
+  h="$(hash_str_hex "$1")"
+  printf '%s\n' "repo.$h"
+}
+
+fetch_sources_for_pkg() {
+  pkg_req="$1"
+  load_recipe "$pkg_req"
+
+  mkd "$ADM_REPO" "$ADM_TMP" "$ADM_LOGDIR"
+
+  srcf="$ADM_TMP/sources.$(pkg_key "$PKG_ID").$$"
+  : >"$srcf"
+
+  # avoid subshell state dependency: use here-doc style
+  # still parse SOURCES line-by-line safely
+  printf '%s\n' "$SOURCES" | while IFS= read -r line; do
+    line="$(printf '%s' "$line" | "$ADM_SED" 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$line" ] || continue
+    case "$line" in \#*) continue ;; esac
+    printf '%s\n' "$line" >>"$srcf"
+  done
+
+  pids=""
+  n=0
+  logf="$ADM_LOGDIR/fetch.$(pkg_key "$PKG_ID").log"
+  : >"$logf" 2>/dev/null || true
+
+  fetch_url_job() {
+    _url="$1"
+    _cs="$2"
+    _fn="$(url_cached_name "$_url")"
+    _out="$ADM_REPO/$_fn"
+    _ld="$(repo_lock_for_url "$_url")"
+
+    (
+      trap 'lock_release "$_ld"' EXIT HUP INT TERM
+      lock_acquire "$_ld"
+
+      if [ -f "$_out" ]; then
+        log "fetch: cache hit: $_out"
+        checksum_verify_file "$_out" "$_cs"
+        exit 0
+      fi
+
+      log "fetch: baixando: $_url -> $_out"
+      fetch_one_url_to "$_url" "$_out"
+      if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+        checksum_verify_file "$_out" "$_cs"
+      fi
+    ) >>"$logf" 2>&1 &
+    pid=$!
+    pids="$pids $pid"
+    n=$((n + 1))
+  }
+
+  fetch_wait_one() {
+    set -- $pids
+    [ $# -ge 1 ] || return 0
+    first="$1"; shift
+    pids="$*"
+    if ! wait "$first"; then
+      rm -f "$srcf" 2>/dev/null || true
+      die "fetch falhou para $PKG_ID (veja $logf)"
+    fi
+    n=$((n - 1))
+  }
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    url="$(printf '%s\n' "$line" | "$ADM_AWK" '{print $1}')"
+    cs="$(printf '%s\n' "$line" | "$ADM_AWK" '{print $2}')"
+    [ -n "$url" ] || continue
+    [ -n "$cs" ] || cs="-"
+    fetch_url_job "$url" "$cs"
+    while [ "$n" -ge "$ADM_FETCH_URL_JOBS" ]; do
+      fetch_wait_one
+    done
+  done <"$srcf"
+
+  while [ "$n" -gt 0 ]; do
+    fetch_wait_one
+  done
+
+  rm -f "$srcf" 2>/dev/null || true
+}
+
+fetch_pkgs_parallel() {
+  [ $# -ge 1 ] || die "uso: adm fetch <pkg...>"
+  mkd "$ADM_LOGDIR" "$ADM_TMP" "$ADM_REPO"
+  pids=""
+  n=0
+
+  start_pkg_fetch() {
+    _pkg="$1"
+    (
+      fetch_sources_for_pkg "$_pkg"
+    ) >>"$ADM_LOGDIR/fetch.all.log" 2>&1 &
+    pid=$!
+    pids="$pids $pid"
+    n=$((n + 1))
+  }
+
+  wait_pkg_one() {
+    set -- $pids
+    [ $# -ge 1 ] || return 0
+    first="$1"; shift
+    pids="$*"
+    if ! wait "$first"; then
+      die "fetch: falhou (veja $ADM_LOGDIR/fetch.*.log)"
+    fi
+    n=$((n - 1))
+  }
+
+  for pkg in "$@"; do
+    start_pkg_fetch "$pkg"
+    while [ "$n" -ge "$ADM_FETCH_PKG_JOBS" ]; do
+      wait_pkg_one
+    done
+  done
+  while [ "$n" -gt 0 ]; do
+    wait_pkg_one
+  done
+}
+
+###############################################################################
+# Extract
+###############################################################################
+primary_source_url() {
+  if [ -n "$PRIMARY_SOURCE_URL" ]; then
+    printf '%s\n' "$PRIMARY_SOURCE_URL"
+    return 0
+  fi
+
+  url="$(
+    printf '%s\n' "$SOURCES" | "$ADM_AWK" '
+      NF && $1 !~ /^#/ {
+        if ($1 ~ /\.(tar\.gz|tgz|tar\.xz|tar\.bz2|tar)$/) { print $1; exit }
+        if (!first) { first=$1 }
+      }
+      END { if (first) print first }
+    '
+  )"
+  [ -n "$url" ] || die "SOURCES vazio/invalid em $PKG_ID"
+  printf '%s\n' "$url"
+}
+
+extract_source() {
+  pkg_req="$1"
+  load_recipe "$pkg_req"
+  fetch_sources_for_pkg "$pkg_req"
+
+  url="$(primary_source_url)"
+  fn="$(url_cached_name "$url")"
+  srcfile="$ADM_REPO/$fn"
+
+  mkd "$ADM_SRC" "$ADM_BUILD"
+  worksrc="$ADM_SRC/$(pkg_key "$PKG_ID")-$VER"
+  workbld="$ADM_BUILD/$(pkg_key "$PKG_ID")-$VER"
+
+  if [ "${ADM_RESUME:-0}" = "1" ] && [ -d "$worksrc" ] && [ -d "$workbld" ]; then
+    log "extract: resume ativo, reaproveitando $worksrc e $workbld"
+  else
+    run "rm -rf $(printf %s "$worksrc" | sed 's/"/\\"/g') $(printf %s "$workbld" | sed 's/"/\\"/g')"
+    mkd "$worksrc" "$workbld"
+    log "extract: $PKG_ID -> $srcfile"
+    if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+      :
+    else
+      case "$srcfile" in
+        *.tar.gz|*.tgz) "$ADM_TAR" -xzf "$srcfile" -C "$worksrc" ;;
+        *.tar.xz)       "$ADM_TAR" -xJf "$srcfile" -C "$worksrc" ;;
+        *.tar.bz2)      "$ADM_TAR" -xjf "$srcfile" -C "$worksrc" ;;
+        *.tar)          "$ADM_TAR" -xf  "$srcfile" -C "$worksrc" ;;
+        *) die "formato não suportado: $srcfile (defina PRIMARY_SOURCE_URL se preciso)" ;;
+      esac
+    fi
+  fi
+
+  topdir="$worksrc"
+  set -- "$worksrc"/*
+  if [ "$#" -eq 1 ] && [ -d "$1" ]; then topdir="$1"; fi
+
+  printf '%s\n' "$topdir|$workbld"
+}
+
+###############################################################################
+# Build-ID + archive path
+###############################################################################
+safe_pkgfile_name() {
+  printf '%s\n' "$NAME" | "$ADM_SED" 's#/#-#g; s#[^A-Za-z0-9._+-]#_#g'
+}
+
+build_id() {
+  {
+    printf 'ARCH=%s\n' "$ADM_ARCH"
+    printf 'CC=%s\n' "$ADM_CC"
+    printf 'CXX=%s\n' "$ADM_CXX"
+    printf 'CPPFLAGS=%s\n' "$ADM_CPPFLAGS"
+    printf 'CFLAGS=%s\n' "$ADM_CFLAGS"
+    printf 'CXXFLAGS=%s\n' "$ADM_CXXFLAGS"
+    printf 'LDFLAGS=%s\n' "$ADM_LDFLAGS"
+    printf 'PREFIX=%s\n' "$PREFIX"
+    printf 'SYSCONFDIR=%s\n' "$SYSCONFDIR"
+    printf 'RECIPE_PATH=%s\n' "$RECIPE_PATH"
+    cat "$RECIPE_PATH"
+  } | hash_stdin_hex
+}
+
+archive_path_for_loaded_recipe() {
+  b="$(build_id)"
+  n="$(safe_pkgfile_name)"
+  pid_sfx="$(hash_str_hex "$PKG_ID" | "$ADM_AWK" '{print substr($0,1,8)}')"
+  printf '%s/%s-%s-%s-%s-%s.tar.gz\n' "$ADM_PKGS" "$n" "$VER" "$ADM_ARCH" "$b" "$pid_sfx"
+}
+
+###############################################################################
+# Build / stage / package
+###############################################################################
+default_build() {
+  if [ -x "./configure" ]; then
+    ./configure --prefix="$PREFIX" --sysconfdir="$SYSCONFDIR" \
+      CC="$CC" CXX="$CXX" CPPFLAGS="$CPPFLAGS" \
+      CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" LDFLAGS="$LDFLAGS"
+  fi
+  "$ADM_MAKE" -j "$ADM_JOBS"
+}
+
+default_install_stage() {
+  dest="$1"
+  "$ADM_MAKE" DESTDIR="$dest" install
+}
+
+build_pkg() {
+  pkg_req="$1"
+  load_recipe "$pkg_req"
+
+  mkd "$ADM_PKGS" "$ADM_TMP" "$ADM_LOGDIR"
+
+  hash_tool >/dev/null 2>&1 || exit 1
+
+  archive="$(archive_path_for_loaded_recipe)"
+  if [ -f "$archive" ]; then
+    log "build: cache binário hit: $archive"
+    printf '%s\n' "$archive"
+    return 0
+  fi
+
+  pair="$(extract_source "$pkg_req")"
+  srcdir=${pair%%|*}
+  blddir=${pair##*|}
+
+  DESTDIR="$ADM_TMP/destdir/$(pkg_key "$PKG_ID")-$VER"
+  inprog="$DESTDIR/.ADM_INPROGRESS"
+
+  if [ "${ADM_RESUME:-0}" = "1" ] && [ -d "$DESTDIR" ] && [ -f "$inprog" ]; then
+    log "build: resume ativo, reaproveitando DESTDIR=$DESTDIR"
+  else
+    run "rm -rf $(printf %s "$DESTDIR" | sed 's/"/\\"/g')"
+    mkd "$DESTDIR"
+    if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+      : >"$inprog" 2>/dev/null || true
+    fi
+  fi
+
+  pkglog="$ADM_LOGDIR/$(pkg_key "$PKG_ID")-$VER.build.log"
+  : >"$pkglog" 2>/dev/null || true
+
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: build em $srcdir (blddir=$blddir) DESTDIR=$DESTDIR"
+  else
+    (
+      export CC="$ADM_CC" CXX="$ADM_CXX" CPPFLAGS="$ADM_CPPFLAGS"
+      export CFLAGS="$ADM_CFLAGS" CXXFLAGS="$ADM_CXXFLAGS" LDFLAGS="$ADM_LDFLAGS"
+      export PREFIX SYSCONFDIR DESTDIR ADM_ROOT ADM_ARCH ADM_JOBS
+
+      cd "$srcdir"
+
+      if command -v prepare >/dev/null 2>&1; then prepare; fi
+
+      if command -v build >/dev/null 2>&1; then
+        build "$blddir"
+      else
+        default_build
+      fi
+
+      if command -v package >/dev/null 2>&1; then
+        package "$DESTDIR"
+      else
+        default_install_stage "$DESTDIR"
+      fi
+
+      if command -v strip >/dev/null 2>&1; then
+        "$ADM_FIND" "$DESTDIR" -type f -perm -111 2>/dev/null | while IFS= read -r f; do
+          strip --strip-unneeded "$f" 2>/dev/null || true
+        done
+      fi
+    ) >>"$pkglog" 2>&1 || die "build falhou; veja: $pkglog"
+
+    # sanity: DESTDIR not empty
+    if ! (cd "$DESTDIR" && "$ADM_FIND" . -mindepth 1 -print -quit 2>/dev/null | "$ADM_GREP" -q .); then
+      die "build result vazio (DESTDIR sem arquivos) para $PKG_ID"
+    fi
+  fi
+
+  mf="$DESTDIR/.ADM_MANIFEST"
+  bid="$(build_id)"
+  if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+    {
+      printf 'PKG_ID=%s\n' "$PKG_ID"
+      printf 'NAME=%s\n' "$NAME"
+      printf 'VER=%s\n' "$VER"
+      printf 'ARCH=%s\n' "$ADM_ARCH"
+      printf 'BUILD_ID=%s\n' "$bid"
+      printf 'DESC=%s\n' "$DESC"
+      printf 'DEPENDS=%s\n' "$DEPENDS"
+      printf 'BUILD_UTC=%s\n' "$(now_utc)"
+      printf 'PREFIX=%s\n' "$PREFIX"
+      printf 'SYSCONFDIR=%s\n' "$SYSCONFDIR"
+    } >"$mf"
+  fi
+
+  # package write under pkgs lock
+  lock_acquire pkgs
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: empacotaria DESTDIR=$DESTDIR -> $archive"
+  else
+    rm -f "$archive" 2>/dev/null || true
+    (
+      cd "$DESTDIR"
+      "$ADM_TAR" -cf - . | "$ADM_GZIP" -9 >"$archive"
+    ) || { lock_release pkgs; die "falha ao empacotar"; }
+    rm -f "$inprog" 2>/dev/null || true
+  fi
+  lock_release pkgs
+
+  log "build: ok -> $archive"
+  printf '%s\n' "$archive"
+}
+
+###############################################################################
+# Dependencies (DFS topo sort) with cycle detection
+###############################################################################
+deps_resolve_order() {
+  mkd "$ADM_TMP"
+  td="$ADM_TMP/dep.$$"
+  rm -rf "$td"
+  mkd "$td"
+  out="$td/order"
+  : >"$out"
+  stack="$td/stack"
+  : >"$stack"
+
+  deps_visit() {
+    req="$1"
+    load_recipe "$req"
+    k="$(pkg_key "$PKG_ID")"
+
+    if [ -f "$td/visited.$k" ]; then return 0; fi
+    if [ -f "$td/visiting.$k" ]; then
+      log "ciclo detectado. stack:"
+      cat "$stack" >&2 || true
+      die "dependência cíclica detectada envolvendo: $PKG_ID"
+    fi
+
+    : >"$td/visiting.$k"
+    printf '%s\n' "$PKG_ID" >>"$stack"
+
+    for d in $DEPENDS; do
+      deps_visit "$d"
+    done
+
+    rm -f "$td/visiting.$k" 2>/dev/null || true
+    : >"$td/visited.$k"
+    printf '%s\n' "$PKG_ID" >>"$out"
+
+    # pop last line (cheap for small stacks)
+    tmp="$td/stack2"
+    : >"$tmp"
+    total="$("$ADM_WC" -l <"$stack" 2>/dev/null || echo 0)"
+    if [ "$total" -gt 1 ]; then
+      n=$((total - 1))
+      "$ADM_HEAD" -n "$n" "$stack" >"$tmp" 2>/dev/null || true
+      mv "$tmp" "$stack" 2>/dev/null || cp "$tmp" "$stack"
+    else
+      : >"$stack"
+    fi
+  }
+
+  for p in "$@"; do deps_visit "$p"; done
+  cat "$out"
+  rm -rf "$td" 2>/dev/null || true
+}
+
+###############################################################################
+# Owner-map (hash(path)->pkgid+path)
+###############################################################################
+owners_dir() { printf '%s/owners\n' "$ADM_STATE"; }
+
+owner_key_for_rel() {
+  sanitize_relpath_or_die "$1"
+  hash_str_hex "$1"
+}
+
+owner_shard_dir() {
+  key="$1"
+  printf '%s/%s\n' "$(owners_dir)" "$(printf '%s' "$key" | "$ADM_AWK" '{print substr($0,1,2)}')"
+}
+
+owner_file_for_key() {
+  key="$1"
+  printf '%s/%s\n' "$(owner_shard_dir "$key")" "$key"
+}
+
+owner_get_pkgid() {
+  rel="$1"
+  key="$(owner_key_for_rel "$rel")"
+  f="$(owner_file_for_key "$key")"
+  [ -f "$f" ] || return 1
+  pkgid="$("$ADM_AWK" -F= '$1=="PKG_ID"{print $2; exit}' "$f" 2>/dev/null || true)"
+  pathv="$("$ADM_AWK" -F= '$1=="PATH"{sub(/^PATH=/,""); print $0; exit}' "$f" 2>/dev/null || true)"
+  [ "$pathv" = "$rel" ] || return 1
+  [ -n "$pkgid" ] || return 1
+  printf '%s\n' "$pkgid"
+}
+
+owner_set() {
+  rel="$1"
+  pkgid="$2"
+  key="$(owner_key_for_rel "$rel")"
+  sd="$(owner_shard_dir "$key")"
+  mkd "$sd"
+  f="$(owner_file_for_key "$key")"
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: owner_set PATH=$rel PKG_ID=$pkgid"
+    return 0
+  fi
+  {
+    printf 'PKG_ID=%s\n' "$pkgid"
+    printf 'PATH=%s\n' "$rel"
+  } >"$f"
+}
+
+owner_del() {
+  rel="$1"
+  key="$(owner_key_for_rel "$rel")"
+  f="$(owner_file_for_key "$key")"
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: owner_del PATH=$rel"
+    return 0
+  fi
+  rm -f "$f" 2>/dev/null || true
+}
+
+###############################################################################
+# Install/Remove helpers
+###############################################################################
+filelist_from_archive() {
+  archive="$1"
+  out="$2"
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: geraria filelist de $archive -> $out"
+    : >"$out" 2>/dev/null || true
+    return 0
+  fi
+  "$ADM_TAR" -tzf "$archive" | "$ADM_SED" 's#^\./##' | "$ADM_SED" '/^$/d' >"$out"
+}
+
+install_precheck_conflicts_filelist() {
+  pkgid="$1"
+  listfile="$2"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    sanitize_relpath_or_die "$rel"
+    owner="$(owner_get_pkgid "$rel" 2>/dev/null || true)"
+    if [ -n "$owner" ] && [ "$owner" != "$pkgid" ]; then
+      if [ "$ADM_FORCE" = "1" ]; then
+        log "install: WARNING conflito (FORCE=1): $rel owned by $owner, will take over"
+      else
+        die "conflito de arquivos: '$rel' já pertence a '$owner' (use ADM_FORCE=1 para forçar)"
+      fi
+    fi
+  done <"$listfile"
+}
+
+install_claim_owners_filelist() {
+  pkgid="$1"
+  listfile="$2"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    sanitize_relpath_or_die "$rel"
+    owner_set "$rel" "$pkgid"
+  done <"$listfile"
+}
+
+install_rollback_extract() {
+  pkgid="$1"
+  listfile="$2"
+  log "install: rollback iniciado para $pkgid"
+  tmp="$ADM_TMP/rb.$$"
+  mkd "$ADM_TMP"
+  if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+    "$ADM_AWK" 'NF{print length($0) "\t" $0}' "$listfile" | "$ADM_SORT" -rn | "$ADM_AWK" -F'\t' '{print $2}' >"$tmp"
+  else
+    : >"$tmp"
+  fi
+
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    case "$rel" in
+      /*|""|"."|".."|"/"|../*|*/../*|*/..|*"/.." ) continue ;;
+    esac
+    target="$ADM_ROOT/$rel"
+    owner="$(owner_get_pkgid "$rel" 2>/dev/null || true)"
+    if [ -n "$owner" ] && [ "$owner" != "$pkgid" ]; then
+      continue
+    fi
+    if [ -d "$target" ] && [ ! -L "$target" ]; then
+      run "rmdir $(printf %s "$target" | sed 's/"/\\"/g') 2>/dev/null || true"
+    else
+      run "rm -f $(printf %s "$target" | sed 's/"/\\"/g') 2>/dev/null || true"
+    fi
+  done <"$tmp"
+  rm -f "$tmp" 2>/dev/null || true
+  log "install: rollback concluído para $pkgid"
+}
+
+###############################################################################
+# State lookup (name/id)
+###############################################################################
+is_installed_pkgid() { [ -d "$(pkg_state_dir "$1")" ]; }
+
+state_lookup_pkgid_by_name_or_id() {
+  tok="$1"
+  d="$ADM_STATE/installed"
+  [ -d "$d" ] || return 1
+
+  if is_installed_pkgid "$tok"; then
+    printf '%s\n' "$tok"
+    return 0
+  fi
+
+  found=""
+  count=0
+  for st in "$d"/*; do
+    [ -d "$st" ] || continue
+    pkgid="$(cat "$st/pkgid" 2>/dev/null || true)"
+    name="$(cat "$st/name" 2>/dev/null || true)"
+    base="${pkgid##*/}"
+    if [ "$tok" = "$name" ] || [ "$tok" = "$base" ]; then
+      found="$pkgid"
+      count=$((count + 1))
+    fi
+  done
+
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$found"
+}
+
+###############################################################################
+# Install / Upgrade / Remove / Verify
+###############################################################################
+install_one() {
+  pkg_req="$1"
+  load_recipe "$pkg_req"
+  pkgid="$PKG_ID"
+
+  [ -n "$ADM_ROOT" ] || die "ADM_ROOT vazio"
+  [ -d "$ADM_ROOT" ] || die "ADM_ROOT inválido: $ADM_ROOT"
+
+  mkd "$ADM_STATE/installed" "$ADM_LOGDIR" "$ADM_TMP"
+
+  st="$(pkg_state_dir "$pkgid")"
+  [ -d "$st" ] && die "já instalado: $pkgid"
+
+  # Build first if needed
+  archive="$(archive_path_for_loaded_recipe)"
+  if [ ! -f "$archive" ]; then
+    log "install: sem binário cache; build: $pkgid"
+    archive="$(build_pkg "$pkg_req")"
+  fi
+
+  # Create state dir only after we know build exists
+  mkd "$st"
+
+  ver="$VER"
+  key="$(pkg_key "$pkgid")"
+  instlog="$ADM_LOGDIR/$key-$ver.install.log"
+  : >"$instlog" 2>/dev/null || true
+
+  listfile="$st/files"
+  filelist_from_archive "$archive" "$listfile"
+
+  # Precheck ownership under lock
+  lock_acquire state
+  if ! install_precheck_conflicts_filelist "$pkgid" "$listfile"; then
+    lock_release state
+    run "rm -rf $(printf %s "$st" | sed 's/"/\\"/g')"
+    die "conflito detectado (precheck). state limpo."
+  fi
+  lock_release state
+
+  # Extract to ROOT
+  log "install: extraindo em ROOT=$ADM_ROOT a partir de $archive"
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: extrairia $archive em $ADM_ROOT"
+  else
+    if ! (
+      cd "$ADM_ROOT"
+      "$ADM_TAR" -xzf "$archive"
+    ) >>"$instlog" 2>&1; then
+      install_rollback_extract "$pkgid" "$listfile" || true
+      run "rm -rf $(printf %s "$st" | sed 's/"/\\"/g')"
+      die "instalação falhou; rollback aplicado; state removido; veja: $instlog"
+    fi
+  fi
+
+  # Recheck + claim owners under lock (race-safe) + rollback if fails
+  lock_acquire state
+  if ! install_precheck_conflicts_filelist "$pkgid" "$listfile"; then
+    lock_release state
+    install_rollback_extract "$pkgid" "$listfile" || true
+    run "rm -rf $(printf %s "$st" | sed 's/"/\\"/g')"
+    die "conflito detectado no recheck após extrair; rollback aplicado; state removido"
+  fi
+  install_claim_owners_filelist "$pkgid" "$listfile"
+  lock_release state
+
+  # metadata
+  if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+    printf '%s\n' "$ver" >"$st/version"
+    printf '%s\n' "$ADM_ARCH" >"$st/arch"
+    printf '%s\n' "$DESC" >"$st/desc"
+    printf '%s\n' "$DEPENDS" >"$st/depends"
+    printf '%s\n' "$(build_id)" >"$st/buildid"
+    printf '%s\n' "$(now_utc)" >"$st/installed_utc"
+    printf '%s\n' "$archive" >"$st/archive"
+    printf '%s\n' "$pkgid" >"$st/pkgid"
+    printf '%s\n' "$NAME" >"$st/name"
+  else
+    log "DRY-RUN: gravaria state de $pkgid"
+  fi
+
+  if command -v install_post >/dev/null 2>&1; then
+    if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+      log "DRY-RUN: chamaria install_post para $pkgid"
+    else
+      ( install_post ) >>"$instlog" 2>&1 || die "install_post falhou; veja: $instlog"
+    fi
+  fi
+
+  log "install: ok -> $pkgid ($ver)"
+}
+
+install_with_deps() {
+  [ $# -ge 1 ] || die "uso: adm install <pkg...>"
+  need_base_tools
+  mkd "$ADM_TMP"
+  order_file="$ADM_TMP/order.$$"
+  deps_resolve_order "$@" >"$order_file"
+
+  while IFS= read -r pkgid; do
+    [ -n "$pkgid" ] || continue
+    if is_installed_pkgid "$pkgid"; then
+      log "install: já instalado, pulando: $pkgid"
+      continue
+    fi
+    install_one "$pkgid"
+  done <"$order_file"
+
+  rm -f "$order_file" 2>/dev/null || true
+}
+
+# Upgrade: build first, then switch; remove old-only files after successful install
+upgrade_one() {
+  pkg_req="$1"
+  load_recipe "$pkg_req"
+  pkgid="$PKG_ID"
+
+  old_st="$(pkg_state_dir "$pkgid")"
+  [ -d "$old_st" ] || die "upgrade: pacote não está instalado: $pkgid"
+
+  # Build first (requirement)
+  archive="$(build_pkg "$pkg_req")"
+
+  # Prepare new state in temp directory
+  new_st="$ADM_STATE/installed/.upgrade.$(pkg_key "$pkgid").new"
+  bak_st="$ADM_STATE/installed/.upgrade.$(pkg_key "$pkgid").bak"
+  run "rm -rf $(printf %s "$new_st" | sed 's/"/\\"/g') $(printf %s "$bak_st" | sed 's/"/\\"/g')"
+  mkd "$new_st"
+
+  key="$(pkg_key "$pkgid")"
+  ver="$VER"
+  uplog="$ADM_LOGDIR/$key-$ver.upgrade.log"
+  : >"$uplog" 2>/dev/null || true
+
+  # Build new filelist from archive
+  new_list="$new_st/files"
+  filelist_from_archive "$archive" "$new_list"
+
+  # Precheck under lock: allow same pkgid ownership takeover; reject others
+  lock_acquire state
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    sanitize_relpath_or_die "$rel"
+    owner="$(owner_get_pkgid "$rel" 2>/dev/null || true)"
+    if [ -n "$owner" ] && [ "$owner" != "$pkgid" ]; then
+      if [ "$ADM_FORCE" = "1" ]; then
+        log "upgrade: WARNING conflito (FORCE=1): $rel owned by $owner, will take over"
+      else
+        lock_release state
+        run "rm -rf $(printf %s "$new_st" | sed 's/"/\\"/g')"
+        die "upgrade: conflito em '$rel' (owner=$owner). abortei antes de extrair."
+      fi
+    fi
+  done <"$new_list"
+  lock_release state
+
+  # Extract new over root (upgrade semantics)
+  log "upgrade: extraindo novo pacote em ROOT: $pkgid ($ver)"
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: extrairia $archive em $ADM_ROOT"
+  else
+    if ! (
+      cd "$ADM_ROOT"
+      "$ADM_TAR" -xzf "$archive"
+    ) >>"$uplog" 2>&1; then
+      # rollback new extraction best-effort (do not destroy old version files blindly)
+      install_rollback_extract "$pkgid" "$new_list" || true
+      run "rm -rf $(printf %s "$new_st" | sed 's/"/\\"/g')"
+      die "upgrade: extração falhou; rollback aplicado; veja: $uplog"
+    fi
+  fi
+
+  # Claim ownership for new list under lock (recheck race-safe)
+  lock_acquire state
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    sanitize_relpath_or_die "$rel"
+    owner="$(owner_get_pkgid "$rel" 2>/dev/null || true)"
+    if [ -n "$owner" ] && [ "$owner" != "$pkgid" ] && [ "$ADM_FORCE" != "1" ]; then
+      lock_release state
+      install_rollback_extract "$pkgid" "$new_list" || true
+      run "rm -rf $(printf %s "$new_st" | sed 's/"/\\"/g')"
+      die "upgrade: conflito detectado no recheck após extrair; rollback aplicado"
+    fi
+    owner_set "$rel" "$pkgid"
+  done <"$new_list"
+  lock_release state
+
+  # Write new metadata
+  if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+    printf '%s\n' "$ver" >"$new_st/version"
+    printf '%s\n' "$ADM_ARCH" >"$new_st/arch"
+    printf '%s\n' "$DESC" >"$new_st/desc"
+    printf '%s\n' "$DEPENDS" >"$new_st/depends"
+    printf '%s\n' "$(build_id)" >"$new_st/buildid"
+    printf '%s\n' "$(now_utc)" >"$new_st/installed_utc"
+    printf '%s\n' "$archive" >"$new_st/archive"
+    printf '%s\n' "$pkgid" >"$new_st/pkgid"
+    printf '%s\n' "$NAME" >"$new_st/name"
+  fi
+
+  # Remove old-only files (safe): files in old list that are not in new list
+  old_list="$old_st/files"
+  if [ -f "$old_list" ]; then
+    tmp_new_set="$ADM_TMP/newset.$key.$$"
+    tmp_old="$ADM_TMP/old.$key.$$"
+    mkd "$ADM_TMP"
+    if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+      # create a fast lookup set file (sorted)
+      "$ADM_SORT" "$new_list" >"$tmp_new_set"
+      "$ADM_AWK" 'NF{print length($0) "\t" $0}' "$old_list" | "$ADM_SORT" -rn | "$ADM_AWK" -F'\t' '{print $2}' >"$tmp_old"
+    else
+      : >"$tmp_new_set"
+      : >"$tmp_old"
+    fi
+
+    lock_acquire state
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      sanitize_relpath_or_die "$rel"
+      # if rel exists in new list, keep
+      if [ "${ADM_DRYRUN:-0}" != "1" ] && "$ADM_GREP" -qxF -- "$rel" "$tmp_new_set"; then
+        continue
+      fi
+      owner="$(owner_get_pkgid "$rel" 2>/dev/null || true)"
+      [ -n "$owner" ] && [ "$owner" != "$pkgid" ] && continue
+
+      target="$ADM_ROOT/$rel"
+      if [ -d "$target" ] && [ ! -L "$target" ]; then
+        run "rmdir $(printf %s "$target" | sed 's/"/\\"/g') 2>/dev/null || true"
+      else
+        run "rm -f $(printf %s "$target" | sed 's/"/\\"/g') 2>/dev/null || true"
+      fi
+      owner_del "$rel"
+    done <"$tmp_old"
+    lock_release state
+
+    rm -f "$tmp_new_set" "$tmp_old" 2>/dev/null || true
+  fi
+
+  # Atomically switch state: old -> bak, new -> old_st
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: moveria state antigo->bak e new->installed para $pkgid"
+  else
+    run_quiet "rm -rf $(printf %s "$bak_st" | sed 's/"/\\"/g')"
+    mv "$old_st" "$bak_st"
+    mv "$new_st" "$old_st"
+    run_quiet "rm -rf $(printf %s "$bak_st" | sed 's/"/\\"/g')"
+  fi
+
+  log "upgrade: ok -> $pkgid ($ver)"
+}
+
+upgrade_cmd() {
+  [ $# -ge 1 ] || die "uso: adm upgrade <pkg...>"
+  need_base_tools
+  for p in "$@"; do
+    # allow short name resolution
+    if is_installed_pkgid "$p"; then
+      upgrade_one "$p"
+    else
+      load_recipe "$p"
+      upgrade_one "$PKG_ID"
+    fi
+  done
+}
+
+remove_one_pkgid() {
+  pkgid="$1"
+  st="$(pkg_state_dir "$pkgid")"
+  [ -d "$st" ] || die "não instalado: $pkgid"
+
+  ver="$(cat "$st/version" 2>/dev/null || echo "?")"
+  key="$(pkg_key "$pkgid")"
+  rmlog="$ADM_LOGDIR/$key-$ver.remove.log"
+  : >"$rmlog" 2>/dev/null || true
+
+  files="$st/files"
+  [ -f "$files" ] || die "registro inconsistente: sem files para $pkgid"
+
+  tmp="$ADM_TMP/rm.$key.$$"
+  mkd "$ADM_TMP"
+  if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+    "$ADM_AWK" 'NF{ print length($0) "\t" $0 }' "$files" | "$ADM_SORT" -rn | "$ADM_AWK" -F'\t' '{print $2}' >"$tmp"
+  else
+    : >"$tmp"
+  fi
+
+  lock_acquire state
+  (
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      sanitize_relpath_or_die "$rel"
+
+      owner="$(owner_get_pkgid "$rel" 2>/dev/null || true)"
+      if [ -n "$owner" ] && [ "$owner" != "$pkgid" ]; then
+        log "remove: não removendo (owner mudou): $rel (owner=$owner)"
+        continue
+      fi
+
+      target="$ADM_ROOT/$rel"
+      case "$target" in
+        "$ADM_BASE"/*) log "remove: pulando protegido: $target"; continue ;;
+      esac
+
+      if [ -d "$target" ] && [ ! -L "$target" ]; then
+        run "rmdir $(printf %s "$target" | sed 's/"/\\"/g') 2>/dev/null || true"
+      else
+        run "rm -f $(printf %s "$target" | sed 's/"/\\"/g') 2>/dev/null || true"
+      fi
+
+      owner_del "$rel"
+    done <"$tmp"
+  ) >>"$rmlog" 2>&1
+  lock_release state
+
+  rm -f "$tmp" 2>/dev/null || true
+
+  if command -v remove_post >/dev/null 2>&1; then
+    if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+      log "DRY-RUN: chamaria remove_post para $pkgid"
+    else
+      ( remove_post ) >>"$rmlog" 2>&1 || true
+    fi
+  fi
+
+  run "rm -rf $(printf %s "$st" | sed 's/"/\\"/g')"
+  log "remove: ok -> $pkgid-$ver"
+}
+
+remove_cmd() {
+  [ $# -ge 1 ] || die "uso: adm remove <pkg...>"
+  need_base_tools
+  for tok in "$@"; do
+    if is_installed_pkgid "$tok"; then
+      remove_one_pkgid "$tok"
+      continue
+    fi
+    if pkgid="$(state_lookup_pkgid_by_name_or_id "$tok" 2>/dev/null || true)"; then
+      [ -n "$pkgid" ] && { remove_one_pkgid "$pkgid"; continue; }
+    fi
+    load_recipe "$tok"
+    remove_one_pkgid "$PKG_ID"
+  done
+}
+
+verify_one_pkgid() {
+  pkgid="$1"
+  st="$(pkg_state_dir "$pkgid")"
+  [ -d "$st" ] || die "não instalado: $pkgid"
+
+  files="$st/files"
+  [ -f "$files" ] || die "registro inconsistente: sem files para $pkgid"
+
+  missing=0
+  wrong_owner=0
+  invalid=0
+  total=0
+
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    total=$((total + 1))
+    case "$rel" in
+      /*|""|"."|".."|"/"|../*|*/../*|*/..|*"/.." )
+        log "verify: inválido no registro: $rel"
+        invalid=$((invalid + 1))
+        continue
+        ;;
+    esac
+
+    target="$ADM_ROOT/$rel"
+    if [ "${ADM_DRYRUN:-0}" != "1" ]; then
+      [ -e "$target" ] || { log "verify: ausente: $target"; missing=$((missing + 1)); }
+    fi
+
+    owner="$(owner_get_pkgid "$rel" 2>/dev/null || true)"
+    if [ -z "$owner" ]; then
+      log "verify: owner ausente: $rel"
+      wrong_owner=$((wrong_owner + 1))
+    elif [ "$owner" != "$pkgid" ]; then
+      log "verify: owner incorreto: $rel (owner=$owner esperado=$pkgid)"
+      wrong_owner=$((wrong_owner + 1))
+    fi
+  done <"$files"
+
+  if [ "$missing" -eq 0 ] && [ "$wrong_owner" -eq 0 ] && [ "$invalid" -eq 0 ]; then
+    log "verify: OK: $pkgid (arquivos: $total)"
+    return 0
+  fi
+  log "verify: PROBLEMAS: $pkgid (missing=$missing owner=$wrong_owner invalid=$invalid total=$total)"
+  return 1
+}
+
+verify_cmd() {
+  [ $# -ge 1 ] || die "uso: adm verify <pkg...>"
+  need_base_tools
+  rc=0
+  for tok in "$@"; do
+    if is_installed_pkgid "$tok"; then
+      verify_one_pkgid "$tok" || rc=1
+      continue
+    fi
+    if pkgid="$(state_lookup_pkgid_by_name_or_id "$tok" 2>/dev/null || true)"; then
+      [ -n "$pkgid" ] && { verify_one_pkgid "$pkgid" || rc=1; continue; }
+    fi
+    load_recipe "$tok"
+    verify_one_pkgid "$PKG_ID" || rc=1
+  done
+  return "$rc"
+}
+
+###############################################################################
+# Rebuild-all intelligent (build-id differs or archive missing)
+###############################################################################
+rebuild_all() {
+  need_base_tools
+  d="$ADM_STATE/installed"
+  [ -d "$d" ] || { log "rebuild-all: nada instalado"; return 0; }
+
+  for st in "$d"/*; do
+    [ -d "$st" ] || continue
+    pkgid="$(cat "$st/pkgid" 2>/dev/null || true)"
+    [ -n "$pkgid" ] || continue
+
+    # Need recipe to rebuild; if missing, skip
+    if ! recipe_find_path "$pkgid" >/dev/null 2>&1; then
+      log "rebuild-all: receita ausente, pulando: $pkgid"
+      continue
+    fi
+
+    load_recipe "$pkgid"
+    current_bid="$(build_id)"
+    installed_bid="$(cat "$st/buildid" 2>/dev/null || echo "")"
+    archive="$(archive_path_for_loaded_recipe)"
+
+    if [ -z "$installed_bid" ] || [ "$installed_bid" != "$current_bid" ] || [ ! -f "$archive" ]; then
+      log "rebuild-all: rebuild necessário: $pkgid (installed_bid=$installed_bid current_bid=$current_bid)"
+      build_pkg "$pkgid" >/dev/null
+    else
+      log "rebuild-all: ok/atual: $pkgid"
+    fi
+  done
+}
+
+###############################################################################
+# Git sync (recipes repo)
+###############################################################################
+git_sync() {
+  msg="${1:-}"
+  [ -d "$ADM_GIT_DIR" ] || die "sync: ADM_GIT_DIR inválido: $ADM_GIT_DIR"
+  need_cmd git
+
+  if [ -z "$msg" ]; then
+    msg="adm sync $(now_utc)"
+  fi
+
+  if [ "${ADM_DRYRUN:-0}" = "1" ]; then
+    log "DRY-RUN: git -C $ADM_GIT_DIR add -A"
+    log "DRY-RUN: git -C $ADM_GIT_DIR commit -m \"$msg\" (se houver mudanças)"
+    log "DRY-RUN: git -C $ADM_GIT_DIR push"
+    return 0
+  fi
+
+  git -C "$ADM_GIT_DIR" add -A
+  if git -C "$ADM_GIT_DIR" diff --cached --quiet; then
+    log "sync: sem mudanças para commit em $ADM_GIT_DIR"
+  else
+    git -C "$ADM_GIT_DIR" commit -m "$msg"
+  fi
+  git -C "$ADM_GIT_DIR" push
+  log "sync: ok -> $ADM_GIT_DIR"
+}
+
+###############################################################################
+# Search / Info / List / Clean / runit
+###############################################################################
+search_recipes() {
+  term="${1:-}"
+  [ -n "$term" ] || die "uso: adm search <termo>"
+  [ -d "$ADM_RECIPES" ] || die "diretório de receitas não existe: $ADM_RECIPES"
+  need_base_tools
+
+  "$ADM_FIND" "$ADM_RECIPES" -type f -name '*.recipe' 2>/dev/null | "$ADM_SORT" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#$ADM_RECIPES/}"
+    pkgid="${rel%.recipe}"
+
+    if printf '%s\n' "$pkgid" | "$ADM_GREP" -i -qF -- "$term"; then
+      printf '%s\n' "$pkgid"
+      continue
+    fi
+
+    desc="$("$ADM_SED" -n 's/^DESC=//p' "$f" 2>/dev/null | "$ADM_HEAD" -n 1 || true)"
+    if [ -n "$desc" ] && printf '%s\n' "$desc" | "$ADM_GREP" -i -qF -- "$term"; then
+      printf '%s\n' "$pkgid"
+    fi
+  done
+}
+
+info_pkg() {
+  tok="$1"
+  if is_installed_pkgid "$tok"; then
+    pkgid="$tok"
+  elif pkgid="$(state_lookup_pkgid_by_name_or_id "$tok" 2>/dev/null || true)"; then
+    [ -n "$pkgid" ] || pkgid=""
+  else
+    pkgid=""
+  fi
+
+  if [ -n "$pkgid" ]; then
+    st="$(pkg_state_dir "$pkgid")"
+    printf 'PKG_ID:      %s\n' "$pkgid"
+    printf 'Name:        %s\n' "$(cat "$st/name" 2>/dev/null || echo "")"
+    printf 'Version:     %s\n' "$(cat "$st/version" 2>/dev/null || echo "")"
+    printf 'Arch:        %s\n' "$(cat "$st/arch" 2>/dev/null || echo "")"
+    printf 'Build-ID:    %s\n' "$(cat "$st/buildid" 2>/dev/null || echo "")"
+    printf 'Installed:   %s\n' "$(cat "$st/installed_utc" 2>/dev/null || echo "")"
+    printf 'Archive:     %s\n' "$(cat "$st/archive" 2>/dev/null || echo "")"
+    printf 'Depends:     %s\n' "$(cat "$st/depends" 2>/dev/null || echo "")"
+    printf 'Files:       %s\n' "$("$ADM_WC" -l <"$st/files" 2>/dev/null || echo 0)"
+    return 0
+  fi
+
+  load_recipe "$tok"
+  printf 'PKG_ID:      %s\n' "$PKG_ID"
+  printf 'Name:        %s\n' "$NAME"
+  printf 'Version:     %s\n' "$VER"
+  printf 'Arch:        %s\n' "$ADM_ARCH"
+  printf 'Desc:        %s\n' "$DESC"
+  printf 'Depends:     %s\n' "$DEPENDS"
+  printf 'Recipe:      %s\n' "$RECIPE_PATH"
+}
+
+list_installed() {
+  d="$ADM_STATE/installed"
+  [ -d "$d" ] || exit 0
+  (cd "$d" && ls -1 2>/dev/null) | "$ADM_SORT" | while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    st="$d/$k"
+    pkgid="$(cat "$st/pkgid" 2>/dev/null || echo "$k")"
+    ver="$(cat "$st/version" 2>/dev/null || echo "?")"
+    name="$(cat "$st/name" 2>/dev/null || echo "")"
+    printf '%s %s %s\n' "$pkgid" "$ver" "$name"
+  done
+}
+
+clean_pkg() {
+  tok="$1"
+  if recipe_find_path "$tok" >/dev/null 2>&1; then
+    load_recipe "$tok"
+    k="$(pkg_key "$PKG_ID")"
+    [ -n "$k" ] || die "clean: chave vazia"
+    run "rm -rf $(printf %s "$ADM_SRC/$k-$VER" | sed 's/"/\\"/g') $(printf %s "$ADM_BUILD/$k-$VER" | sed 's/"/\\"/g') $(printf %s "$ADM_TMP/destdir/$k-$VER" | sed 's/"/\\"/g')"
+    log "clean: $PKG_ID-$VER"
+  else
+    k="$(pkg_key "$tok")"
+    [ -n "$k" ] || die "clean: chave vazia"
+    run "rm -rf $(printf %s "$ADM_SRC/$k-" | sed 's/"/\\"/g')* $(printf %s "$ADM_BUILD/$k-" | sed 's/"/\\"/g')* $(printf %s "$ADM_TMP/destdir/$k-" | sed 's/"/\\"/g')*"
+    log "clean: best-effort $tok"
+  fi
+}
+
+enable_svc() {
+  svc="$1"
+  sv="$ADM_RUNIT_SV/$svc"
+  [ -d "$sv" ] || die "serviço não encontrado em $ADM_RUNIT_SV/$svc"
+  mkd "$ADM_RUNIT_SERVICE"
+  run "ln -snf $(printf %s "$sv" | sed 's/"/\\"/g') $(printf %s "$ADM_RUNIT_SERVICE/$svc" | sed 's/"/\\"/g')"
+  log "runit: habilitado -> $ADM_RUNIT_SERVICE/$svc"
+}
+
+disable_svc() {
+  svc="$1"
+  run "rm -f $(printf %s "$ADM_RUNIT_SERVICE/$svc" | sed 's/"/\\"/g') 2>/dev/null || true"
+  log "runit: desabilitado -> $ADM_RUNIT_SERVICE/$svc"
+}
+
+usage() {
+  cat <<'EOF'
+Uso:
+  adm [opções] <comando> [args...]
+
+Opções:
+  -n, --dry-run         Mostra ações sem executar (ou ADM_DRYRUN=1)
+  --resume              Retoma builds reaproveitando dirs (ou ADM_RESUME=1)
+
+Comandos:
+  b|build <pkg...>      Build + package (cache binário com Build-ID)
+  i|install <pkg...>    Install (deps + ciclo + owner-map seguro)
+  upgrade <pkg...>      Upgrade inteligente (build primeiro; remove old-only depois)
+  r|remove <pkg...>     Remove (seguro via owner-map)
+  fetch <pkg...>        Download sources (paralelo; cache repo/)
+  verify <pkg...>       Verifica integridade (files + owner-map)
+  rebuild-all           Rebuild inteligente de instalados (build-id difere ou cache falta)
+  sync [msg]            git add/commit/push em ADM_GIT_DIR (default: recipes)
+  s|search <term>       Busca receitas
+  info <pkg>            Info receita/instalado
+  list                  Lista instalados
+  clean <pkg...>        Limpa src/build/destdir
+  enable <svc>          (runit) habilita serviço
+  disable <svc>         (runit) desabilita serviço
+
+EOF
+}
+
+###############################################################################
+# Parse global options
+###############################################################################
+RESUME_CLI=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--dry-run) ADM_DRYRUN=1; shift ;;
+    --resume) ADM_RESUME=1; RESUME_CLI=1; shift ;;
+    --) shift; break ;;
+    -*) die "opção desconhecida: $1" ;;
+    *) break ;;
+  esac
+done
+
+###############################################################################
+# Command dispatch
+###############################################################################
+cmd="${1:-}"
+[ -n "$cmd" ] || { usage; exit 1; }
+shift || true
+
+case "$cmd" in
+  h|help|-h|--help) usage ;;
+  s|search)  [ $# -ge 1 ] || die "uso: adm search <termo>"; search_recipes "$1" ;;
+  fetch)     [ $# -ge 1 ] || die "uso: adm fetch <pkg...>"; need_base_tools; fetch_pkgs_parallel "$@" ;;
+  b|build)
+    [ $# -ge 1 ] || die "uso: adm build <pkg...>"
+    need_base_tools
+    mkd "$ADM_TMP"
+    order_file="$ADM_TMP/buildorder.$$"
+    deps_resolve_order "$@" >"$order_file"
+    while IFS= read -r pkgid; do
+      [ -n "$pkgid" ] || continue
+      build_pkg "$pkgid" >/dev/null
+    done <"$order_file"
+    rm -f "$order_file" 2>/dev/null || true
+    ;;
+  i|install) [ $# -ge 1 ] || die "uso: adm install <pkg...>"; install_with_deps "$@" ;;
+  upgrade)   [ $# -ge 1 ] || die "uso: adm upgrade <pkg...>"; upgrade_cmd "$@" ;;
+  r|remove)  [ $# -ge 1 ] || die "uso: adm remove <pkg...>"; remove_cmd "$@" ;;
+  verify)    [ $# -ge 1 ] || die "uso: adm verify <pkg...>"; verify_cmd "$@" ;;
+  rebuild-all) rebuild_all ;;
+  sync)      git_sync "${1:-}" ;;
+  info)      [ $# -ge 1 ] || die "uso: adm info <pkg>"; info_pkg "$1" ;;
+  list)      list_installed ;;
+  clean)     [ $# -ge 1 ] || die "uso: adm clean <pkg...>"; for p in "$@"; do clean_pkg "$p"; done ;;
+  enable)    [ $# -ge 1 ] || die "uso: adm enable <svc>"; enable_svc "$1" ;;
+  disable)   [ $# -ge 1 ] || die "uso: adm disable <svc>"; disable_svc "$1" ;;
+  *) die "comando desconhecido: $cmd (use: adm help)" ;;
+esac
