@@ -561,34 +561,272 @@ step_busybox() {
   clean_builddir "$b"
   ensure_dir "$b"
 
+  # BusyBox builds in-tree; use a clean copy to keep source pristine and repeatable
   rm -rf "$b/src" 2>/dev/null || true
   ensure_dir "$b/src"
   (cd "$b" && tar -cf - -C "$s" . | tar -xf - -C "$b/src")
   bs="$b/src"
 
+  # Clean any prior config/build artifacts
   (cd "$bs" && make distclean >/dev/null 2>&1 || true)
 
-  # default config, then force static (common in bootstrap)
-  (cd "$bs" && make defconfig)
-  # Ensure we build statically and use correct cross compiler
-  # (busybox .config exists now)
-  if grep -q '^CONFIG_STATIC=' "$bs/.config" 2>/dev/null; then
-    sed -i 's/^CONFIG_STATIC=.*/CONFIG_STATIC=y/' "$bs/.config" 2>/dev/null || true
-  else
-    printf '\nCONFIG_STATIC=y\n' >>"$bs/.config"
-  fi
+  # Write deterministic "base system" config (for /bin,/sbin chroot usability)
+  cat >"$bs/.config" <<'EOF'
+# BusyBox Configuration
+# Base for minimal system: /bin,/sbin, static, init+shell+mount+dev+network.
 
+CONFIG_HAVE_DOT_CONFIG=y
+CONFIG_DESKTOP=y
+CONFIG_EXTRA_COMPAT=y
+CONFIG_LONG_OPTS=y
+CONFIG_SHOW_USAGE=y
+CONFIG_FEATURE_VERBOSE_USAGE=y
+CONFIG_FEATURE_COMPRESS_USAGE=y
+CONFIG_FEATURE_EDITING=y
+CONFIG_FEATURE_EDITING_VI=y
+CONFIG_FEATURE_EDITING_HISTORY=256
+CONFIG_FEATURE_TAB_COMPLETION=y
+CONFIG_FEATURE_USERNAME_COMPLETION=y
+
+CONFIG_STATIC=y
+CONFIG_PIE=n
+CONFIG_NOMMU=n
+
+CONFIG_PREFIX="./_install"
+
+CONFIG_FEATURE_SYSLOG=y
+CONFIG_FEATURE_SYSLOG_INFO=y
+CONFIG_SYSLOGD=y
+CONFIG_FEATURE_ROTATE_LOGFILE=y
+CONFIG_LOGREAD=y
+CONFIG_KLOGD=y
+
+CONFIG_INIT=y
+CONFIG_FEATURE_USE_INITTAB=y
+CONFIG_FEATURE_INIT_SCTTY=y
+CONFIG_FEATURE_INIT_SYSLOG=y
+CONFIG_HALT=y
+CONFIG_POWEROFF=y
+CONFIG_REBOOT=y
+
+CONFIG_ASH=y
+CONFIG_ASH_OPTIMIZE_FOR_SIZE=y
+CONFIG_ASH_INTERNAL_GLOB=y
+CONFIG_ASH_BASH_COMPAT=y
+CONFIG_ASH_JOB_CONTROL=y
+CONFIG_ASH_ALIAS=y
+CONFIG_ASH_GETOPTS=y
+CONFIG_ASH_PRINTF=y
+CONFIG_ASH_TEST=y
+CONFIG_ASH_CMDCMD=y
+CONFIG_ASH_EXPAND_PRMT=y
+CONFIG_SH_IS_ASH=y
+
+CONFIG_CAT=y
+CONFIG_CHGRP=y
+CONFIG_CHMOD=y
+CONFIG_CHOWN=y
+CONFIG_CP=y
+CONFIG_MV=y
+CONFIG_RM=y
+CONFIG_LN=y
+CONFIG_MKDIR=y
+CONFIG_RMDIR=y
+CONFIG_TOUCH=y
+CONFIG_SYNC=y
+CONFIG_DD=y
+CONFIG_FEATURE_DD_SIGNAL_HANDLING=y
+CONFIG_FEATURE_DD_IBS_OBS=y
+
+CONFIG_ECHO=y
+CONFIG_PRINTF=y
+CONFIG_PWD=y
+CONFIG_BASENAME=y
+CONFIG_DIRNAME=y
+CONFIG_TRUE=y
+CONFIG_FALSE=y
+CONFIG_UNAME=y
+CONFIG_DATE=y
+CONFIG_SLEEP=y
+CONFIG_USLEEP=y
+CONFIG_TIME=y
+
+CONFIG_LS=y
+CONFIG_FEATURE_LS_FILETYPES=y
+CONFIG_FEATURE_LS_FOLLOWLINKS=y
+CONFIG_FEATURE_LS_RECURSIVE=y
+CONFIG_FEATURE_LS_WIDTH=y
+CONFIG_FEATURE_LS_SORTFILES=y
+CONFIG_FEATURE_LS_TIMESTAMPS=y
+
+CONFIG_HEAD=y
+CONFIG_TAIL=y
+CONFIG_FEATURE_FANCY_HEAD=y
+CONFIG_FEATURE_FANCY_TAIL=y
+CONFIG_CUT=y
+CONFIG_PASTE=y
+CONFIG_SORT=y
+CONFIG_UNIQ=y
+CONFIG_TR=y
+CONFIG_WC=y
+CONFIG_OD=y
+CONFIG_HEXDUMP=y
+CONFIG_STRINGS=y
+
+CONFIG_TEE=y
+CONFIG_XARGS=y
+CONFIG_FIND=y
+CONFIG_FEATURE_FIND_PRINT0=y
+CONFIG_GREP=y
+CONFIG_EGREP=y
+CONFIG_FGREP=y
+CONFIG_FEATURE_GREP_EGREP_ALIAS=y
+CONFIG_SED=y
+CONFIG_AWK=y
+
+CONFIG_MOUNT=y
+CONFIG_UMOUNT=y
+CONFIG_SWAPON=y
+CONFIG_SWAPOFF=y
+CONFIG_MKFS_EXT2=y
+CONFIG_FSCK=y
+CONFIG_FEATURE_MOUNT_LOOP=y
+CONFIG_FEATURE_MOUNT_LABEL=y
+CONFIG_FEATURE_MOUNT_FSTAB=y
+CONFIG_FEATURE_MOUNT_OTHERTAB=y
+
+CONFIG_MDEV=y
+CONFIG_FEATURE_MDEV_CONF=y
+CONFIG_FEATURE_MDEV_RENAME=y
+CONFIG_FEATURE_MDEV_EXEC=y
+CONFIG_FEATURE_MDEV_LOAD_FIRMWARE=y
+
+CONFIG_LSMOD=y
+CONFIG_INSMOD=y
+CONFIG_RMMOD=y
+CONFIG_MODPROBE=y
+CONFIG_FEATURE_MODPROBE_BLACKLIST=y
+CONFIG_FEATURE_MODUTILS_ALIAS=y
+
+CONFIG_SYSCTL=y
+CONFIG_DMESG=y
+
+CONFIG_PS=y
+CONFIG_TOP=y
+CONFIG_FREE=y
+CONFIG_UPTIME=y
+CONFIG_KILL=y
+CONFIG_KILLALL=y
+CONFIG_PKILL=y
+CONFIG_PGREP=y
+CONFIG_RENICE=y
+CONFIG_NICE=y
+CONFIG_NOHUP=y
+
+CONFIG_WATCH=y
+CONFIG_TIMEOUT=y
+
+CONFIG_ID=y
+CONFIG_WHOAMI=y
+CONFIG_WHO=y
+CONFIG_GROUPS=y
+CONFIG_ADDUSER=y
+CONFIG_ADDGROUP=y
+CONFIG_DELUSER=y
+CONFIG_DELGROUP=y
+CONFIG_PASSWD=y
+CONFIG_SU=y
+CONFIG_LOGIN=y
+CONFIG_GETTY=y
+
+CONFIG_IFCONFIG=y
+CONFIG_ROUTE=y
+CONFIG_IP=y
+CONFIG_FEATURE_IP_ADDRESS=y
+CONFIG_FEATURE_IP_LINK=y
+CONFIG_FEATURE_IP_ROUTE=y
+CONFIG_FEATURE_IP_NEIGH=y
+
+CONFIG_PING=y
+CONFIG_PING6=y
+CONFIG_TRACEROUTE=y
+CONFIG_TRACEROUTE6=y
+CONFIG_NETSTAT=y
+CONFIG_SS=y
+CONFIG_NSLOOKUP=y
+CONFIG_WGET=y
+CONFIG_FEATURE_WGET_LONG_OPTIONS=y
+CONFIG_FEATURE_WGET_STATUSBAR=y
+CONFIG_FEATURE_WGET_TIMEOUT=y
+
+CONFIG_TELNET=y
+CONFIG_TELNETD=y
+CONFIG_FTPGET=y
+CONFIG_FTPPUT=y
+
+CONFIG_UDHCPC=y
+CONFIG_FEATURE_UDHCPC_ARPING=y
+CONFIG_FEATURE_UDHCPC_SANITIZEOPT=y
+
+CONFIG_TAR=y
+CONFIG_FEATURE_TAR_LONG_OPTIONS=y
+CONFIG_FEATURE_TAR_CREATE=y
+CONFIG_FEATURE_TAR_GZIP=y
+CONFIG_FEATURE_TAR_BZIP2=y
+CONFIG_FEATURE_TAR_XZ=y
+CONFIG_GUNZIP=y
+CONFIG_GZIP=y
+CONFIG_BUNZIP2=y
+CONFIG_UNXZ=y
+CONFIG_XZCAT=y
+
+CONFIG_VI=y
+CONFIG_FEATURE_VI_MAX_LEN=4096
+CONFIG_NANO=y
+
+CONFIG_TEST=y
+CONFIG_FEATURE_TEST_64=y
+CONFIG_EXPR=y
+CONFIG_DC=y
+CONFIG_HOSTNAME=y
+CONFIG_CLEAR=y
+CONFIG_RESET=y
+
+CONFIG_FEATURE_SH_STANDALONE=y
+EOF
+
+  # Normalize config for this BusyBox version (auto-accept defaults for new symbols)
+  (cd "$bs" && yes "" | make oldconfig >/dev/null)
+
+  # Build (static) with cross compiler against sysroot
   (cd "$bs" && \
     make -j"$MAKEJOBS" \
       CROSS_COMPILE="$TARGET-" \
       CC="$TARGET-gcc --sysroot=$SYSROOT" \
       ARCH=x86_64)
 
-  # BusyBox uses CONFIG_PREFIX. Do NOT mix DESTDIR + CONFIG_PREFIX.
-  (cd "$bs" && \
-    make CONFIG_PREFIX="$SYSROOT" install)
+  # Install into sysroot. BusyBox uses CONFIG_PREFIX; do NOT mix DESTDIR.
+  (cd "$bs" && make CONFIG_PREFIX="$SYSROOT" install)
 
+  # --- Minimal policy checks for chroot usability (/bin,/sbin) ---
   [ -x "$SYSROOT/bin/busybox" ] || die "busybox: missing $SYSROOT/bin/busybox"
+
+  # Ensure /bin/sh exists (symlink created by install if the applet is enabled)
+  if [ ! -e "$SYSROOT/bin/sh" ]; then
+    die "busybox: missing /bin/sh in sysroot (expected symlink to busybox)"
+  fi
+
+  # Ensure applet links exist in /bin and /sbin (at least some)
+  if ! find "$SYSROOT/bin" "$SYSROOT/sbin" -maxdepth 1 -type l 2>/dev/null | grep -q .; then
+    die "busybox: no applet symlinks found in /bin or /sbin"
+  fi
+
+  # Ensure the busybox binary actually contains 'sh' applet
+  if [ -x "$SYSROOT/bin/busybox" ]; then
+    if ! "$SYSROOT/bin/busybox" --list 2>/dev/null | awk '$0=="sh"{found=1} END{exit found?0:1}'; then
+      die "busybox: 'sh' applet not present (check config)"
+    fi
+  fi
 
   stamp_set "busybox"
 }
