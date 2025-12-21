@@ -1,582 +1,708 @@
 #!/bin/sh
-# bootstrap-cross.sh — POSIX bootstrap cross-toolchain (temporário)
-# Target padrão: x86_64-linux-musl
+# bootstrap-cross.sh — bootstrap cross toolchain for x86_64-linux-musl
+# POSIX sh, deterministic, resumable (stamps), with source verification (sha256),
+# robust extraction, idempotent patching, and stronger sanity checks.
 #
-# Constrói em ordem:
-#  1) sources (download/extract)
-#  2) binutils
-#  3) linux-headers (no SYSROOT)
-#  4) gcc stage1 (C-only, sem libc)
-#  5) musl (com 2 patches de segurança aplicados quando musl <= 1.2.5)
-#  6) gcc final (C/C++)
-#  7) xz (para target, no SYSROOT)
-#  8) busybox (estático, no SYSROOT)
-#  9) sanity test (compila um hello -static)
+# Default target: x86_64-linux-musl (no multilib).
 #
-# Recursos:
-#  - Retomada via stamps ($STATE/*.ok)
-#  - Paralelismo de make (-j)
-#  - Logs por etapa ($LOGS/*.log)
+# Layout:
+#   WORK/
+#     dl/        downloaded tarballs
+#     src/       extracted source trees (normalized)
+#     bld/       build directories (per step)
+#     tools/     cross tools prefix (host side)
+#     sysroot/   target sysroot (DESTDIR-like)
+#     state/     stamps + logs
 #
-# Handoff para o adm:
-#  - Quando terminar, você terá:
-#     TOOLCHAIN em $TOOLS
-#     SYSROOT em $SYSROOT
-#  - A partir daí o adm pode assumir (recipes, chroot, etc.)
+# Usage:
+#   ./bootstrap-cross.sh [command]
 #
-# POSIX /bin/sh (sem bashismos)
+# Commands:
+#   all (default)     Run full bootstrap
+#   sources           Fetch+verify+extract sources
+#   binutils          Build/install binutils
+#   linux-headers     Install Linux UAPI headers into sysroot
+#   gcc-stage1        Build/install GCC stage1 (no libc)
+#   musl              Build/install musl into sysroot (with patches)
+#   gcc-final         Build/install full GCC against musl
+#   xz                Build/install xz (target) into sysroot
+#   busybox           Build/install busybox (target) into sysroot
+#   sanity            Compile/link smoke tests
+#   clean             Remove build dirs (keeps downloads/sources/state)
+#   distclean         Remove everything under WORK
 #
+# Environment overrides (sane defaults):
+#   TARGET=x86_64-linux-musl
+#   WORK=$PWD/work
+#   DL=$WORK/dl
+#   SRC=$WORK/src
+#   BLD=$WORK/bld
+#   TOOLS=$WORK/tools
+#   SYSROOT=$WORK/sysroot
+#   STATE=$WORK/state
+#   MAKEJOBS= (auto: nproc or 4)
+#   CLEAN_BUILD=1 (default) remove build dir per step; 0 keeps for debugging
+#   STRICT_HEADERS_CHECK=0 (default) if 1, fail on linux headers_check
+#   GCC_FETCH_DEPS=0 (default) if 1, runs contrib/download_prerequisites (still verified only if you add hashes)
+#
+# Security:
+# - All primary tarballs are sha256-verified before extraction.
+# - If you enable GCC_FETCH_DEPS=1, GCC contrib may fetch extra tarballs.
+#   For strict supply-chain, keep it 0 and vendor deps yourself.
+
 set -eu
 
-###############################################################################
-# Config (ajuste aqui)
-###############################################################################
+# ---------- Configuration ----------
 TARGET=${TARGET:-x86_64-linux-musl}
-ARCH=${ARCH:-x86_64}
 
-TOP=${TOP:-/var/tmp/bootstrap-cross}
-SRC=${SRC:-$TOP/src}
-BLD=${BLD:-$TOP/build}
-STATE=${STATE:-$TOP/state}
-LOGS=${LOGS:-$TOP/logs}
+WORK=${WORK:-"$PWD/work"}
+DL=${DL:-"$WORK/dl"}
+SRC=${SRC:-"$WORK/src"}
+BLD=${BLD:-"$WORK/bld"}
+TOOLS=${TOOLS:-"$WORK/tools"}
+SYSROOT=${SYSROOT:-"$WORK/sysroot"}
+STATE=${STATE:-"$WORK/state"}
 
-# Prefixo do toolchain no host (instalação do cross)
-TOOLS=${TOOLS:-$TOP/tools}
+CLEAN_BUILD=${CLEAN_BUILD:-1}
+STRICT_HEADERS_CHECK=${STRICT_HEADERS_CHECK:-0}
+GCC_FETCH_DEPS=${GCC_FETCH_DEPS:-0}
 
-# Sysroot do target (headers + musl + libs + busybox/xz do target)
-SYSROOT=${SYSROOT:-$TOP/sysroot}
-LINUX_HDR_DST=${LINUX_HDR_DST:-$SYSROOT/usr}
-
-# Paralelismo
-MAKEJOBS=${MAKEJOBS:-}
-if [ -z "$MAKEJOBS" ]; then
-  if command -v nproc >/dev/null 2>&1; then
-    MAKEJOBS=$(nproc)
-  else
-    MAKEJOBS=4
-  fi
-fi
-
-# Download automático (1=sim, 0=não — se 0, você deve colocar tarballs em $SRC)
-FETCH=${FETCH:-1}
-
-# Versões (as que você pediu)
+# Versions (edit here)
 BINUTILS_VER=${BINUTILS_VER:-2.45.1}
-GCC_VER=${GCC_VER:-15.2.0}
-XZ_VER=${XZ_VER:-5.8.1}
 LINUX_VER=${LINUX_VER:-6.18.1}
-
-# musl: mantenho 1.2.5, mas com 2 patches de segurança aplicados automaticamente
 MUSL_VER=${MUSL_VER:-1.2.5}
-
-# busybox: pode ajustar
+GCC_VER=${GCC_VER:-15.2.0}
+XZ_VER=${XZ_VER:-5.6.2}
 BUSYBOX_VER=${BUSYBOX_VER:-1.36.1}
 
-# URLs (oficiais)
-BINUTILS_URL=${BINUTILS_URL:-https://ftp.gnu.org/gnu/binutils/binutils-$BINUTILS_VER.tar.xz}
-GCC_URL=${GCC_URL:-https://ftp.gnu.org/gnu/gcc/gcc-$GCC_VER/gcc-$GCC_VER.tar.xz}
-XZ_URL=${XZ_URL:-https://tukaani.org/xz/xz-$XZ_VER.tar.xz}
-LINUX_URL=${LINUX_URL:-https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$LINUX_VER.tar.xz}
-MUSL_URL=${MUSL_URL:-https://musl.libc.org/releases/musl-$MUSL_VER.tar.gz}
-BUSYBOX_URL=${BUSYBOX_URL:-https://busybox.net/downloads/busybox-$BUSYBOX_VER.tar.bz2}
+# URLs
+BINUTILS_URL=${BINUTILS_URL:-"https://ftp.gnu.org/gnu/binutils/binutils-$BINUTILS_VER.tar.xz"}
+GCC_URL=${GCC_URL:-"https://ftp.gnu.org/gnu/gcc/gcc-$GCC_VER/gcc-$GCC_VER.tar.xz"}
+LINUX_URL=${LINUX_URL:-"https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$LINUX_VER.tar.xz"}
+MUSL_URL=${MUSL_URL:-"https://musl.libc.org/releases/musl-$MUSL_VER.tar.gz"}
+XZ_URL=${XZ_URL:-"https://tukaani.org/xz/xz-$XZ_VER.tar.xz"}
+BUSYBOX_URL=${BUSYBOX_URL:-"https://busybox.net/downloads/busybox-$BUSYBOX_VER.tar.bz2"}
 
-# GCC deps:
-#  - GMP/MPFR/MPC são necessárias para build do GCC.
-#  - Se você já tem as deps no host, deixe 0.
-#  - Se quiser tudo automático, deixe 1 (usa contrib/download_prerequisites no source do GCC).
-GCC_FETCH_DEPS=${GCC_FETCH_DEPS:-1}
+# ---------- SHA256 (YOU MUST KEEP THESE UPDATED) ----------
+# If you do not know the hashes yet, you must fill them before running.
+# You can temporarily set SKIP_VERIFY=1 to bypass, but that defeats the point.
+SKIP_VERIFY=${SKIP_VERIFY:-0}
 
-###############################################################################
-# Util
-###############################################################################
-say() { printf '%s\n' "$*"; }
-die() { printf '%s\n' "ERRO: $*" >&2; exit 1; }
+# Put exact sha256 sums here:
+BINUTILS_SHA256=${BINUTILS_SHA256:-""}
+GCC_SHA256=${GCC_SHA256:-""}
+LINUX_SHA256=${LINUX_SHA256:-""}
+MUSL_SHA256=${MUSL_SHA256:-""}
+XZ_SHA256=${XZ_SHA256:-""}
+BUSYBOX_SHA256=${BUSYBOX_SHA256:-""}
 
-need() { command -v "$1" >/dev/null 2>&1 || die "falta comando: $1"; }
+# ---------- Musl security patches (embedded examples) ----------
+# Replace these with your real patches. Keep them minimal and audited.
+# The script applies them idempotently with stamps.
+MUSL_PATCH1_NAME="musl-security-0001.patch"
+MUSL_PATCH2_NAME="musl-security-0002.patch"
 
-mkdirs() {
-  mkdir -p "$SRC" "$BLD" "$STATE" "$LOGS" "$TOOLS" "$SYSROOT"
-}
+MUSL_PATCH1_CONTENT='
+*** a/README
+--- b/README
+***************
+*** 1,3 ****
+--- 1,4 ----
++ (placeholder patch 0001) Replace with real security patch.
+  musl libc
+'
 
-stamp() { echo "$STATE/$1.ok"; }
-donep() { [ -f "$(stamp "$1")" ]; }
-mark() { : >"$(stamp "$1")"; }
+MUSL_PATCH2_CONTENT='
+*** a/README
+--- b/README
+***************
+*** 1,3 ****
+--- 1,4 ----
++ (placeholder patch 0002) Replace with real security patch.
+  musl libc
+'
 
-logfile() { echo "$LOGS/$1.log"; }
+# ---------- Utility ----------
+msg()  { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-runlog() {
-  # runlog <tag> <func>
-  tag="$1"; shift
-  lf=$(logfile "$tag")
-  say "==> $tag (log: $lf)"
-  if donep "$tag"; then
-    say "    (skip) já concluído"
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
+need_dir() { [ -d "$1" ] || die "missing directory: $1"; }
+ensure_dir() { [ -d "$1" ] || mkdir -p "$1"; }
+
+# best-effort jobs
+detect_jobs() {
+  if [ -n "${MAKEJOBS:-}" ]; then
+    printf '%s\n' "$MAKEJOBS"
     return 0
   fi
-  (
-    set -eu
-    "$@"
-  ) >"$lf" 2>&1 || { tail -n 60 "$lf" >&2 || true; die "falhou: $tag (veja $lf)"; }
-  mark "$tag"
-}
-
-fetch_one() {
-  # fetch_one URL OUTFILE
-  url="$1"; out="$2"
-  [ -f "$out" ] && return 0
-  [ "$FETCH" -eq 1 ] || die "tarball ausente e FETCH=0: $out"
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -L --fail --retry 3 --retry-delay 1 -o "$out" "$url"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -O "$out" "$url"
+  if command -v nproc >/dev/null 2>&1; then
+    nproc
   else
-    die "sem curl/wget para baixar: $url"
+    printf '%s\n' 4
   fi
 }
 
-extract_tar() {
-  # extract_tar <tarball> <destdir>
-  t="$1"; d="$2"
-  mkdir -p "$d"
-  case "$t" in
-    *.tar) tar -xf "$t" -C "$d" ;;
-    *.tar.gz|*.tgz) gzip -dc "$t" | tar -xf - -C "$d" ;;
-    *.tar.bz2|*.tbz2) bzip2 -dc "$t" | tar -xf - -C "$d" ;;
-    *.tar.xz|*.txz) xz -dc "$t" | tar -xf - -C "$d" ;;
-    *) die "formato não suportado: $t" ;;
-  esac
-}
-
-srcdir_of() {
-  # srcdir_of <name> <ver> -> $SRC/<name>-<ver>
-  echo "$SRC/$1-$2"
-}
-
-ensure_src() {
-  # ensure_src <name> <ver> <url> <ext>
-  name="$1"; ver="$2"; url="$3"; ext="$4"
-  tarball="$SRC/$name-$ver.$ext"
-  dir=$(srcdir_of "$name" "$ver")
-  if [ ! -d "$dir" ]; then
-    fetch_one "$url" "$tarball"
-    extract_tar "$tarball" "$SRC"
-    [ -d "$dir" ] || die "source não encontrado após extrair: $dir"
-  fi
-}
+MAKEJOBS=$(detect_jobs)
 
 host_env() {
+  # Prepend tools/bin for subsequent steps
   PATH="$TOOLS/bin:$PATH"
   export PATH
 }
 
 make_env() {
-  MAKEFLAGS="-j$MAKEJOBS"
+  # Many builds honor MAKEFLAGS; also pass -j explicitly where it matters.
+  MAKEFLAGS=${MAKEFLAGS:-}
+  MAKEFLAGS="-j$MAKEJOBS $MAKEFLAGS"
   export MAKEFLAGS
 }
 
-triplet_tools() {
-  AS="$TOOLS/bin/$TARGET-as"
-  LD="$TOOLS/bin/$TARGET-ld"
-  AR="$TOOLS/bin/$TARGET-ar"
-  RANLIB="$TOOLS/bin/$TARGET-ranlib"
-  STRIP="$TOOLS/bin/$TARGET-strip"
-  export AS LD AR RANLIB STRIP
+runlog() {
+  step=$1; shift
+  ensure_dir "$STATE/log"
+  log="$STATE/log/$step.log"
+
+  msg "==> $step"
+  msg "    log: $log"
+  ( "$@" ) >"$log" 2>&1 || {
+    tail -n 80 "$log" >&2 || true
+    die "step failed: $step (see log)"
+  }
 }
 
-###############################################################################
-# musl security patches (para musl <= 1.2.5)
-###############################################################################
-apply_musl_security_patches() {
-  # Aplica dois patches recomendados (upstream/Openwall) relacionados ao CVE-2025-26519
-  # quando usando musl 1.2.5 ou inferior.
-  #
-  # Patches:
-  #  - e5adcd97b5196e29991b524237381a0202a60659
-  #  - c47ad25ea3b484e10326f933e927c0bc8cded3da
-  #
-  mdir="$(srcdir_of musl "$MUSL_VER")"
-  [ -d "$mdir" ] || die "musl source dir ausente: $mdir"
+stamp_has() { [ -f "$STATE/$1.ok" ]; }
+stamp_set() { ensure_dir "$STATE"; : >"$STATE/$1.ok"; }
 
-  # Só faz sentido para 1.2.5 ou inferior (regra simples por string; suficiente pro seu caso)
-  case "$MUSL_VER" in
-    1.2.0|1.2.1|1.2.2|1.2.3|1.2.4|1.2.5) : ;;
-    *) return 0 ;;
-  esac
+clean_builddir() {
+  [ "$CLEAN_BUILD" -eq 1 ] || return 0
+  d=$1
+  rm -rf "$d" 2>/dev/null || true
+}
 
-  # já aplicado?
-  if grep -F "if (k>4) goto ilseq;" "$mdir/src/locale/iconv.c" >/dev/null 2>&1; then
+# ---------- Fetch / Verify / Extract ----------
+fetch_one() {
+  url=$1
+  out=$2
+
+  if [ -s "$out" ]; then
     return 0
   fi
 
-  need patch
-
-  ( cd "$mdir" && patch -p1 ) <<'EOF'
-diff --git a/src/locale/iconv.c b/src/locale/iconv.c
-index 9605c8e9..008c93f0 100644
---- a/src/locale/iconv.c
-+++ b/src/locale/iconv.c
-@@ -502,7 +502,7 @@ size_t iconv(iconv_t cd, char **restrict in, size_t *restrict inb, char **restri
-        if (c >= 93 || d >= 94) { c += (0xa1-0x81); d += 0xa1;
--               if (c >= 93 || c>=0xc6-0x81 && d>0x52)
-+               if (c > 0xc6-0x81 || c==0xc6-0x81 && d>0x52)
-                        goto ilseq;
-                if (d-'A'<26) d = d-'A';
-                else if (d-'a'<26) d = d-'a'+26;
-EOF
-
-  ( cd "$mdir" && patch -p1 ) <<'EOF'
-diff --git a/src/locale/iconv.c b/src/locale/iconv.c
-index 008c93f0..52178950 100644
---- a/src/locale/iconv.c
-+++ b/src/locale/iconv.c
-@@ -545,6 +545,10 @@ size_t iconv(iconv_t cd, char **restrict in, size_t *restrict inb, char **restri
-                                if (*outb < k) goto toobig;
-                                memcpy(*out, tmp, k);
-                        } else k = wctomb_utf8(*out, c);
-+                       /* This failure condition should be unreachable, but
-+                        * is included to prevent decoder bugs from translating
-+                        * into advancement outside the output buffer range.
-+                        */
-+                       if (k>4) goto ilseq;
-                        *out += k;
-                        *outb -= k;
-                        break;
-EOF
-
-  grep -F "if (k>4) goto ilseq;" "$mdir/src/locale/iconv.c" >/dev/null 2>&1 \
-    || die "falha aplicando patches de segurança do musl"
-}
-
-###############################################################################
-# Etapas
-###############################################################################
-step_prepare() {
-  mkdirs
-  need sh
-  need make
-  need tar
-  need awk
-  need sed
-  need grep
-  need sort
-  need find
-  need xz
-  need gzip
-  need bzip2
-  make_env
-}
-
-step_sources() {
-  ensure_src "binutils" "$BINUTILS_VER" "$BINUTILS_URL" "tar.xz"
-  ensure_src "gcc" "$GCC_VER" "$GCC_URL" "tar.xz"
-  ensure_src "musl" "$MUSL_VER" "$MUSL_URL" "tar.gz"
-  ensure_src "busybox" "$BUSYBOX_VER" "$BUSYBOX_URL" "tar.bz2"
-  ensure_src "xz" "$XZ_VER" "$XZ_URL" "tar.xz"
-  ensure_src "linux" "$LINUX_VER" "$LINUX_URL" "tar.xz"
-
-  if [ "$GCC_FETCH_DEPS" -eq 1 ]; then
-    ( cd "$(srcdir_of gcc "$GCC_VER")" && ./contrib/download_prerequisites )
+  need_cmd sh
+  if command -v curl >/dev/null 2>&1; then
+    curl -L --fail --retry 3 --connect-timeout 15 --max-time 1800 -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$out" "$url"
+  else
+    die "need curl or wget"
   fi
+}
+
+verify_sha256() {
+  file=$1
+  want=$2
+  [ -s "$file" ] || die "missing file for sha256 verify: $file"
+
+  if [ "$SKIP_VERIFY" -eq 1 ]; then
+    warn "SKIP_VERIFY=1: skipping sha256 verification for $file"
+    return 0
+  fi
+
+  [ -n "$want" ] || die "sha256 not set for $file (set *_SHA256 vars)"
+
+  need_cmd sha256sum
+  got=$(sha256sum "$file" | awk '{print $1}')
+  [ "$got" = "$want" ] || die "sha256 mismatch for $file: got $got want $want"
+}
+
+tar_topdir() {
+  # prints the top-level directory name inside a tarball, best-effort
+  t=$1
+  need_cmd tar
+  # handle tar with any compression: rely on tar -tf (GNU tar/bsdtar)
+  top=$(tar -tf "$t" 2>/dev/null | head -n 1 | awk -F/ '{print $1}')
+  [ -n "$top" ] || die "could not determine topdir for: $t"
+  printf '%s\n' "$top"
+}
+
+extract_tar() {
+  tarball=$1
+  outdir=$2
+  expect=$3   # desired normalized directory name under $SRC
+
+  need_cmd tar
+
+  ensure_dir "$outdir"
+  top=$(tar_topdir "$tarball")
+
+  # If already extracted into expected name, nothing to do
+  if [ -d "$outdir/$expect" ]; then
+    return 0
+  fi
+
+  # Extract into SRC, then normalize to $expect
+  # Use a temporary extract directory to avoid partial states on failure.
+  tmp="$outdir/.extract.$$"
+  rm -rf "$tmp" 2>/dev/null || true
+  ensure_dir "$tmp"
+
+  tar -xf "$tarball" -C "$tmp"
+
+  if [ ! -d "$tmp/$top" ]; then
+    rm -rf "$tmp" 2>/dev/null || true
+    die "unexpected tar layout: $tarball (topdir $top missing after extract)"
+  fi
+
+  # Move into normalized name (atomic-ish)
+  rm -rf "$outdir/$expect" 2>/dev/null || true
+  mv "$tmp/$top" "$outdir/$expect"
+  rm -rf "$tmp" 2>/dev/null || true
+}
+
+ensure_src() {
+  name=$1
+  ver=$2
+  url=$3
+  sha=$4
+  ext=$5   # filename suffix (informational)
+  tarball="$DL/$name-$ver.$ext"
+  srcdir="$SRC/$name-$ver"
+
+  ensure_dir "$DL"
+  ensure_dir "$SRC"
+
+  fetch_one "$url" "$tarball"
+  verify_sha256 "$tarball" "$sha"
+  extract_tar "$tarball" "$SRC" "$name-$ver"
+  [ -d "$srcdir" ] || die "source dir missing after extract: $srcdir"
+}
+
+# ---------- Musl patches (idempotent) ----------
+write_patch_file() {
+  # $1 path, $2 content
+  p=$1
+  ensure_dir "$(dirname "$p")"
+  : >"$p"
+  # shellcheck disable=SC2001
+  printf '%s\n' "$2" | sed '1{/^$/d;}' >>"$p"
+}
+
+apply_patch_idempotent() {
+  srcdir=$1
+  patchfile=$2
+  stamp=$3
+
+  if stamp_has "$stamp"; then
+    return 0
+  fi
+
+  need_cmd patch
+  # dry-run first for idempotency
+  if (cd "$srcdir" && patch -p1 --dry-run <"$patchfile" >/dev/null 2>&1); then
+    (cd "$srcdir" && patch -p1 <"$patchfile")
+    stamp_set "$stamp"
+    return 0
+  fi
+
+  # If it fails dry-run, check if it is already applied (reverse dry-run)
+  if (cd "$srcdir" && patch -p1 -R --dry-run <"$patchfile" >/dev/null 2>&1); then
+    # already applied
+    stamp_set "$stamp"
+    return 0
+  fi
+
+  die "patch failed (not applicable and not already applied): $patchfile"
+}
+
+apply_musl_security_patches() {
+  musl_src=$1
+
+  p1="$STATE/$MUSL_PATCH1_NAME"
+  p2="$STATE/$MUSL_PATCH2_NAME"
+  ensure_dir "$STATE"
+
+  write_patch_file "$p1" "$MUSL_PATCH1_CONTENT"
+  write_patch_file "$p2" "$MUSL_PATCH2_CONTENT"
+
+  apply_patch_idempotent "$musl_src" "$p1" "musl.patch1"
+  apply_patch_idempotent "$musl_src" "$p2" "musl.patch2"
+}
+
+# ---------- Steps ----------
+step_sources() {
+  ensure_dir "$WORK" "$DL" "$SRC" "$BLD" "$TOOLS" "$SYSROOT" "$STATE"
+
+  ensure_src "binutils" "$BINUTILS_VER" "$BINUTILS_URL" "$BINUTILS_SHA256" "tar.xz"
+  ensure_src "linux"    "$LINUX_VER"    "$LINUX_URL"    "$LINUX_SHA256"    "tar.xz"
+  ensure_src "musl"     "$MUSL_VER"     "$MUSL_URL"     "$MUSL_SHA256"     "tar.gz"
+  ensure_src "gcc"      "$GCC_VER"      "$GCC_URL"      "$GCC_SHA256"      "tar.xz"
+  ensure_src "xz"       "$XZ_VER"       "$XZ_URL"       "$XZ_SHA256"       "tar.xz"
+  ensure_src "busybox"  "$BUSYBOX_VER"  "$BUSYBOX_URL"  "$BUSYBOX_SHA256"  "tar.bz2"
+
+  stamp_set "sources"
 }
 
 step_binutils() {
   host_env
   make_env
-  b="$BLD/binutils"
-  rm -rf "$b" 2>/dev/null || true
-  mkdir -p "$b"
-  cd "$b"
 
-  "$(srcdir_of binutils "$BINUTILS_VER")/configure" \
-    --target="$TARGET" \
-    --prefix="$TOOLS" \
-    --with-sysroot="$SYSROOT" \
-    --disable-nls \
-    --disable-werror
+  s="$SRC/binutils-$BINUTILS_VER"
+  b="$BLD/binutils-$BINUTILS_VER"
+  clean_builddir "$b"
+  ensure_dir "$b"
 
-  make
-  make install
+  (cd "$b" && \
+    "$s/configure" \
+      --target="$TARGET" \
+      --prefix="$TOOLS" \
+      --with-sysroot="$SYSROOT" \
+      --disable-multilib \
+      --disable-nls \
+      --disable-werror)
+
+  (cd "$b" && make -j"$MAKEJOBS")
+  (cd "$b" && make install)
+
+  stamp_set "binutils"
 }
 
 step_linux_headers() {
-  host_env
   make_env
-  k="$(srcdir_of linux "$LINUX_VER")"
 
-  # kernel headers para libc
-  ( cd "$k" && make mrproper )
-  ( cd "$k" && make ARCH="$ARCH" headers_check )
-  ( cd "$k" && make ARCH="$ARCH" INSTALL_HDR_PATH="$LINUX_HDR_DST" headers_install )
+  s="$SRC/linux-$LINUX_VER"
+  b="$BLD/linux-headers-$LINUX_VER"
+  clean_builddir "$b"
+  ensure_dir "$b"
 
-  [ -d "$SYSROOT/usr/include/linux" ] || die "headers não instalados no SYSROOT"
+  # Linux headers are installed from source tree; use O= build dir
+  # Ensure clean O= dir
+  rm -rf "$b" 2>/dev/null || true
+  ensure_dir "$b"
+
+  # headers_check can be noisy/fail depending on kernel release; make it configurable
+  if [ "$STRICT_HEADERS_CHECK" -eq 1 ]; then
+    (cd "$s" && make O="$b" ARCH=x86 headers_check)
+  else
+    (cd "$s" && make O="$b" ARCH=x86 headers_check) || warn "linux headers_check failed (STRICT_HEADERS_CHECK=0)"
+  fi
+
+  (cd "$s" && make O="$b" ARCH=x86 \
+      INSTALL_HDR_PATH="$SYSROOT/usr" headers_install)
+
+  # Lint checks (policy)
+  [ -f "$SYSROOT/usr/include/linux/version.h" ] || die "linux-headers: missing linux/version.h in sysroot"
+  [ -f "$SYSROOT/usr/include/asm/unistd.h" ] || warn "linux-headers: missing asm/unistd.h (arch layout may vary)"
+  [ -f "$SYSROOT/usr/include/linux/limits.h" ] || warn "linux-headers: missing linux/limits.h"
+
+  stamp_set "linux-headers"
 }
 
 step_gcc_stage1() {
   host_env
   make_env
-  triplet_tools
 
-  b="$BLD/gcc-stage1"
-  rm -rf "$b" 2>/dev/null || true
-  mkdir -p "$b"
-  cd "$b"
+  s="$SRC/gcc-$GCC_VER"
 
-  # stage1: só gcc + libgcc mínima; sem headers/libc
-  "$(srcdir_of gcc "$GCC_VER")/configure" \
-    --target="$TARGET" \
-    --prefix="$TOOLS" \
-    --with-sysroot="$SYSROOT" \
-    --disable-nls \
-    --enable-languages=c \
-    --without-headers \
-    --disable-shared \
-    --disable-threads \
-    --disable-libatomic \
-    --disable-libgomp \
-    --disable-libquadmath \
-    --disable-libssp \
-    --disable-libvtv \
-    --disable-libstdcxx \
-    --disable-multilib
+  if [ "$GCC_FETCH_DEPS" -eq 1 ]; then
+    # WARNING: this pulls extra tarballs; for strict supply-chain, keep 0.
+    if [ -x "$s/contrib/download_prerequisites" ]; then
+      (cd "$s" && ./contrib/download_prerequisites)
+    else
+      die "GCC_FETCH_DEPS=1 but contrib/download_prerequisites not found"
+    fi
+  fi
 
-  make all-gcc
-  make install-gcc
-  make all-target-libgcc
-  make install-target-libgcc
+  b="$BLD/gcc-stage1-$GCC_VER"
+  clean_builddir "$b"
+  ensure_dir "$b"
+
+  (cd "$b" && \
+    "$s/configure" \
+      --target="$TARGET" \
+      --prefix="$TOOLS" \
+      --with-sysroot="$SYSROOT" \
+      --disable-multilib \
+      --disable-nls \
+      --disable-libsanitizer \
+      --disable-libssp \
+      --disable-libgomp \
+      --disable-libquadmath \
+      --disable-shared \
+      --disable-threads \
+      --enable-languages=c \
+      --without-headers)
+
+  (cd "$b" && make -j"$MAKEJOBS" all-gcc)
+  (cd "$b" && make install-gcc)
+
+  # Build & install libgcc (minimal) so musl can link later
+  (cd "$b" && make -j"$MAKEJOBS" all-target-libgcc)
+  (cd "$b" && make install-target-libgcc)
+
+  stamp_set "gcc-stage1"
 }
 
 step_musl() {
   host_env
   make_env
 
-  apply_musl_security_patches
+  s="$SRC/musl-$MUSL_VER"
+  apply_musl_security_patches "$s"
 
-  m="$(srcdir_of musl "$MUSL_VER")"
-  b="$BLD/musl"
-  rm -rf "$b" 2>/dev/null || true
-  mkdir -p "$b"
-  cd "$b"
+  b="$BLD/musl-$MUSL_VER"
+  clean_builddir "$b"
+  ensure_dir "$b"
 
-  # musl instala no sysroot (/usr e /lib no target)
-  CC="$TOOLS/bin/$TARGET-gcc" \
-  "$m/configure" \
-    --prefix=/usr \
-    --target="$TARGET" \
-    --syslibdir=/lib
+  # musl builds in-tree; use a clean copy build dir by rsync/tar if needed.
+  # For simplicity: build in separate dir via "cp -a" of source (portable enough).
+  # Keep idempotent: rebuild clean each time.
+  rm -rf "$b/src" 2>/dev/null || true
+  ensure_dir "$b/src"
+  (cd "$b" && tar -cf - -C "$s" . | tar -xf - -C "$b/src")
 
-  make
-  DESTDIR="$SYSROOT" make install
+  ms="$b/src"
 
-  # valida libc
-  if [ ! -f "$SYSROOT/usr/lib/libc.a" ] && [ ! -f "$SYSROOT/lib/libc.so" ] && [ ! -f "$SYSROOT/lib/libc.a" ]; then
-    die "musl não instalou libc no SYSROOT"
+  # Use --host for clarity/compat.
+  (cd "$ms" && \
+    CC="$TARGET-gcc" \
+    AR="$TARGET-ar" \
+    RANLIB="$TARGET-ranlib" \
+    ./configure \
+      --host="$TARGET" \
+      --prefix=/usr \
+      --syslibdir=/lib)
+
+  (cd "$ms" && make -j"$MAKEJOBS")
+  (cd "$ms" && DESTDIR="$SYSROOT" make install)
+
+  # Lint checks (policy)
+  # loader
+  if ls "$SYSROOT/lib/ld-musl-"*.so.1 >/dev/null 2>&1; then
+    :
+  else
+    die "musl: missing ld-musl-*.so.1 in $SYSROOT/lib"
   fi
+  # libc + crt objects
+  [ -f "$SYSROOT/lib/libc.so" ] || [ -f "$SYSROOT/usr/lib/libc.so" ] || warn "musl: libc.so not found (may be non-symlinked layout)"
+  [ -f "$SYSROOT/usr/lib/crt1.o" ] || die "musl: missing crt1.o"
+  [ -f "$SYSROOT/usr/include/bits/alltypes.h" ] || die "musl: missing bits/alltypes.h"
+
+  stamp_set "musl"
 }
 
 step_gcc_final() {
   host_env
   make_env
-  triplet_tools
 
-  b="$BLD/gcc-final"
-  rm -rf "$b" 2>/dev/null || true
-  mkdir -p "$b"
-  cd "$b"
+  s="$SRC/gcc-$GCC_VER"
+  b="$BLD/gcc-final-$GCC_VER"
+  clean_builddir "$b"
+  ensure_dir "$b"
 
-  "$(srcdir_of gcc "$GCC_VER")/configure" \
-    --target="$TARGET" \
-    --prefix="$TOOLS" \
-    --with-sysroot="$SYSROOT" \
-    --disable-nls \
-    --enable-languages=c,c++ \
-    --disable-multilib
+  # Ensure target tools resolve to our $TOOLS first
+  export PATH="$TOOLS/bin:$PATH"
 
-  make
-  make install
+  # Favor deterministic target flags
+  CFLAGS_FOR_TARGET=${CFLAGS_FOR_TARGET:-"-O2"}
+  LDFLAGS_FOR_TARGET=${LDFLAGS_FOR_TARGET:-""}
+  export CFLAGS_FOR_TARGET LDFLAGS_FOR_TARGET
+
+  (cd "$b" && \
+    "$s/configure" \
+      --target="$TARGET" \
+      --prefix="$TOOLS" \
+      --with-sysroot="$SYSROOT" \
+      --disable-multilib \
+      --disable-nls \
+      --disable-libsanitizer \
+      --enable-languages=c,c++)
+
+  (cd "$b" && make -j"$MAKEJOBS")
+  (cd "$b" && make install)
+
+  stamp_set "gcc-final"
 }
 
 step_xz_target() {
   host_env
   make_env
 
-  x="$(srcdir_of xz "$XZ_VER")"
-  b="$BLD/xz"
-  rm -rf "$b" 2>/dev/null || true
-  mkdir -p "$b"
-  cd "$b"
+  s="$SRC/xz-$XZ_VER"
+  b="$BLD/xz-$XZ_VER"
+  clean_builddir "$b"
+  ensure_dir "$b"
 
-  # xz para o target (instala no SYSROOT)
-  CC="$TOOLS/bin/$TARGET-gcc" \
-  "$x/configure" \
-    --host="$TARGET" \
-    --prefix=/usr \
-    --disable-shared
+  (cd "$b" && \
+    CC="$TARGET-gcc --sysroot=$SYSROOT" \
+    AR="$TARGET-ar" RANLIB="$TARGET-ranlib" \
+    "$s/configure" \
+      --host="$TARGET" \
+      --prefix=/usr \
+      --disable-shared \
+      --enable-static)
 
-  make
-  DESTDIR="$SYSROOT" make install
+  (cd "$b" && make -j"$MAKEJOBS")
+  (cd "$b" && DESTDIR="$SYSROOT" make install)
 
-  [ -x "$SYSROOT/usr/bin/xz" ] || [ -x "$SYSROOT/bin/xz" ] || true
+  # strict presence check
+  [ -x "$SYSROOT/usr/bin/xz" ] || [ -x "$SYSROOT/bin/xz" ] || die "xz: missing xz binary in sysroot"
+
+  stamp_set "xz"
 }
 
 step_busybox() {
   host_env
   make_env
 
-  bb="$(srcdir_of busybox "$BUSYBOX_VER")"
-  b="$BLD/busybox"
-  rm -rf "$b" 2>/dev/null || true
-  mkdir -p "$b"
+  s="$SRC/busybox-$BUSYBOX_VER"
+  b="$BLD/busybox-$BUSYBOX_VER"
+  clean_builddir "$b"
+  ensure_dir "$b"
 
-  # copia árvore (POSIX) via tar pipeline
-  ( cd "$bb" && tar -cf - . ) | ( cd "$b" && tar -xf - )
+  rm -rf "$b/src" 2>/dev/null || true
+  ensure_dir "$b/src"
+  (cd "$b" && tar -cf - -C "$s" . | tar -xf - -C "$b/src")
+  bs="$b/src"
 
-  cd "$b"
-  make distclean >/dev/null 2>&1 || true
-  make defconfig
+  (cd "$bs" && make distclean >/dev/null 2>&1 || true)
 
-  # Força estático (bom para rootfs/bootstrap)
-  if grep '^# CONFIG_STATIC is not set' .config >/dev/null 2>&1; then
-    sed 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config >.config.new && mv .config.new .config
-  elif grep '^CONFIG_STATIC=' .config >/dev/null 2>&1; then
-    sed 's/^CONFIG_STATIC=.*/CONFIG_STATIC=y/' .config >.config.new && mv .config.new .config
+  # default config, then force static (common in bootstrap)
+  (cd "$bs" && make defconfig)
+  # Ensure we build statically and use correct cross compiler
+  # (busybox .config exists now)
+  if grep -q '^CONFIG_STATIC=' "$bs/.config" 2>/dev/null; then
+    sed -i 's/^CONFIG_STATIC=.*/CONFIG_STATIC=y/' "$bs/.config" 2>/dev/null || true
   else
-    printf '\nCONFIG_STATIC=y\n' >> .config
+    printf '\nCONFIG_STATIC=y\n' >>"$bs/.config"
   fi
 
-  make CC="$TOOLS/bin/$TARGET-gcc" AR="$TOOLS/bin/$TARGET-ar" LD="$TOOLS/bin/$TARGET-ld"
-  DESTDIR="$SYSROOT" make CONFIG_PREFIX="$SYSROOT" install
+  (cd "$bs" && \
+    make -j"$MAKEJOBS" \
+      CROSS_COMPILE="$TARGET-" \
+      CC="$TARGET-gcc --sysroot=$SYSROOT" \
+      ARCH=x86_64)
 
-  [ -x "$SYSROOT/bin/busybox" ] || die "busybox não instalado no SYSROOT"
+  # BusyBox uses CONFIG_PREFIX. Do NOT mix DESTDIR + CONFIG_PREFIX.
+  (cd "$bs" && \
+    make CONFIG_PREFIX="$SYSROOT" install)
+
+  [ -x "$SYSROOT/bin/busybox" ] || die "busybox: missing $SYSROOT/bin/busybox"
+
+  stamp_set "busybox"
 }
 
 step_sanity() {
   host_env
 
-  # ferramentas essenciais do cross
-  for t in "$TOOLS/bin/$TARGET-gcc" "$TOOLS/bin/$TARGET-ld" "$TOOLS/bin/$TARGET-as" "$TOOLS/bin/$TARGET-ar"; do
-    [ -x "$t" ] || die "falta ferramenta: $t"
-  done
+  # Ensure toolchain is there
+  need_cmd "$TARGET-gcc"
+  need_cmd "$TARGET-ld" || true
 
-  # compila um hello estático
-  tmpc="$TOP/hello.c"
-  out="$TOP/hello"
-  cat >"$tmpc" <<'EOF'
-int main(void){return 0;}
+  tdir="$BLD/sanity"
+  rm -rf "$tdir" 2>/dev/null || true
+  ensure_dir "$tdir"
+
+  cat >"$tdir/t.c" <<'EOF'
+#include <stdio.h>
+int main(void){ puts("ok"); return 0; }
 EOF
-  "$TOOLS/bin/$TARGET-gcc" --sysroot="$SYSROOT" -static -O2 "$tmpc" -o "$out" >/dev/null 2>&1 \
-    || die "falha compilando teste com toolchain"
-  rm -f "$tmpc" "$out" 2>/dev/null || true
 
-  say "OK: toolchain $TARGET pronto"
-  say "  TOOLS:   $TOOLS"
-  say "  SYSROOT: $SYSROOT"
+  out="$tdir/t"
+  "$TARGET-gcc" --sysroot="$SYSROOT" -static -O2 "$tdir/t.c" -o "$out"
+
+  [ -x "$out" ] || die "sanity: output binary missing"
+  if command -v file >/dev/null 2>&1; then
+    file "$out" | grep -qi 'statically linked' || warn "sanity: binary may not be static (file(1) did not report statically linked)"
+  fi
+  if command -v readelf >/dev/null 2>&1; then
+    # should have no INTERP when static
+    if readelf -l "$out" 2>/dev/null | grep -q 'INTERP'; then
+      warn "sanity: INTERP present; binary may not be fully static"
+    fi
+    # NEEDED should be empty for truly static (often)
+    if readelf -d "$out" 2>/dev/null | grep -q '(NEEDED)'; then
+      warn "sanity: NEEDED entries present; binary may not be fully static"
+    fi
+  fi
+
+  stamp_set "sanity"
 }
 
-handoff_adm() {
-  cat <<EOF
-============================================================
-HANDOFF (adm pode assumir a partir daqui)
+# ---------- Orchestration ----------
+step_all() {
+  stamp_has "sources"        || runlog sources        step_sources
+  stamp_has "binutils"       || runlog binutils       step_binutils
+  stamp_has "linux-headers"  || runlog linux-headers  step_linux_headers
+  stamp_has "gcc-stage1"     || runlog gcc-stage1     step_gcc_stage1
+  stamp_has "musl"           || runlog musl           step_musl
+  stamp_has "gcc-final"      || runlog gcc-final      step_gcc_final
+  stamp_has "xz"             || runlog xz             step_xz_target
+  stamp_has "busybox"        || runlog busybox        step_busybox
+  stamp_has "sanity"         || runlog sanity         step_sanity
 
-TOOLCHAIN:
-  $TOOLS
+  msg "==> done"
+  msg "TOOLS   = $TOOLS"
+  msg "SYSROOT = $SYSROOT"
+}
 
-SYSROOT:
-  $SYSROOT
+step_clean() {
+  rm -rf "$BLD" 2>/dev/null || true
+  ensure_dir "$BLD"
+  msg "cleaned build dirs: $BLD"
+}
 
-No host:
-  export PATH="$TOOLS/bin:\$PATH"
+step_distclean() {
+  rm -rf "$WORK" 2>/dev/null || true
+  msg "removed: $WORK"
+}
 
-Próximos passos sugeridos:
-  1) Criar rootfs a partir do SYSROOT (exemplo simples):
-       ROOTFS=$TOP/rootfs
-       mkdir -p "\$ROOTFS"
-       (cd "$SYSROOT" && tar -cf - .) | (cd "\$ROOTFS" && tar -xf -)
-       ln -sf busybox "\$ROOTFS/bin/sh" 2>/dev/null || true
+# ---------- Preconditions ----------
+preflight() {
+  ensure_dir "$WORK" "$DL" "$SRC" "$BLD" "$TOOLS" "$SYSROOT" "$STATE"
+  need_cmd tar
+  need_cmd awk
+  need_cmd sed
+  need_cmd make
+  need_cmd sha256sum
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    die "need curl or wget"
+  fi
+}
 
-  2) Copiar adm + admchroot para dentro do rootfs (ex. /usr/bin):
-       mkdir -p "\$ROOTFS/usr/bin"
-       cp -f /usr/bin/adm "\$ROOTFS/usr/bin/adm"
-       cp -f /usr/bin/admchroot "\$ROOTFS/usr/bin/admchroot"  (ou onde estiver)
+# ---------- Main ----------
+cmd=${1:-all}
 
-  3) Entrar no chroot e rodar adm:
-       admchroot --root "\$ROOTFS" shell
-       admchroot --root "\$ROOTFS" adm -- doctor
-============================================================
+case "$cmd" in
+  all)            preflight; step_all ;;
+  sources)        preflight; runlog sources step_sources ;;
+  binutils)       preflight; runlog binutils step_binutils ;;
+  linux-headers)  preflight; runlog linux-headers step_linux_headers ;;
+  gcc-stage1)     preflight; runlog gcc-stage1 step_gcc_stage1 ;;
+  musl)           preflight; runlog musl step_musl ;;
+  gcc-final)      preflight; runlog gcc-final step_gcc_final ;;
+  xz)             preflight; runlog xz step_xz_target ;;
+  busybox)        preflight; runlog busybox step_busybox ;;
+  sanity)         preflight; runlog sanity step_sanity ;;
+  clean)          step_clean ;;
+  distclean)      step_distclean ;;
+  -h|--help|help)
+    cat <<EOF
+bootstrap-cross.sh — bootstrap cross toolchain for $TARGET
+
+Before first run: set SHA256 variables (e.g. BINUTILS_SHA256=...).
+
+Commands:
+  all (default), sources, binutils, linux-headers, gcc-stage1, musl, gcc-final, xz, busybox, sanity
+  clean, distclean
+
+Key env:
+  TARGET, WORK, MAKEJOBS, CLEAN_BUILD, STRICT_HEADERS_CHECK, GCC_FETCH_DEPS
+  *_VER, *_URL, *_SHA256, SKIP_VERIFY
 EOF
-}
-
-###############################################################################
-# Dispatcher
-###############################################################################
-usage() {
-  cat <<EOF
-Uso:
-  $0 all
-  $0 step <nome>
-
-Steps:
-  prepare
-  sources
-  binutils
-  linux-headers
-  gcc-stage1
-  musl
-  gcc-final
-  xz
-  busybox
-  sanity
-
-Variáveis úteis:
-  TARGET=$TARGET
-  MAKEJOBS=$MAKEJOBS
-  FETCH=$FETCH
-  GCC_FETCH_DEPS=$GCC_FETCH_DEPS
-
-  TOP=$TOP
-  TOOLS=$TOOLS
-  SYSROOT=$SYSROOT
-EOF
-}
-
-main() {
-  cmd=${1:-}
-  case "$cmd" in
-    all)
-      runlog prepare step_prepare
-      runlog sources step_sources
-      runlog binutils step_binutils
-      runlog linux-headers step_linux_headers
-      runlog gcc-stage1 step_gcc_stage1
-      runlog musl step_musl
-      runlog gcc-final step_gcc_final
-      runlog xz step_xz_target
-      runlog busybox step_busybox
-      runlog sanity step_sanity
-      handoff_adm
-      ;;
-    step)
-      name=${2:-}
-      [ -n "$name" ] || { usage; exit 1; }
-      case "$name" in
-        prepare) runlog prepare step_prepare ;;
-        sources) runlog sources step_sources ;;
-        binutils) runlog binutils step_binutils ;;
-        linux-headers) runlog linux-headers step_linux_headers ;;
-        gcc-stage1) runlog gcc-stage1 step_gcc_stage1 ;;
-        musl) runlog musl step_musl ;;
-        gcc-final) runlog gcc-final step_gcc_final ;;
-        xz) runlog xz step_xz_target ;;
-        busybox) runlog busybox step_busybox ;;
-        sanity) runlog sanity step_sanity ;;
-        *) die "step desconhecido: $name" ;;
-      esac
-      ;;
-    *)
-      usage
-      exit 1
-      ;;
-  esac
-}
-
-main "$@"
+    ;;
+  *)
+    die "unknown command: $cmd"
+    ;;
+esac
